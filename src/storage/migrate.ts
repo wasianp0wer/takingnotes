@@ -54,11 +54,13 @@ export async function migrateLegacyNotebooks(
   }
 
   let parsed: unknown;
+  let sourceReadable = true;
   try {
     const raw = storage.getItem(LEGACY_STORAGE_KEY);
     parsed = raw === null ? [] : JSON.parse(raw);
   } catch {
     parsed = [];
+    sourceReadable = false;
   }
 
   const notebooks = Array.isArray(parsed) ? parsed : [];
@@ -100,6 +102,11 @@ export async function migrateLegacyNotebooks(
     imported += 1;
   }
 
-  await setSetting(MIGRATION_SETTING_KEY, Date.now());
+  // Only mark the migration done when the source was actually readable. An
+  // unreadable source must stay retryable - otherwise a transient read failure
+  // silently strands the user's notebooks forever.
+  if (sourceReadable) {
+    await setSetting(MIGRATION_SETTING_KEY, Date.now());
+  }
   return { imported, pages, skipped: false };
 }

@@ -120,6 +120,17 @@ describe('migrateLegacyNotebooks', () => {
     expect(result.imported).toBe(0);
   });
 
+  it('stays retryable when the source is unreadable', async () => {
+    const broken = makeStorage({ [LEGACY_STORAGE_KEY]: 'not json' });
+    await migrateLegacyNotebooks(broken);
+    expect(await getSetting(MIGRATION_SETTING_KEY, 0)).toBe(0);
+
+    const fixed = makeStorage({ [LEGACY_STORAGE_KEY]: JSON.stringify([LEGACY_NOTEBOOK]) });
+    const second = await migrateLegacyNotebooks(fixed);
+    expect(second.skipped).toBe(false);
+    expect(second.imported).toBe(1);
+  });
+
   it('skips notebooks that are not objects', async () => {
     const storage = makeStorage({
       [LEGACY_STORAGE_KEY]: JSON.stringify([null, 'nope', LEGACY_NOTEBOOK]),
