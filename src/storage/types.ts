@@ -48,7 +48,8 @@ export interface PageRecord {
   strokes: PageStroke[];
   pointCount: number;
   capturedAt: number;
-  render: Blob | null;
+  render: ArrayBuffer | null;
+  renderType: string | null;
   renderW: number | null;
   renderH: number | null;
   transcript: TranscriptRecord | null;
