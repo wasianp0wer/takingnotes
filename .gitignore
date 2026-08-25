@@ -5,6 +5,11 @@ node_modules/
 dist/
 test-results/
 
+# Agent worktrees and scratch. These hold full copies of src/, so without
+# this every tool that walks the tree (eslint, tsc, search) sees each file
+# twice - lint reported exactly double until this was added.
+.claude/
+
 # APK files
 *.apk
 
