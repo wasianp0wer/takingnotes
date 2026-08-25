@@ -1283,9 +1283,13 @@ git commit -m "feat(storage): migrate legacy localStorage notebooks into Indexed
 ## Phase exit criteria
 
 - [ ] `npm test` passes with all six tasks' tests green.
-- [ ] `npm run lint` is clean.
+- [ ] `npm run lint` introduces **no new** problems. AMENDED: the baseline is not clean —
+      53 pre-existing problems (1 error at `src/components/CanvasEngine.tsx:370`, 52 warnings),
+      all in studio files this plan forbids touching. The original "is clean" criterion was
+      unreachable under this plan's own Global Constraints.
 - [ ] `npm run build` succeeds and the studio app is behaviourally unchanged.
-- [ ] A note with pages and a `Blob` render survives a full database round-trip.
+- [ ] A note with pages and a rendered image survives a full database round-trip.
+      AMENDED per spec D7: renders are stored as `ArrayBuffer` + MIME type, not `Blob`.
 - [ ] Legacy `localStorage` notebooks import without loss, idempotently, and the
       original key is left in place.
 
