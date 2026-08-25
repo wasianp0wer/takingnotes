@@ -9,7 +9,12 @@ describe('openNotesDb', () => {
   it('creates the expected object stores', async () => {
     const db = await openNotesDb();
     expect(db.version).toBe(DB_VERSION);
-    expect([...db.objectStoreNames].sort()).toEqual(['notes', 'pages', 'settings']);
+    expect([...db.objectStoreNames].sort()).toEqual([
+      'notes',
+      'pageRenders',
+      'pages',
+      'settings',
+    ]);
   });
 
   it('creates the by-note index on pages', async () => {

@@ -7,7 +7,7 @@ import {
 } from '@/storage/migrate';
 import { listNotes } from '@/storage/notes';
 import { listPages } from '@/storage/pages';
-import { getSetting } from '@/storage/settings';
+import { getSetting, setSetting } from '@/storage/settings';
 import { resetDatabase } from '@/test/resetDb';
 
 const LEGACY_NOTEBOOK = {
@@ -62,7 +62,7 @@ describe('migrateLegacyNotebooks', () => {
     const storage = makeStorage({ [LEGACY_STORAGE_KEY]: JSON.stringify([LEGACY_NOTEBOOK]) });
 
     const result = await migrateLegacyNotebooks(storage);
-    expect(result).toEqual({ imported: 1, pages: 2, skipped: false });
+    expect(result).toEqual({ imported: 1, pages: 2, failed: 0, skipped: false });
 
     const notes = await listNotes();
     expect(notes).toHaveLength(1);
@@ -111,7 +111,9 @@ describe('migrateLegacyNotebooks', () => {
 
   it('handles a missing key', async () => {
     const result = await migrateLegacyNotebooks(makeStorage());
-    expect(result).toEqual({ imported: 0, pages: 0, skipped: false });
+    expect(result).toEqual({ imported: 0, pages: 0, failed: 0, skipped: false });
+    // Nothing to migrate is not a failure - the flag must still be set.
+    expect(await getSetting(MIGRATION_SETTING_KEY, 0)).toBeGreaterThan(0);
   });
 
   it('handles malformed JSON without throwing', async () => {
@@ -146,5 +148,76 @@ describe('migrateLegacyNotebooks', () => {
     await migrateLegacyNotebooks(storage);
     const [note] = await listNotes();
     expect(note.title).toBe('Imported notebook');
+  });
+
+  it('stays retryable when the payload is valid JSON of the wrong shape', async () => {
+    const bad = makeStorage({ [LEGACY_STORAGE_KEY]: JSON.stringify({ notebooks: [] }) });
+    await migrateLegacyNotebooks(bad);
+    expect(await getSetting(MIGRATION_SETTING_KEY, 0)).toBe(0);
+
+    const fixed = makeStorage({ [LEGACY_STORAGE_KEY]: JSON.stringify([LEGACY_NOTEBOOK]) });
+    const second = await migrateLegacyNotebooks(fixed);
+    expect(second.skipped).toBe(false);
+    expect(second.imported).toBe(1);
+  });
+
+  it('rejects an array-shaped notebook entry instead of importing it as a junk note', async () => {
+    const storage = makeStorage({
+      [LEGACY_STORAGE_KEY]: JSON.stringify([[], LEGACY_NOTEBOOK]),
+    });
+    const result = await migrateLegacyNotebooks(storage);
+    expect(result.imported).toBe(1);
+
+    const notes = await listNotes();
+    expect(notes.some((note) => note.title === 'Imported notebook')).toBe(false);
+  });
+
+  it('imports a notebook with zero pages when pages is an object rather than an array', async () => {
+    const storage = makeStorage({
+      [LEGACY_STORAGE_KEY]: JSON.stringify([{ ...LEGACY_NOTEBOOK, pages: {} }]),
+    });
+    const result = await migrateLegacyNotebooks(storage);
+    expect(result.imported).toBe(1);
+    expect(result.pages).toBe(0);
+
+    const [note] = await listNotes();
+    const pages = await listPages(note.id);
+    expect(pages).toHaveLength(0);
+  });
+
+  it('does not duplicate notes when retried after the migration flag is reset', async () => {
+    const storage = makeStorage({ [LEGACY_STORAGE_KEY]: JSON.stringify([LEGACY_NOTEBOOK]) });
+    await migrateLegacyNotebooks(storage);
+
+    await setSetting(MIGRATION_SETTING_KEY, 0);
+    const second = await migrateLegacyNotebooks(storage);
+
+    expect(second.imported).toBe(0);
+    expect(await listNotes()).toHaveLength(1);
+  });
+
+  it('preserves device and page metadata', async () => {
+    const storage = makeStorage({ [LEGACY_STORAGE_KEY]: JSON.stringify([LEGACY_NOTEBOOK]) });
+    await migrateLegacyNotebooks(storage);
+
+    const [note] = await listNotes();
+    expect(note.pageWidth).toBe(1409);
+    expect(note.pageHeight).toBe(1869);
+    expect(note.deviceName).toBe('Huion Note');
+    expect(note.deviceType).toBe('huion');
+    expect(note.legacySourceId).toBe('nb-1');
+
+    const pages = await listPages(note.id);
+    expect(pages.map((page) => page.capturedAt)).toEqual([1700000000000, 1700000001000]);
+  });
+
+  it('keeps wacom as the device type instead of hardcoding huion', async () => {
+    const storage = makeStorage({
+      [LEGACY_STORAGE_KEY]: JSON.stringify([{ ...LEGACY_NOTEBOOK, deviceType: 'wacom' }]),
+    });
+    await migrateLegacyNotebooks(storage);
+
+    const [note] = await listNotes();
+    expect(note.deviceType).toBe('wacom');
   });
 });

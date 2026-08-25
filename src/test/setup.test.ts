@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 describe('test environment', () => {
   it('provides a DOM global from happy-dom', () => {
-    expect(typeof document).toBe('object');
+    // `typeof null` is also 'object', so exercise the DOM instead of typeof.
+    expect(document.createElement('div').tagName).toBe('DIV');
   });
 
   it('provides an indexedDB global from fake-indexeddb', () => {

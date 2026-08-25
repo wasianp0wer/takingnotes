@@ -8,6 +8,8 @@ export interface CreatePageInput {
   devicePageNum: number | null;
   source: PageSource;
   strokes: PageStroke[];
+  /** Defaults to now; the legacy migration passes the recorded timestamp. */
+  capturedAt?: number;
 }
 
 export function countPoints(strokes: PageStroke[]): number {
@@ -23,11 +25,8 @@ export async function createPage(input: CreatePageInput): Promise<PageRecord> {
     source: input.source,
     strokes: input.strokes,
     pointCount: countPoints(input.strokes),
-    capturedAt: Date.now(),
+    capturedAt: input.capturedAt ?? Date.now(),
     render: null,
-    renderType: null,
-    renderW: null,
-    renderH: null,
     transcript: null,
   };
 
@@ -41,34 +40,74 @@ export async function getPage(id: string): Promise<PageRecord | undefined> {
   return db.get('pages', id);
 }
 
+/** Returns page metadata only - image bytes stay in the `pageRenders` store. */
 export async function listPages(noteId: string): Promise<PageRecord[]> {
   const db = await openNotesDb();
   const pages = await db.getAllFromIndex('pages', 'by-note', IDBKeyRange.only(noteId));
   return pages.sort((a, b) => a.pageIndex - b.pageIndex);
 }
 
+/**
+ * Read-modify-write inside a single transaction. Two implicit transactions
+ * (a `get` then a `put`) would let a concurrent update land in between and be
+ * silently overwritten.
+ */
 async function patchPage(
   id: string,
   patch: Partial<Omit<PageRecord, 'id'>>,
 ): Promise<PageRecord> {
   const db = await openNotesDb();
-  const existing = await db.get('pages', id);
+  const tx = db.transaction('pages', 'readwrite');
+  const existing = await tx.store.get(id);
   if (!existing) {
+    tx.abort();
+    await tx.done.catch(() => undefined);
     throw new Error(`Page not found: ${id}`);
   }
   const merged: PageRecord = { ...existing, ...patch, id: existing.id };
-  await db.put('pages', merged);
+  await tx.store.put(merged);
+  await tx.done;
   return merged;
 }
 
-export function setPageRender(
+/**
+ * Stores a rendered page image. Takes a `Blob` so callers never have to reason
+ * about byte offsets - passing `someUint8Array.buffer` would silently store the
+ * whole backing buffer rather than the intended view. `ArrayBuffer` is the
+ * on-disk shape only (spec D7) and never crosses this boundary.
+ */
+export async function setPageRender(
   id: string,
-  render: ArrayBuffer,
-  type: string,
+  blob: Blob,
   width: number,
   height: number,
 ): Promise<PageRecord> {
-  return patchPage(id, { render, renderType: type, renderW: width, renderH: height });
+  const data = await blob.arrayBuffer();
+  const type = blob.type;
+
+  const db = await openNotesDb();
+  const tx = db.transaction(['pages', 'pageRenders'], 'readwrite');
+  const pages = tx.objectStore('pages');
+  const existing = await pages.get(id);
+  if (!existing) {
+    tx.abort();
+    await tx.done.catch(() => undefined);
+    throw new Error(`Page not found: ${id}`);
+  }
+
+  const merged: PageRecord = { ...existing, render: { type, width, height }, id: existing.id };
+  await tx.objectStore('pageRenders').put({ data, type, width, height }, id);
+  await pages.put(merged);
+  await tx.done;
+  return merged;
+}
+
+/** Reconstructs the render as a `Blob`; `null` when the page has no render. */
+export async function getPageRender(id: string): Promise<Blob | null> {
+  const db = await openNotesDb();
+  const record = await db.get('pageRenders', id);
+  if (!record) return null;
+  return new Blob([record.data], { type: record.type });
 }
 
 export function setPageTranscript(

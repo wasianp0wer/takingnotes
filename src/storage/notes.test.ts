@@ -17,7 +17,24 @@ describe('notes repository', () => {
     expect(note.endedAt).toBeNull();
     expect(note.summary).toBeNull();
     expect(note.legacy).toBe(false);
+    expect(note.legacySourceId).toBeNull();
+    expect(note.deviceName).toBeNull();
+    expect(note.pageWidth).toBeNull();
+    expect(note.pageHeight).toBeNull();
     expect(note.startedAt).toBeGreaterThan(0);
+  });
+
+  it('persists both writes when two note updates race', async () => {
+    const created = await createNote({ title: 'Race', deviceId: 'huion:abc', pageBaseline: 0 });
+
+    await Promise.all([
+      updateNote(created.id, { summary: 'a summary' }),
+      updateNote(created.id, { status: 'complete' }),
+    ]);
+
+    const loaded = await getNote(created.id);
+    expect(loaded?.summary).toBe('a summary');
+    expect(loaded?.status).toBe('complete');
   });
 
   it('round-trips a note through the database', async () => {
