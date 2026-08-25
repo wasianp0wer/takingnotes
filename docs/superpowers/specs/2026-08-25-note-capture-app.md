@@ -27,6 +27,7 @@ The target workflow:
 | D4 | **Huion only.** Wacom support is deferred; USB is out of scope. | Focus. USB cannot download stored pages at all (see C3). |
 | D5 | **A session is a note, 1:1.** | Avoids a second entity with no distinct lifecycle. |
 | D6 | **Use the `idb` package** (~2 KB) rather than raw IndexedDB. | Raw IndexedDB transactions auto-close across non-IDB await points — a subtle, high-frequency bug class. Reversible if it becomes a burden. |
+| D7 | **Rendered page images are stored as `ArrayBuffer` + a `renderType` MIME string, not as `Blob`.** | Established empirically in Phase 1A Task 4: `fake-indexeddb` does not structured-clone `Blob` (it returns `{type}` with the bytes and prototype lost), so a `Blob` field leaves the render path permanently untestable. Real browsers do support `Blob` in IndexedDB, but Safari has a documented history of bugs there, and the runtime cost of `ArrayBuffer` is two lines — `await blob.arrayBuffer()` on write, `new Blob([buf], {type})` on read. Phase 2's renderer and Phase 4's viewer must both use this shape. |
 
 ## Findings from hardware probing
 

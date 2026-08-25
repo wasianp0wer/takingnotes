@@ -586,6 +586,19 @@ The Blob round-trip test in this task is deliberately load-bearing: if
 `fake-indexeddb` cannot structured-clone a `Blob`, we need to know now, not in
 Phase 3 when rendered images arrive. See Step 6 for the fallback.
 
+> **AMENDED 2026-08-25 — the fallback was triggered.** `fake-indexeddb` does
+> **not** structured-clone `Blob`; it returns `{type: 'image/png'}` with the
+> bytes and prototype lost. Per spec decision **D7**, this task now stores
+> `render` as an `ArrayBuffer` alongside a `renderType` MIME string:
+>
+> - `PageRecord.render: ArrayBuffer | null` and a new `PageRecord.renderType: string | null`
+>   — this edits `src/storage/types.ts`, which Task 2 created. That edit is
+>   explicitly authorised for this task and only for these two fields.
+> - `setPageRender(id, render: ArrayBuffer, type: string, width: number, height: number)`
+> - the round-trip test asserts on bytes and `renderType` rather than `instanceof Blob`
+>
+> Phase 2's page renderer and Phase 4's note viewer both consume this shape.
+
 **Files:**
 - Create: `src/storage/pages.ts`
 - Create: `src/storage/pages.test.ts`
