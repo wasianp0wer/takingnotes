@@ -52,13 +52,24 @@ export class BleHuionTransport implements HuionTransport {
   // ('Scanning...', 'Connecting GATT...') out of the driver with it.
   private readonly setStatus: LogFn;
 
+  // Device identity is cached at open() and deliberately survives close().
+  // `notebookUuid` (built from deviceId) is the storage key for everything
+  // downloaded from this device, and callers legitimately read it *after* the
+  // link has dropped - the session engine finalises a session once the device
+  // may already be gone, and the driver's own `handleDisconnect` reports
+  // `deviceName` from inside the disconnect callback. Nulling `this.device`
+  // in close() without this cache would regress both to 'Unknown'/'unknown'
+  // and silently key notes as `huion:unknown`.
+  private cachedName = 'Unknown';
+  private cachedId = 'unknown';
+
   constructor(log: LogFn = () => {}, setStatus: LogFn = () => {}) {
     this.log = log;
     this.setStatus = setStatus;
   }
 
-  get deviceName(): string { return this.device?.name ?? 'Unknown'; }
-  get deviceId(): string { return this.device?.id || this.device?.name || 'unknown'; }
+  get deviceName(): string { return this.device?.name ?? this.cachedName; }
+  get deviceId(): string { return this.device?.id || this.device?.name || this.cachedId; }
 
   onNotify(handler: (data: Uint8Array) => void): void { this.notifyHandler = handler; }
   onDisconnect(handler: () => void): void { this.disconnectHandler = handler; }
@@ -75,6 +86,9 @@ export class BleHuionTransport implements HuionTransport {
     } catch (e: any) {
       throw new Error(`BLE device request failed: ${e?.message ?? e}. Is the device on and in range? Did you pick it in the Chrome popup?`);
     }
+
+    this.cachedName = this.device.name ?? 'Unknown';
+    this.cachedId = this.device.id || this.device.name || 'unknown';
 
     this.log(`[2/7] Device selected: ${this.device.name ?? 'unnamed'} (${this.device.id})`);
 

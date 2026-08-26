@@ -3,7 +3,8 @@ import type { HuionTransport } from '@/utils/huionTransport';
 /**
  * Scriptable stand-in for a Huion device. Tests register responders keyed by
  * command byte; when the driver writes a frame, the matching responder's
- * frames are delivered back through the notify handler on a microtask, which
+ * frames are delivered back through the notify handler as a macrotask (see
+ * `write()` below for why it has to be a macrotask, not a microtask), which
  * is close enough to the real timing for the driver's state machine.
  */
 export class FakeHuionTransport implements HuionTransport {

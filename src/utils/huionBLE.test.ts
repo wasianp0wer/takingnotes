@@ -78,6 +78,42 @@ describe('getStoredPageCount', () => {
     await expect(device.getStoredPageCount()).rejects.toThrow();
   });
 
+  it('rejects a second concurrent query instead of orphaning the first', async () => {
+    // There is exactly one resolver slot, so a second call used to overwrite
+    // the first, which then never settled short of its own 5s timeout - and
+    // the first call's timer would later null out the second's resolver.
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    // No CURRENT_PAGE responder configured, so the first query stays pending.
+    const first = device.getStoredPageCount();
+    await expect(device.getStoredPageCount()).rejects.toThrow(/already in progress/i);
+
+    transport.emit(withChecksum([0xcd, CMD.CURRENT_PAGE, 0x08, 2, 0, 0, 0]));
+    await expect(first).resolves.toBe(2);
+  });
+
+  it('fails a pending query as soon as the link drops', async () => {
+    // Without handleDisconnect clearing the page-count slot, this would sit
+    // out its whole 5s timeout after the link had provably gone away.
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    const pending = device.getStoredPageCount();
+    transport.dropConnection();
+
+    await expect(pending).rejects.toThrow(/disconnect/i);
+    // The slot is free again, not left holding a dead resolver.
+    await transport.open();
+    await device.connect();
+    transport.on(CMD.CURRENT_PAGE, () => [
+      withChecksum([0xcd, CMD.CURRENT_PAGE, 0x08, 5, 0, 0, 0]),
+    ]);
+    await expect(device.getStoredPageCount()).resolves.toBe(5);
+  });
+
   it('does not leave a stale resolver that can swallow a download\'s own CURRENT_PAGE reply', async () => {
     // Reproduces the bug the timeout-and-resolver-leak fix addresses: a
     // failed write must not leave `pageCountResolve` set, because a later,
@@ -376,17 +412,137 @@ describe('downloadPage', () => {
   });
 });
 
+describe('download resilience', () => {
+  it('is not aborted by a throwing onNextPage handler mid-download', async () => {
+    // Phase 2 downloads a page on every page turn, so a page-turn callback
+    // and an in-flight download routinely coexist. onNextPage is consumer
+    // code invoked inside handleNotification's blanket try, so a throw used
+    // to reach failInFlightDownload and silently settle the download with
+    // partial (here: empty) data.
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    device.onNextPage = () => { throw new Error('consumer blew up'); };
+    await device.connect();
+
+    const promise = device.downloadPage(3);
+    // Page 3's ack: 2 packages expected, so the pull stays open.
+    transport.emit(withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, 2, 0, 0, 0]));
+    // The unsolicited page-turn arrives mid-download and its handler throws.
+    transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
+    // The download's own packages still arrive and complete it normally.
+    transport.emit(withChecksum([0xcd, CMD.PAGE_PACKAGE, 0x0c, 1, 0, 0xe8, 0x03, 0xe8, 0x03, 0x00, 0x30]));
+    transport.emit(withChecksum([0xcd, CMD.PAGE_PACKAGE, 0x0c, 2, 0, 0x88, 0x13, 0x88, 0x13, 0x00, 0x30]));
+
+    const page = await promise;
+    expect(page.pageNum).toBe(3);
+    expect(page.strokes.length).toBeGreaterThan(0);
+  });
+
+  it('handles a ROM_INFO reply that lands before its own write settles', async () => {
+    // downloadPages() used to assign pageResolve only AFTER awaiting the
+    // ROM_INFO write, so a reply arriving inside that window was dropped by
+    // the `pageResolve` guard and the download stalled to its 15s timeout.
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    const originalWrite = transport.write.bind(transport);
+    transport.write = async (data: Uint8Array) => {
+      await originalWrite(data);
+      // A "fast radio": the reply is delivered before write() settles.
+      if (data[1] === CMD.ROM_INFO) {
+        transport.emit(withChecksum([0xcd, CMD.ROM_INFO, 0x08, 0, 0, 0, 0]));
+      }
+      if (data[1] === CMD.CURRENT_PAGE) {
+        transport.emit(withChecksum([0xcd, CMD.CURRENT_PAGE, 0x08, 0, 0, 0, 0]));
+      }
+    };
+
+    await expect(device.downloadPages()).resolves.toEqual([]);
+  });
+
+  it('does not wedge downloadMode when the link drops during the ROM_INFO write', async () => {
+    // Same window as above, seen from the other side: with no resolver set,
+    // handleDisconnect took neither of its branches and downloadMode was left
+    // stuck at 'bulk' with nothing left to release it.
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    const originalWrite = transport.write.bind(transport);
+    transport.write = async (data: Uint8Array) => {
+      await originalWrite(data);
+      if (data[1] === CMD.ROM_INFO) transport.dropConnection();
+    };
+
+    await expect(device.downloadPages()).resolves.toEqual([]);
+
+    // The mutex must be free: a fresh pull after reconnecting must not be
+    // rejected as "a bulk download is already in progress".
+    transport.write = originalWrite;
+    await transport.open();
+    await device.connect();
+    transport.on(CMD.REQUEST_PAGE, () => [
+      withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, 0, 0, 0, 0]),
+    ]);
+    await expect(device.downloadPage(0)).resolves.toMatchObject({ pageNum: 0 });
+  });
+
+  it('settles an in-flight pull when disconnect() is called', async () => {
+    // We initiated the disconnect ourselves, so `gattserverdisconnected`
+    // never fires and handleDisconnect never runs - disconnect() has to
+    // settle the download itself or it hangs to its own 15s timeout.
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    // No REQUEST_PAGE responder, so the pull stays open indefinitely.
+    const pending = device.downloadPage(2);
+    await device.disconnect();
+
+    await expect(pending).resolves.toMatchObject({ pageNum: 2, strokes: [] });
+  });
+
+  it('reports an unknown total and restores the prior status for a single-page pull', async () => {
+    // Two bugs in one flow: the status read "Downloading page 5/0" because
+    // totalPages is only known to a bulk walk, and the single-page exit
+    // hardcoded 'Connected', which during a live session claimed streaming
+    // had stopped while pen data was still arriving.
+    const transport = connectedFake();
+    transport.on(CMD.REQUEST_PAGE, () => [
+      withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, 0, 0, 0, 0]),
+    ]);
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+    await device.startStreaming();
+
+    const statuses: string[] = [];
+    device.onStatus = (status) => statuses.push(status);
+    await device.downloadPage(4);
+
+    expect(statuses).toContain('Downloading page 5');
+    expect(statuses).not.toContain('Downloading page 5/0');
+    expect(statuses[statuses.length - 1]).toBe('Live streaming');
+  });
+});
+
 describe('destructive commands', () => {
-  it('sends DELETE_PAGE with the page number', async () => {
+  // The 0x8B wire format is APK-derived guesswork that has never been seen on
+  // a real radio, so this test IS the spec for it: assert the full little-endian
+  // page number, not just the low byte, and use a page number above 255 so a
+  // single-byte implementation cannot pass by accident.
+  it('sends DELETE_PAGE with the page number little-endian across both bytes', async () => {
     const transport = connectedFake();
     const device = new HuionNoteBLE(transport);
     await device.connect();
 
     await device.deletePage(4);
+    await device.deletePage(300); // 0x012c
 
-    const frame = transport.written.find((sent) => sent[1] === CMD.DELETE_PAGE);
-    expect(frame).toBeDefined();
-    expect(frame![3]).toBe(4);
+    const frames = transport.written.filter((sent) => sent[1] === CMD.DELETE_PAGE);
+    expect(frames).toHaveLength(2);
+    expect([frames[0][3], frames[0][4]]).toEqual([4, 0]);
+    expect([frames[1][3], frames[1][4]]).toEqual([0x2c, 0x01]);
   });
 
   it('sends CLEAR_CACHE', async () => {

@@ -50,6 +50,10 @@ const MAX_PACKAGE_RETRIES = 3;
 const PAGE_DOWNLOAD_TIMEOUT_MS = 15_000;
 /** Huion app waits about 1s for the page stream to go idle before gap recovery */
 const PACKAGE_RETRY_IDLE_MS = 1_000;
+/** Timeout for a standalone CURRENT_PAGE (0x85) page-count query (ms) */
+const PAGE_COUNT_TIMEOUT_MS = 5_000;
+/** Handshake completion timeout (ms) */
+const HANDSHAKE_TIMEOUT_MS = 10_000;
 /** APK-derived offline pressure threshold (percent) */
 const FILTER_PRESS_PERCENT = 7;
 /** APK PointFilter distance threshold in logical page units */
@@ -98,6 +102,8 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   private pageResolve: ((pages: HuionPage[]) => void) | null = null;
   private singlePageResolve: ((page: HuionPage) => void) | null = null;
   private pageCountResolve: ((count: number) => void) | null = null;
+  private pageCountReject: ((err: Error) => void) | null = null;
+  private pageCountTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Explicit mutual-exclusion state for the two download paths. Neither
    * `downloadPage()` nor `downloadPages()` may start while the other (or
@@ -115,6 +121,14 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   private romTotal = 0;
   private downloadTimer: ReturnType<typeof setTimeout> | null = null;
   private pageRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Status line as it stood before the in-flight single-page pull started, so
+   * the pull can put it back instead of hardcoding 'Connected' - a Phase 2
+   * page-turn download happens *during* a live session, and hardcoding would
+   * claim streaming had stopped while pen data was still arriving.
+   */
+  private statusBeforeDownload: string | null = null;
+  private currentStatus = 'Disconnected';
 
   // Callbacks
   onPen: PenCallback | null = null;
@@ -123,8 +137,26 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   onPages: PageCallback | null = null;
   onNextPage: (() => void) | null = null;
 
-  private log(msg: string) { this.onLog?.(msg); }
-  private setStatus(s: string) { this.onStatus?.(s); }
+  // Every consumer callback below is invoked defensively. `log()` and
+  // `setStatus()` are called from all over `handleCommand`, which runs inside
+  // handleNotification's blanket try - a throwing consumer there would reach
+  // `failInFlightDownload` and silently settle an unrelated in-flight
+  // download with partial data. The driver must be unbreakable by consumer
+  // code it does not control (TabletPanel/ProbeApp assign these slots raw).
+  private log(msg: string) {
+    // Deliberately no logging in the catch: the thing that threw *is* the
+    // logger, so re-entering it would recurse.
+    try { this.onLog?.(msg); } catch { /* consumer's problem, not the driver's */ }
+  }
+
+  private setStatus(s: string) {
+    this.currentStatus = s;
+    try {
+      this.onStatus?.(s);
+    } catch (err) {
+      this.log(`onStatus handler threw: ${err instanceof Error ? err.message : err}`);
+    }
+  }
 
   get isConnected() { return this.authenticated; }
   get isStreaming() { return this.streaming; }
@@ -137,6 +169,32 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   // Connection completion promise
   private connectResolve: (() => void) | null = null;
   private connectReject: ((err: Error) => void) | null = null;
+  private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Releases the handshake slot and, crucially, its 10s timer. Every path
+   * that stops caring about the handshake promise goes through here so a
+   * successful connect doesn't leave a stray timer pending for 10s (which is
+   * also where the "pending timers" noise in the test suite came from).
+   */
+  private settleHandshake() {
+    if (this.handshakeTimer) {
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = null;
+    }
+    this.connectResolve = null;
+    this.connectReject = null;
+  }
+
+  /** Releases the page-count query slot and its timer. */
+  private settlePageCount() {
+    if (this.pageCountTimer) {
+      clearTimeout(this.pageCountTimer);
+      this.pageCountTimer = null;
+    }
+    this.pageCountResolve = null;
+    this.pageCountReject = null;
+  }
 
   async connect(): Promise<void> {
     this.transport.onNotify((bytes) => {
@@ -154,9 +212,17 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     this.setStatus('Disconnected');
     this.log('Device disconnected');
     if (this.connectReject) {
-      this.connectReject(new Error('Device disconnected during handshake'));
-      this.connectResolve = null;
-      this.connectReject = null;
+      const rejectConnect = this.connectReject;
+      this.settleHandshake();
+      rejectConnect(new Error('Device disconnected during handshake'));
+    }
+    if (this.pageCountReject) {
+      // Without this a pending getStoredPageCount() would sit out its full
+      // 5s timeout after the link has already provably gone away.
+      const rejectPageCount = this.pageCountReject;
+      this.settlePageCount();
+      this.log('Page count query interrupted by disconnect');
+      rejectPageCount(new Error('Device disconnected during page count query'));
     }
     if (this.singlePageResolve) {
       this.log('Single-page download interrupted by disconnect');
@@ -193,14 +259,17 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     await new Promise<void>((resolve, reject) => {
       this.connectResolve = resolve;
       this.connectReject = reject;
-      setTimeout(() => {
-        if (this.connectResolve) {
-          this.connectResolve = null;
-          this.connectReject = null;
+      this.handshakeTimer = setTimeout(() => {
+        this.handshakeTimer = null;
+        if (this.connectResolve === resolve) {
+          this.settleHandshake();
           reject(new Error('Handshake timeout (10s). Device found but auth did not complete. Check protocol log for details.'));
         }
-      }, 10000);
-      this.write(makeFrame(CMD.VERIFY_CONNECT)).catch(reject);
+      }, HANDSHAKE_TIMEOUT_MS);
+      this.write(makeFrame(CMD.VERIFY_CONNECT)).catch((err) => {
+        if (this.connectResolve === resolve) this.settleHandshake();
+        reject(err);
+      });
     });
 
     this.log('[7/7] Handshake complete, connected!');
@@ -210,6 +279,11 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     if (this.streaming) await this.stopStreaming();
     this.clearPageRetryTimer();
     await this.transport.close();
+    // `gattserverdisconnected` does NOT fire for a disconnect we initiated
+    // ourselves while GATT is already down, so handleDisconnect() may never
+    // run - settle any in-flight download here or it hangs to its own
+    // (up-to-15s-per-page) timeout with downloadMode still held.
+    this.failInFlightDownload(new Error('Disconnected'));
     this.authenticated = false;
     this.streaming = false;
     this.setStatus('Disconnected');
@@ -255,23 +329,26 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     this.pagePackages.clear();
     this.expectedPackageCount = 0;
     this.clearPageRetryTimer();
-    try {
-      await this.write(makeFrame(CMD.ROM_INFO));
-    } catch (err) {
-      // Nothing is in flight yet (pageResolve isn't set until below), so
-      // this just releases the mutex - same effect as the manual version
-      // this replaced, routed through the shared helper for consistency.
-      this.failInFlightDownload(err);
-      throw err;
-    }
+    this.downloadedPages = [];
 
-    return new Promise((resolve) => {
+    // Mirrors downloadPage()'s structure deliberately: the resolver and the
+    // timer are installed *inside* the executor, before the ROM_INFO write is
+    // issued. Assigning pageResolve only after awaiting the write left a
+    // window in which downloadMode was already 'bulk' with no pending
+    // promise, so (a) a disconnect found neither resolver and left the mutex
+    // stuck at 'bulk' forever, (b) failInFlightDownload found no resolver and
+    // released a mutex this starting download still owned, admitting a
+    // concurrent downloadPage() that would then share currentDownloadPage and
+    // pagePackages, and (c) a ROM_INFO reply landing before the write settled
+    // was dropped by the `pageResolve` guard, stalling to the 15s timeout.
+    // The write's failure is routed through .catch below, so the method still
+    // rejects with the same error it did before.
+    return new Promise<HuionPage[]>((resolve, reject) => {
       this.pageResolve = resolve;
-      this.downloadedPages = [];
       // Timeout scales with expected work: base 15s + 15s per page
       // Will be reset when we know the actual page count (in ROM_INFO handler)
       this.downloadTimer = setTimeout(() => {
-        if (this.pageResolve) {
+        if (this.pageResolve === resolve) {
           this.log('Page download timed out');
           const pages = [...this.downloadedPages];
           this.clearPageRetryTimer();
@@ -281,6 +358,22 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
           resolve(pages);
         }
       }, PAGE_DOWNLOAD_TIMEOUT_MS);
+
+      this.write(makeFrame(CMD.ROM_INFO)).catch((err) => {
+        // Only tear down if this call still owns the in-flight slot - a
+        // notification handler may already have settled it (and handed the
+        // mutex to someone else) while the write was outstanding.
+        if (this.pageResolve === resolve) {
+          this.pageResolve = null;
+          this.clearPageRetryTimer();
+          if (this.downloadTimer) {
+            clearTimeout(this.downloadTimer);
+            this.downloadTimer = null;
+          }
+          this.downloadMode = 'idle';
+        }
+        reject(err);
+      });
     });
   }
 
@@ -320,8 +413,9 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       // placeholder pageResolve is needed here - pageResolve stays untouched
       // (and null) for the whole single-page path.
       this.singlePageResolve = resolve;
+      this.statusBeforeDownload = this.currentStatus;
       this.downloadTimer = setTimeout(() => {
-        if (this.singlePageResolve) {
+        if (this.singlePageResolve === resolve) {
           this.log(`Page ${pageNum} download timed out`);
           const packages = this.pagePackages.get(this.currentDownloadPage) || [];
           const page = this.decodePage(this.currentDownloadPage, packages);
@@ -335,13 +429,21 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       }, PAGE_DOWNLOAD_TIMEOUT_MS);
 
       this.requestPageDownload(pageNum).catch((err) => {
-        this.singlePageResolve = null;
-        this.clearPageRetryTimer();
-        if (this.downloadTimer) {
-          clearTimeout(this.downloadTimer);
-          this.downloadTimer = null;
+        // Guarded on still owning the in-flight slot: an earlier settle path
+        // (disconnect, or failInFlightDownload from a notification handler)
+        // may already have released the mutex and let another download start,
+        // and this stale catch must not then clear *its* resolver, kill *its*
+        // timer, or release a mutex it no longer holds. reject() is a no-op
+        // in that case - the promise has already been settled.
+        if (this.singlePageResolve === resolve) {
+          this.singlePageResolve = null;
+          this.clearPageRetryTimer();
+          if (this.downloadTimer) {
+            clearTimeout(this.downloadTimer);
+            this.downloadTimer = null;
+          }
+          this.downloadMode = 'idle';
         }
-        this.downloadMode = 'idle';
         reject(err);
       });
     });
@@ -353,18 +455,24 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
    */
   async getStoredPageCount(): Promise<number> {
     if (!this.authenticated) throw new Error('Not authenticated');
+    // Single-flight, like the two download paths: there is exactly one
+    // resolver slot, so a second concurrent call used to silently overwrite
+    // the first (which then never settled short of its own timeout).
+    if (this.pageCountResolve) {
+      throw new Error('Cannot start page count query: one is already in progress');
+    }
     return new Promise<number>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pageCountResolve = null;
+      this.pageCountResolve = resolve;
+      this.pageCountReject = reject;
+      this.pageCountTimer = setTimeout(() => {
+        // Only release the slot if this call still owns it. The old code
+        // nulled `pageCountResolve` unconditionally, so a late-firing timer
+        // from an abandoned call would wipe out a *later* call's resolver.
+        if (this.pageCountResolve === resolve) this.settlePageCount();
         reject(new Error('Page count query timed out'));
-      }, 5000);
-      this.pageCountResolve = (count) => {
-        clearTimeout(timer);
-        resolve(count);
-      };
+      }, PAGE_COUNT_TIMEOUT_MS);
       this.write(makeFrame(CMD.CURRENT_PAGE)).catch((err) => {
-        clearTimeout(timer);
-        this.pageCountResolve = null;
+        if (this.pageCountResolve === resolve) this.settlePageCount();
         reject(err);
       });
     });
@@ -479,7 +587,13 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     this.pagePackages.set(pageNum, []);
     this.packageRetries.clear();
     this.clearPageRetryTimer();
-    this.setStatus(`Downloading page ${pageNum + 1}/${this.totalPages}`);
+    // `totalPages` is only meaningful for a bulk walk, which learns it from
+    // its own CURRENT_PAGE query. A single-page pull never runs that query,
+    // so the old unconditional `N/${this.totalPages}` read as "page 4/0" on a
+    // fresh connection, or "page 4/3" using a previous bulk run's stale count.
+    this.setStatus(this.downloadMode === 'bulk' && this.totalPages > 0
+      ? `Downloading page ${pageNum + 1}/${this.totalPages}`
+      : `Downloading page ${pageNum + 1}`);
     await this.write(makeFrame(CMD.REQUEST_PAGE, pageNum & 0xFF, (pageNum >> 8) & 0xFF, 0, 0));
   }
 
@@ -565,7 +679,12 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
         this.downloadTimer = null;
       }
       this.downloadMode = 'idle';
-      this.setStatus('Connected');
+      // Restore, don't hardcode: a Phase 2 page-turn pull runs *during* a
+      // live session, and 'Connected' would claim streaming had stopped while
+      // pen data was still arriving.
+      const restored = this.statusBeforeDownload;
+      this.statusBeforeDownload = null;
+      this.setStatus(restored || 'Connected');
       resolvePage(page);
       return;
     }
@@ -583,7 +702,10 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       clearTimeout(this.downloadTimer);
       this.downloadTimer = null;
     }
-    this.pageResolve?.(this.downloadedPages);
+    // Copy, matching the other three settle paths (timeout, disconnect,
+    // failInFlightDownload): handing out the live array let a later download
+    // on the same instance mutate a caller's already-returned result.
+    this.pageResolve?.([...this.downloadedPages]);
     this.pageResolve = null;
     this.downloadMode = 'idle';
   }
@@ -702,9 +824,11 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
           this.log(`Page size ≈ ${this.config.pageWidth}x${this.config.pageHeight}`);
           this.setStatus('Connected');
           if (this.connectResolve) {
-            this.connectResolve();
-            this.connectResolve = null;
-            this.connectReject = null;
+            const resolveConnect = this.connectResolve;
+            // Clears the 10s handshake timer too - on success it used to be
+            // left armed, leaving a stray pending timer after every connect.
+            this.settleHandshake();
+            resolveConnect();
           }
           // Query battery and device name sequentially (GATT can only handle one at a time)
           try {
@@ -744,7 +868,18 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       case CMD.NEXT_PAGE: {
         // Capture-proven: unsolicited cd 8a 06 XX 00 00 — physical notebook button press = new page
         this.log(`Notebook button: new page (${Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ')})`);
-        this.onNextPage?.();
+        // Consumer code, invoked inside handleNotification's blanket try. A
+        // throw here would reach failInFlightDownload and silently settle an
+        // in-flight download with partial data - and Phase 2 downloads a page
+        // on every page turn, so a page-turn handler and an in-flight
+        // download routinely coexist. TabletPanel/ProbeApp assign onNextPage
+        // raw (only DeviceController routes it through the swallowing
+        // emitter), so the driver has to contain the throw itself.
+        try {
+          this.onNextPage?.();
+        } catch (err) {
+          this.log(`onNextPage handler threw: ${err instanceof Error ? err.message : err}`);
+        }
         break;
       }
       case CMD.ROM_INFO: {
@@ -769,9 +904,14 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       case CMD.CURRENT_PAGE: {
         // 0x85 reply: page count at bytes 3-4 (little-endian)
         if (data.length >= 5) {
-          if (this.pageCountResolve) {
+          // Gated on downloadMode: a bulk download issues its own
+          // CURRENT_PAGE query, and an overlapping page-count query used to
+          // intercept that reply, stalling the download to its 15s timeout.
+          // The page-count caller instead falls through to its own (much
+          // shorter) 5s timeout, which is the strictly better failure.
+          if (this.pageCountResolve && this.downloadMode !== 'bulk') {
             const resolvePageCount = this.pageCountResolve;
-            this.pageCountResolve = null;
+            this.settlePageCount();
             resolvePageCount((data[4] << 8) | data[3]);
             break;
           }
@@ -853,7 +993,15 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
 
     for (const pkt of packets) {
       const point = this.decodeLivePacket(pkt);
-      if (point) this.onPen?.(point);
+      if (!point) continue;
+      // Same reasoning as onNextPage: a throwing consumer must not take out
+      // the rest of the batch (a 22-byte frame carries two points) or escape
+      // into handleNotification's error path.
+      try {
+        this.onPen?.(point);
+      } catch (err) {
+        this.log(`onPen handler threw: ${err instanceof Error ? err.message : err}`);
+      }
     }
   }
 
