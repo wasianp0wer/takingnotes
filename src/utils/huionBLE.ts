@@ -370,6 +370,27 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     });
   }
 
+  /**
+   * Deletes one stored page from device memory. DESTRUCTIVE and irreversible.
+   * Per spec D3 the caller must confirm with the user every time; this method
+   * deliberately has no confirmation of its own so the prompt lives in the UI.
+   *
+   * The 0x8B wire format came from APK decompilation and has not been observed
+   * on the wire - verify against hardware before relying on it.
+   */
+  async deletePage(pageNum: number): Promise<void> {
+    if (!this.authenticated) throw new Error('Not authenticated');
+    this.log(`Deleting page ${pageNum} from device memory`);
+    await this.write(makeFrame(CMD.DELETE_PAGE, pageNum & 0xff, (pageNum >> 8) & 0xff));
+  }
+
+  /** Clears ALL stored pages. DESTRUCTIVE and irreversible. See deletePage. */
+  async clearCache(): Promise<void> {
+    if (!this.authenticated) throw new Error('Not authenticated');
+    this.log('Clearing all stored pages from device memory');
+    await this.write(makeFrame(CMD.CLEAR_CACHE));
+  }
+
   // --- Private ---
 
   private write(data: Uint8Array): Promise<void> {

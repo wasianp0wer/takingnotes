@@ -375,3 +375,33 @@ describe('downloadPage', () => {
     }
   });
 });
+
+describe('destructive commands', () => {
+  it('sends DELETE_PAGE with the page number', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    await device.deletePage(4);
+
+    const frame = transport.written.find((sent) => sent[1] === CMD.DELETE_PAGE);
+    expect(frame).toBeDefined();
+    expect(frame![3]).toBe(4);
+  });
+
+  it('sends CLEAR_CACHE', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    await device.clearCache();
+
+    expect(transport.written.some((sent) => sent[1] === CMD.CLEAR_CACHE)).toBe(true);
+  });
+
+  it('refuses to delete when not authenticated', async () => {
+    const device = new HuionNoteBLE(new FakeHuionTransport());
+    await expect(device.deletePage(0)).rejects.toThrow();
+    await expect(device.clearCache()).rejects.toThrow();
+  });
+});
