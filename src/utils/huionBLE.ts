@@ -260,7 +260,11 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
         clearTimeout(timer);
         resolve(count);
       };
-      this.write(makeFrame(CMD.CURRENT_PAGE)).catch(reject);
+      this.write(makeFrame(CMD.CURRENT_PAGE)).catch((err) => {
+        clearTimeout(timer);
+        this.pageCountResolve = null;
+        reject(err);
+      });
     });
   }
 
