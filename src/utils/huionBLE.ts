@@ -1,48 +1,16 @@
 import type { TabletBackendCapabilities } from '@/types/memory';
-
-/**
- * Huion Note X10 BLE Protocol
- * Reverse-engineered from APK decompilation.
- * 
- * Service: 0000ffe0-0000-1000-8000-00805f9b34fb
- * Write:   0000ffe2-...  (commands)
- * Notify:  0000ffe1-...  (responses)
- * 
- * Frame format: [0xCD] [CMD] [0x08] [P1] [P2] [P3] [P4] [0xED]
- * Auth:         challenge(a,b,c) → ((a+b)<<2)%255, ((b+c)<<2)%255, ((c+10)<<2)%255
- * 
- * Live packets: 11 bytes (or 22 for double):
- *   [header 4 bytes] [Xlo] [Xhi] [Ylo] [Yhi] [Plo] [Phi|status] [checksum]
- * 
- * Offline point records: 6 bytes each within page packages:
- *   [Xlo] [Xhi] [Ylo] [Yhi] [Plo] [Phi|status]
- *   pressure = ((byte5 & 0x1F) << 8) | byte4
- *   status   = byte5 >> 5
- * 
- * Checksum: sum(all_bytes_except_last) & 0xFF
- */
-
-const SERVICE_UUID = '0000ffe0-0000-1000-8000-00805f9b34fb';
-const NOTIFY_UUID  = '0000ffe1-0000-1000-8000-00805f9b34fb';
-const WRITE_UUID   = '0000ffe2-0000-1000-8000-00805f9b34fb';
-
-const CMD = {
-  VERIFY_CONNECT: 0x81,
-  VERIFY_RESPONSE: 0x82,
-  CURRENT_PAGE: 0x85,
-  REQUEST_PAGE: 0x86,
-  PAGE_PACKAGE: 0x87,
-  REGET_PACKAGE: 0x88,
-  NEXT_PAGE: 0x8A,       // unsolicited notebook button event
-  DELETE_PAGE: 0x8B,
-  CLEAR_CACHE: 0x8C,
-  ONLINE_ENABLE: 0x8D,
-  BATTERY: 0x8E,          // reply byte 3 = battery percent
-  ROM_INFO: 0x8F,
-  DEVICE_NAME: 0x91,      // reply is ASCII string
-  MAX_INFO: 0x95,
-  SET_PACKET_DISTANCE: 0x96,
-} as const;
+import {
+  clamp,
+  CMD,
+  computeAuthResponse,
+  HUION_DEFAULT_PAGE_HEIGHT_A4,
+  HUION_DEFAULT_PAGE_HEIGHT_A5,
+  HUION_DEFAULT_PAGE_WIDTH_A4,
+  HUION_DEFAULT_PAGE_WIDTH_A5,
+  makeFrame,
+  verifyChecksum,
+} from '@/utils/huionProtocol';
+import { BleHuionTransport, type HuionTransport } from '@/utils/huionTransport';
 
 export interface HuionPenPoint {
   x: number;
@@ -76,36 +44,16 @@ type LogCallback = (msg: string) => void;
 type StatusCallback = (status: string) => void;
 type PageCallback = (pages: HuionPage[]) => void;
 
-function makeFrame(cmd: number, p1 = 0, p2 = 0, p3 = 0, p4 = 0): Uint8Array {
-  return new Uint8Array([0xCD, cmd, 0x08, p1, p2, p3, p4, 0xED]);
-}
-
-function verifyChecksum(data: Uint8Array): boolean {
-  if (data.length < 2) return false;
-  let sum = 0;
-  for (let i = 0; i < data.length - 1; i++) sum += data[i];
-  return (sum & 0xFF) === data[data.length - 1];
-}
-
-function computeAuthResponse(a: number, b: number, c: number): [number, number, number] {
-  return [
-    (((a + b) << 2) % 255),
-    (((b + c) << 2) % 255),
-    (((c + 10) << 2) % 255),
-  ];
-}
-
 /** Max times to re-request a single package before giving up */
 const MAX_PACKAGE_RETRIES = 3;
 /** Download timeout per page (ms) */
 const PAGE_DOWNLOAD_TIMEOUT_MS = 15_000;
 /** Huion app waits about 1s for the page stream to go idle before gap recovery */
 const PACKAGE_RETRY_IDLE_MS = 1_000;
-/** Huion app logical page size (HiConfig.DEFAULT_PAGE_WIDTH/HEIGHT for A5) */
-const HUION_DEFAULT_PAGE_WIDTH_A5 = 1409;
-const HUION_DEFAULT_PAGE_HEIGHT_A5 = 1869;
-const HUION_DEFAULT_PAGE_WIDTH_A4 = 2100;
-const HUION_DEFAULT_PAGE_HEIGHT_A4 = 2970;
+/** Timeout for a standalone CURRENT_PAGE (0x85) page-count query (ms) */
+const PAGE_COUNT_TIMEOUT_MS = 5_000;
+/** Handshake completion timeout (ms) */
+const HANDSHAKE_TIMEOUT_MS = 10_000;
 /** APK-derived offline pressure threshold (percent) */
 const FILTER_PRESS_PERCENT = 7;
 /** APK PointFilter distance threshold in logical page units */
@@ -124,15 +72,15 @@ interface DecodedOfflinePoint {
   status: number;
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
 export class HuionNoteBLE implements TabletBackendCapabilities {
-  private device: BluetoothDevice | null = null;
-  private server: BluetoothRemoteGATTServer | null = null;
-  private writeChar: BluetoothRemoteGATTCharacteristic | null = null;
-  private notifyChar: BluetoothRemoteGATTCharacteristic | null = null;
+  private transport: HuionTransport;
+
+  constructor(transport?: HuionTransport) {
+    this.transport = transport ?? new BleHuionTransport(
+      (msg) => this.log(msg),
+      (status) => this.setStatus(status),
+    );
+  }
 
   private challenge: [number, number, number] | null = null;
   private authenticated = false;
@@ -152,12 +100,35 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   private expectedPackageCount = 0;
   private currentDownloadPage = 0;
   private pageResolve: ((pages: HuionPage[]) => void) | null = null;
+  private singlePageResolve: ((page: HuionPage) => void) | null = null;
+  private pageCountResolve: ((count: number) => void) | null = null;
+  private pageCountReject: ((err: Error) => void) | null = null;
+  private pageCountTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Explicit mutual-exclusion state for the two download paths. Neither
+   * `downloadPage()` nor `downloadPages()` may start while the other (or
+   * another instance of itself) is in flight - both check this at entry and
+   * reset it to 'idle' on every one of their exit paths. The ROM_INFO and
+   * CURRENT_PAGE handlers also gate their bulk-orchestration branches on
+   * this being exactly 'bulk', so a single-page pull cannot be hijacked by
+   * an unsolicited ROM_INFO/CURRENT_PAGE frame (the device is known to send
+   * unsolicited frames - see the CMD.NEXT_PAGE case below).
+   */
+  private downloadMode: 'idle' | 'single' | 'bulk' = 'idle';
   private downloadedPages: HuionPage[] = [];
   private totalPages = 0;
   private romUsed = 0;
   private romTotal = 0;
   private downloadTimer: ReturnType<typeof setTimeout> | null = null;
   private pageRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Status line as it stood before the in-flight single-page pull started, so
+   * the pull can put it back instead of hardcoding 'Connected' - a Phase 2
+   * page-turn download happens *during* a live session, and hardcoding would
+   * claim streaming had stopped while pen data was still arriving.
+   */
+  private statusBeforeDownload: string | null = null;
+  private currentStatus = 'Disconnected';
 
   // Callbacks
   onPen: PenCallback | null = null;
@@ -166,16 +137,31 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   onPages: PageCallback | null = null;
   onNextPage: (() => void) | null = null;
 
-  private log(msg: string) { this.onLog?.(msg); }
-  private setStatus(s: string) { this.onStatus?.(s); }
+  // Every consumer callback below is invoked defensively. `log()` and
+  // `setStatus()` are called from all over `handleCommand`, which runs inside
+  // handleNotification's blanket try - a throwing consumer there would reach
+  // `failInFlightDownload` and silently settle an unrelated in-flight
+  // download with partial data. The driver must be unbreakable by consumer
+  // code it does not control (TabletPanel/ProbeApp assign these slots raw).
+  private log(msg: string) {
+    // Deliberately no logging in the catch: the thing that threw *is* the
+    // logger, so re-entering it would recurse.
+    try { this.onLog?.(msg); } catch { /* consumer's problem, not the driver's */ }
+  }
+
+  private setStatus(s: string) {
+    this.currentStatus = s;
+    try {
+      this.onStatus?.(s);
+    } catch (err) {
+      this.log(`onStatus handler threw: ${err instanceof Error ? err.message : err}`);
+    }
+  }
 
   get isConnected() { return this.authenticated; }
   get isStreaming() { return this.streaming; }
-  get deviceName() { return this.device?.name ?? 'Unknown'; }
-  get notebookUuid() {
-    const rawId = this.device?.id || this.device?.name || 'unknown';
-    return `huion:${rawId}`;
-  }
+  get deviceName() { return this.transport.deviceName; }
+  get notebookUuid() { return `huion:${this.transport.deviceId}`; }
   get capabilities() {
     return { paper: true, tablet: true } as const;
   }
@@ -183,98 +169,89 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   // Connection completion promise
   private connectResolve: (() => void) | null = null;
   private connectReject: ((err: Error) => void) | null = null;
+  private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Releases the handshake slot and, crucially, its 10s timer. Every path
+   * that stops caring about the handshake promise goes through here so a
+   * successful connect doesn't leave a stray timer pending for 10s (which is
+   * also where the "pending timers" noise in the test suite came from).
+   */
+  private settleHandshake() {
+    if (this.handshakeTimer) {
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = null;
+    }
+    this.connectResolve = null;
+    this.connectReject = null;
+  }
+
+  /** Releases the page-count query slot and its timer. */
+  private settlePageCount() {
+    if (this.pageCountTimer) {
+      clearTimeout(this.pageCountTimer);
+      this.pageCountTimer = null;
+    }
+    this.pageCountResolve = null;
+    this.pageCountReject = null;
+  }
 
   async connect(): Promise<void> {
-    this.setStatus('Scanning...');
-    this.log('[1/7] Requesting BLE device (filters: Huion, HUION, Note)...');
-
-    try {
-      this.device = await navigator.bluetooth.requestDevice({
-        filters: [{ namePrefix: 'Huion' }, { namePrefix: 'HUION' }, { namePrefix: 'Note' }],
-        optionalServices: [SERVICE_UUID, 'battery_service'],
-      });
-    } catch (e: any) {
-      throw new Error(`BLE device request failed: ${e?.message ?? e}. Is the device on and in range? Did you pick it in the Chrome popup?`);
-    }
-
-    this.log(`[2/7] Device selected: ${this.device.name ?? 'unnamed'} (${this.device.id})`);
-
-    this.device.addEventListener('gattserverdisconnected', () => {
-      this.authenticated = false;
-      this.streaming = false;
-      this.setStatus('Disconnected');
-      this.log('Device disconnected');
-      if (this.connectReject) {
-        this.connectReject(new Error('Device disconnected during handshake'));
-        this.connectResolve = null;
-        this.connectReject = null;
-      }
-      if (this.pageResolve) {
-        this.log('Download interrupted by disconnect');
-        const pages = [...this.downloadedPages];
-        this.pageResolve(pages);
-        this.pageResolve = null;
-        this.clearPageRetryTimer();
-        if (this.downloadTimer) {
-          clearTimeout(this.downloadTimer);
-          this.downloadTimer = null;
-        }
-      }
-    });
-
-    this.setStatus('Connecting GATT...');
-    this.log('[3/7] Connecting GATT server...');
-
-    try {
-      this.server = await this.device.gatt!.connect();
-    } catch (e: any) {
-      throw new Error(`GATT connect failed: ${e?.message ?? e}`);
-    }
-
-    this.log('[4/7] GATT connected, discovering service FFE0...');
-
-    try {
-      const svc = await this.server.getPrimaryService(SERVICE_UUID);
-      this.writeChar = await svc.getCharacteristic(WRITE_UUID);
-      this.notifyChar = await svc.getCharacteristic(NOTIFY_UUID);
-    } catch (e: any) {
-      throw new Error(`Service/characteristic discovery failed: ${e?.message ?? e}. Is this a Huion Note device?`);
-    }
-
-    this.log('[5/7] FFE0/FFE1/FFE2 found, enabling notifications...');
-
-    // Attach listener BEFORE startNotifications to avoid missing early packets
-    this.notifyChar.addEventListener('characteristicvaluechanged', (e: Event) => {
-      const val = (e.target as BluetoothRemoteGATTCharacteristic).value!;
-      this.handleNotification(new Uint8Array(val.buffer, val.byteOffset, val.byteLength))
+    this.transport.onNotify((bytes) => {
+      this.handleNotification(bytes)
         .catch((err) => this.log(`Notification handler error: ${err?.message ?? err}`));
     });
+    this.transport.onDisconnect(() => this.handleDisconnect());
+    await this.transport.open();
+    await this.performHandshake();
+  }
 
-    try {
-      await this.notifyChar.startNotifications();
-      this.log('FFE1 notifications enabled');
-    } catch (e: any) {
-      throw new Error(`Failed to start FFE1 notifications: ${e?.message ?? e}`);
+  private handleDisconnect() {
+    this.authenticated = false;
+    this.streaming = false;
+    this.setStatus('Disconnected');
+    this.log('Device disconnected');
+    if (this.connectReject) {
+      const rejectConnect = this.connectReject;
+      this.settleHandshake();
+      rejectConnect(new Error('Device disconnected during handshake'));
     }
-
-    // The Huion APK also enables notifications on FFE2 (the write char).
-    // This is unusual but was observed in the decomp — some firmware versions
-    // may send responses on FFE2 or need the CCCD written on both.
-    try {
-      this.writeChar.addEventListener('characteristicvaluechanged', (e: Event) => {
-        const val = (e.target as BluetoothRemoteGATTCharacteristic).value!;
-        const bytes = new Uint8Array(val.buffer, val.byteOffset, val.byteLength);
-        this.log(`RX (FFE2): ${Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ')} [log only, not processed]`);
-      });
-      await this.writeChar.startNotifications();
-      this.log('FFE2 notifications also enabled (log only)');
-    } catch {
-      this.log('FFE2 notifications not supported (normal)');
+    if (this.pageCountReject) {
+      // Without this a pending getStoredPageCount() would sit out its full
+      // 5s timeout after the link has already provably gone away.
+      const rejectPageCount = this.pageCountReject;
+      this.settlePageCount();
+      this.log('Page count query interrupted by disconnect');
+      rejectPageCount(new Error('Device disconnected during page count query'));
     }
+    if (this.singlePageResolve) {
+      this.log('Single-page download interrupted by disconnect');
+      const packages = this.pagePackages.get(this.currentDownloadPage) || [];
+      const page = this.decodePage(this.currentDownloadPage, packages);
+      const resolvePage = this.singlePageResolve;
+      this.singlePageResolve = null;
+      this.clearPageRetryTimer();
+      if (this.downloadTimer) {
+        clearTimeout(this.downloadTimer);
+        this.downloadTimer = null;
+      }
+      this.downloadMode = 'idle';
+      resolvePage(page);
+    } else if (this.pageResolve) {
+      this.log('Download interrupted by disconnect');
+      const pages = [...this.downloadedPages];
+      this.pageResolve(pages);
+      this.pageResolve = null;
+      this.clearPageRetryTimer();
+      if (this.downloadTimer) {
+        clearTimeout(this.downloadTimer);
+        this.downloadTimer = null;
+      }
+      this.downloadMode = 'idle';
+    }
+  }
 
-    // Wait for BLE stack to settle — the APK waits ~2.1s after service discovery
-    await this.sleep(500);
-
+  private async performHandshake(): Promise<void> {
     this.log('[6/7] Notifications ready, starting handshake (CD 81 08 ...)...');
     this.setStatus('Handshaking...');
 
@@ -282,14 +259,17 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     await new Promise<void>((resolve, reject) => {
       this.connectResolve = resolve;
       this.connectReject = reject;
-      setTimeout(() => {
-        if (this.connectResolve) {
-          this.connectResolve = null;
-          this.connectReject = null;
+      this.handshakeTimer = setTimeout(() => {
+        this.handshakeTimer = null;
+        if (this.connectResolve === resolve) {
+          this.settleHandshake();
           reject(new Error('Handshake timeout (10s). Device found but auth did not complete. Check protocol log for details.'));
         }
-      }, 10000);
-      this.write(makeFrame(CMD.VERIFY_CONNECT)).catch(reject);
+      }, HANDSHAKE_TIMEOUT_MS);
+      this.write(makeFrame(CMD.VERIFY_CONNECT)).catch((err) => {
+        if (this.connectResolve === resolve) this.settleHandshake();
+        reject(err);
+      });
     });
 
     this.log('[7/7] Handshake complete, connected!');
@@ -298,7 +278,12 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   async disconnect(): Promise<void> {
     if (this.streaming) await this.stopStreaming();
     this.clearPageRetryTimer();
-    this.device?.gatt?.disconnect();
+    await this.transport.close();
+    // `gattserverdisconnected` does NOT fire for a disconnect we initiated
+    // ourselves while GATT is already down, so handleDisconnect() may never
+    // run - settle any in-flight download here or it hangs to its own
+    // (up-to-15s-per-page) timeout with downloadMode still held.
+    this.failInFlightDownload(new Error('Disconnected'));
     this.authenticated = false;
     this.streaming = false;
     this.setStatus('Disconnected');
@@ -335,57 +320,189 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
 
   async downloadPages(): Promise<HuionPage[]> {
     if (!this.authenticated) throw new Error('Not authenticated');
+    if (this.downloadMode !== 'idle') {
+      throw new Error(`Cannot start bulk download: a ${this.downloadMode} download is already in progress`);
+    }
+    this.downloadMode = 'bulk';
     this.log('Requesting ROM info...');
     this.packageRetries.clear();
     this.pagePackages.clear();
     this.expectedPackageCount = 0;
     this.clearPageRetryTimer();
-    await this.write(makeFrame(CMD.ROM_INFO));
-    
-    return new Promise((resolve) => {
+    this.downloadedPages = [];
+
+    // Mirrors downloadPage()'s structure deliberately: the resolver and the
+    // timer are installed *inside* the executor, before the ROM_INFO write is
+    // issued. Assigning pageResolve only after awaiting the write left a
+    // window in which downloadMode was already 'bulk' with no pending
+    // promise, so (a) a disconnect found neither resolver and left the mutex
+    // stuck at 'bulk' forever, (b) failInFlightDownload found no resolver and
+    // released a mutex this starting download still owned, admitting a
+    // concurrent downloadPage() that would then share currentDownloadPage and
+    // pagePackages, and (c) a ROM_INFO reply landing before the write settled
+    // was dropped by the `pageResolve` guard, stalling to the 15s timeout.
+    // The write's failure is routed through .catch below, so the method still
+    // rejects with the same error it did before.
+    return new Promise<HuionPage[]>((resolve, reject) => {
       this.pageResolve = resolve;
-      this.downloadedPages = [];
       // Timeout scales with expected work: base 15s + 15s per page
       // Will be reset when we know the actual page count (in ROM_INFO handler)
       this.downloadTimer = setTimeout(() => {
-        if (this.pageResolve) {
+        if (this.pageResolve === resolve) {
           this.log('Page download timed out');
           const pages = [...this.downloadedPages];
           this.clearPageRetryTimer();
           this.pageResolve = null;
           this.downloadTimer = null;
+          this.downloadMode = 'idle';
           resolve(pages);
         }
       }, PAGE_DOWNLOAD_TIMEOUT_MS);
+
+      this.write(makeFrame(CMD.ROM_INFO)).catch((err) => {
+        // Only tear down if this call still owns the in-flight slot - a
+        // notification handler may already have settled it (and handed the
+        // mutex to someone else) while the write was outstanding.
+        if (this.pageResolve === resolve) {
+          this.pageResolve = null;
+          this.clearPageRetryTimer();
+          if (this.downloadTimer) {
+            clearTimeout(this.downloadTimer);
+            this.downloadTimer = null;
+          }
+          this.downloadMode = 'idle';
+        }
+        reject(err);
+      });
     });
+  }
+
+  /**
+   * Pull a single page (per spec finding C1/C2: pages commit to device
+   * memory on page turn, and bulk download is slow and flaky, so the
+   * session engine wants to pull pages one at a time as they commit).
+   * Reuses the same request/package-assembly machinery as downloadPages(),
+   * but resolves with just this page instead of walking the whole book.
+   */
+  async downloadPage(pageNum: number): Promise<HuionPage> {
+    if (!this.authenticated) throw new Error('Not authenticated');
+    if (this.downloadMode !== 'idle') {
+      throw new Error(`Cannot start single-page download: a ${this.downloadMode} download is already in progress`);
+    }
+    this.downloadMode = 'single';
+    // Not needed for isolation between consecutive single-page pulls -
+    // requestPageDownload() below already resets packageRetries,
+    // expectedPackageCount, and pagePackages's entry for the *current* page
+    // key on every call, which is sufficient since nothing ever reads a
+    // pagePackages entry for any page other than currentDownloadPage. This
+    // clear() is kept anyway to bound pagePackages's size across a long
+    // session that pulls many single pages one at a time (Phase 2's use
+    // case) - see the deferred "pagePackages.clear() vs per-key reset
+    // inconsistency" note; downloadPages() has the same clear() at its own
+    // entry for the same reason.
+    this.pagePackages.clear();
+    this.clearPageRetryTimer();
+
+    return new Promise<HuionPage>((resolve, reject) => {
+      // Assigned before requestPageDownload's write() is even called, so
+      // there is no dependency on the fake transport's macrotask-vs-microtask
+      // reply timing here (unlike downloadPages(), which assigns pageResolve
+      // only after awaiting its write - see huionFixtures.ts / FakeHuionTransport).
+      // scheduleOfflinePageVerification()/verifyAndRecoverOfflinePage() gate
+      // on `downloadMode !== 'idle'` to know a download is in flight, so no
+      // placeholder pageResolve is needed here - pageResolve stays untouched
+      // (and null) for the whole single-page path.
+      this.singlePageResolve = resolve;
+      this.statusBeforeDownload = this.currentStatus;
+      this.downloadTimer = setTimeout(() => {
+        if (this.singlePageResolve === resolve) {
+          this.log(`Page ${pageNum} download timed out`);
+          const packages = this.pagePackages.get(this.currentDownloadPage) || [];
+          const page = this.decodePage(this.currentDownloadPage, packages);
+          const resolvePage = this.singlePageResolve;
+          this.singlePageResolve = null;
+          this.clearPageRetryTimer();
+          this.downloadTimer = null;
+          this.downloadMode = 'idle';
+          resolvePage(page);
+        }
+      }, PAGE_DOWNLOAD_TIMEOUT_MS);
+
+      this.requestPageDownload(pageNum).catch((err) => {
+        // Guarded on still owning the in-flight slot: an earlier settle path
+        // (disconnect, or failInFlightDownload from a notification handler)
+        // may already have released the mutex and let another download start,
+        // and this stale catch must not then clear *its* resolver, kill *its*
+        // timer, or release a mutex it no longer holds. reject() is a no-op
+        // in that case - the promise has already been settled.
+        if (this.singlePageResolve === resolve) {
+          this.singlePageResolve = null;
+          this.clearPageRetryTimer();
+          if (this.downloadTimer) {
+            clearTimeout(this.downloadTimer);
+            this.downloadTimer = null;
+          }
+          this.downloadMode = 'idle';
+        }
+        reject(err);
+      });
+    });
+  }
+
+  /**
+   * Standalone CURRENT_PAGE (0x85) query. Used as the session page baseline:
+   * a session's pages are the ones from this index onward.
+   */
+  async getStoredPageCount(): Promise<number> {
+    if (!this.authenticated) throw new Error('Not authenticated');
+    // Single-flight, like the two download paths: there is exactly one
+    // resolver slot, so a second concurrent call used to silently overwrite
+    // the first (which then never settled short of its own timeout).
+    if (this.pageCountResolve) {
+      throw new Error('Cannot start page count query: one is already in progress');
+    }
+    return new Promise<number>((resolve, reject) => {
+      this.pageCountResolve = resolve;
+      this.pageCountReject = reject;
+      this.pageCountTimer = setTimeout(() => {
+        // Only release the slot if this call still owns it. The old code
+        // nulled `pageCountResolve` unconditionally, so a late-firing timer
+        // from an abandoned call would wipe out a *later* call's resolver.
+        if (this.pageCountResolve === resolve) this.settlePageCount();
+        reject(new Error('Page count query timed out'));
+      }, PAGE_COUNT_TIMEOUT_MS);
+      this.write(makeFrame(CMD.CURRENT_PAGE)).catch((err) => {
+        if (this.pageCountResolve === resolve) this.settlePageCount();
+        reject(err);
+      });
+    });
+  }
+
+  /**
+   * Deletes one stored page from device memory. DESTRUCTIVE and irreversible.
+   * Per spec D3 the caller must confirm with the user every time; this method
+   * deliberately has no confirmation of its own so the prompt lives in the UI.
+   *
+   * The 0x8B wire format came from APK decompilation and has not been observed
+   * on the wire - verify against hardware before relying on it.
+   */
+  async deletePage(pageNum: number): Promise<void> {
+    if (!this.authenticated) throw new Error('Not authenticated');
+    this.log(`Deleting page ${pageNum} from device memory`);
+    await this.write(makeFrame(CMD.DELETE_PAGE, pageNum & 0xff, (pageNum >> 8) & 0xff));
+  }
+
+  /** Clears ALL stored pages. DESTRUCTIVE and irreversible. See deletePage. */
+  async clearCache(): Promise<void> {
+    if (!this.authenticated) throw new Error('Not authenticated');
+    this.log('Clearing all stored pages from device memory');
+    await this.write(makeFrame(CMD.CLEAR_CACHE));
   }
 
   // --- Private ---
 
-  private async write(data: Uint8Array) {
-    if (!this.writeChar) throw new Error('Not connected');
-    const hex = Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ');
-    this.log(`TX: ${hex}`);
-    const payload = new Uint8Array(data);
-    // Try write-without-response first (most BLE devices prefer this),
-    // fall back to write-with-response, then deprecated writeValue
-    try {
-      if (this.writeChar.writeValueWithoutResponse) {
-        await this.writeChar.writeValueWithoutResponse(payload);
-      } else {
-        throw new Error('writeValueWithoutResponse unavailable');
-      }
-    } catch {
-      try {
-        if (this.writeChar.writeValueWithResponse) {
-          await this.writeChar.writeValueWithResponse(payload);
-        } else {
-          throw new Error('writeValueWithResponse unavailable');
-        }
-      } catch {
-        await this.writeChar.writeValue(payload);
-      }
-    }
+  private write(data: Uint8Array): Promise<void> {
+    return this.transport.write(data);
   }
 
   private sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
@@ -397,14 +514,69 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     }
   }
 
+  /**
+   * Aborts whatever download is in flight: clears the download and retry
+   * timers, releases the `downloadMode` mutex, and settles the pending
+   * promise using the same partial-data convention as the existing
+   * timeout/disconnect paths (resolve with whatever was decoded so far -
+   * never reject once a download has already started exchanging packets).
+   * A no-op (beyond making sure downloadMode is 'idle') if nothing is
+   * actually in flight, so it's safe to call defensively.
+   *
+   * Every write failure that happens *after* a download's own initial
+   * request has already succeeded - the ROM_INFO handler's CURRENT_PAGE
+   * query, the CURRENT_PAGE handler's initial requestPageDownload(0),
+   * finishCurrentPageDownload()'s page-to-page continuation, and the
+   * REGET_PACKAGE retry writes in handleOfflinePackageResponse() and
+   * verifyAndRecoverOfflinePage() - must route through here. The spec
+   * calls bulk download "flaky", so a transient write failure there is
+   * realistic, not hypothetical. Leaving downloadMode set after one of
+   * these fails would wedge every later downloadPage()/downloadPages()
+   * call behind whatever's left of the current downloadTimer (which, for
+   * a failure mid-way through a multi-page bulk walk, could be most of
+   * that walk's whole timeout budget) instead of recovering immediately.
+   */
+  private failInFlightDownload(reason: unknown): void {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    this.clearPageRetryTimer();
+    if (this.downloadTimer) {
+      clearTimeout(this.downloadTimer);
+      this.downloadTimer = null;
+    }
+
+    if (this.singlePageResolve) {
+      this.log(`Single-page download aborted: ${message}`);
+      const resolvePage = this.singlePageResolve;
+      this.singlePageResolve = null;
+      this.downloadMode = 'idle';
+      const packages = this.pagePackages.get(this.currentDownloadPage) || [];
+      resolvePage(this.decodePage(this.currentDownloadPage, packages));
+      return;
+    }
+
+    if (this.pageResolve) {
+      this.log(`Bulk download aborted: ${message}`);
+      const resolvePages = this.pageResolve;
+      this.pageResolve = null;
+      this.downloadMode = 'idle';
+      resolvePages([...this.downloadedPages]);
+      return;
+    }
+
+    // Nothing in flight (already settled by something else, or never
+    // started) - still make sure the mutex isn't left held.
+    this.downloadMode = 'idle';
+  }
+
   private scheduleOfflinePageVerification() {
     this.clearPageRetryTimer();
-    if (!this.pageResolve || this.expectedPackageCount <= 0) {
+    if (this.downloadMode === 'idle' || this.expectedPackageCount <= 0) {
       return;
     }
     this.pageRetryTimer = setTimeout(() => {
       void this.verifyAndRecoverOfflinePage().catch((err) => {
         this.log(`Offline page verification failed: ${err?.message ?? err}`);
+        this.failInFlightDownload(err);
       });
     }, PACKAGE_RETRY_IDLE_MS);
   }
@@ -415,7 +587,13 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     this.pagePackages.set(pageNum, []);
     this.packageRetries.clear();
     this.clearPageRetryTimer();
-    this.setStatus(`Downloading page ${pageNum + 1}/${this.totalPages}`);
+    // `totalPages` is only meaningful for a bulk walk, which learns it from
+    // its own CURRENT_PAGE query. A single-page pull never runs that query,
+    // so the old unconditional `N/${this.totalPages}` read as "page 4/0" on a
+    // fresh connection, or "page 4/3" using a previous bulk run's stale count.
+    this.setStatus(this.downloadMode === 'bulk' && this.totalPages > 0
+      ? `Downloading page ${pageNum + 1}/${this.totalPages}`
+      : `Downloading page ${pageNum + 1}`);
     await this.write(makeFrame(CMD.REQUEST_PAGE, pageNum & 0xFF, (pageNum >> 8) & 0xFF, 0, 0));
   }
 
@@ -435,7 +613,7 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
 
   private async verifyAndRecoverOfflinePage() {
     this.pageRetryTimer = null;
-    if (!this.pageResolve || this.expectedPackageCount <= 0) {
+    if (this.downloadMode === 'idle' || this.expectedPackageCount <= 0) {
       return;
     }
 
@@ -492,6 +670,25 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     }
 
     const page = this.decodePage(this.currentDownloadPage, packages);
+
+    if (this.singlePageResolve) {
+      const resolvePage = this.singlePageResolve;
+      this.singlePageResolve = null;
+      if (this.downloadTimer) {
+        clearTimeout(this.downloadTimer);
+        this.downloadTimer = null;
+      }
+      this.downloadMode = 'idle';
+      // Restore, don't hardcode: a Phase 2 page-turn pull runs *during* a
+      // live session, and 'Connected' would claim streaming had stopped while
+      // pen data was still arriving.
+      const restored = this.statusBeforeDownload;
+      this.statusBeforeDownload = null;
+      this.setStatus(restored || 'Connected');
+      resolvePage(page);
+      return;
+    }
+
     this.downloadedPages.push(page);
 
     if (this.currentDownloadPage + 1 < this.totalPages) {
@@ -505,8 +702,12 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       clearTimeout(this.downloadTimer);
       this.downloadTimer = null;
     }
-    this.pageResolve?.(this.downloadedPages);
+    // Copy, matching the other three settle paths (timeout, disconnect,
+    // failInFlightDownload): handing out the live array let a later download
+    // on the same instance mutate a caller's already-returned result.
+    this.pageResolve?.([...this.downloadedPages]);
     this.pageResolve = null;
+    this.downloadMode = 'idle';
   }
 
   private async handleOfflinePackageResponse(pkgNum: number, data: Uint8Array, source: 'stream' | 'reget') {
@@ -561,7 +762,21 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     // Framed command response
     if (data.length >= 3 && data[0] === 0xCD) {
       const cmd = data[1];
-      await this.handleCommand(cmd, data);
+      try {
+        await this.handleCommand(cmd, data);
+      } catch (err) {
+        // Single choke point for every write failure that can occur inside
+        // handleCommand's cascades (ROM_INFO's CURRENT_PAGE query,
+        // CURRENT_PAGE's requestPageDownload(0), finishCurrentPageDownload's
+        // page-to-page continuation, and the REGET_PACKAGE retry writes) -
+        // failInFlightDownload() is a no-op unless a download is actually
+        // in flight, so this is safe for non-download failures too (e.g. a
+        // handshake write, though those already have their own handling).
+        // Rethrown so the existing generic logger at the call site below
+        // still logs it, preserving prior behaviour.
+        this.failInFlightDownload(err);
+        throw err;
+      }
       // Also check if it's an 11-byte live packet disguised as 0x8D
       if (cmd === CMD.ONLINE_ENABLE && data.length >= 11 && data[data.length - 1] !== 0xED) {
         this.handleOnlineData(data);
@@ -609,9 +824,11 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
           this.log(`Page size ≈ ${this.config.pageWidth}x${this.config.pageHeight}`);
           this.setStatus('Connected');
           if (this.connectResolve) {
-            this.connectResolve();
-            this.connectResolve = null;
-            this.connectReject = null;
+            const resolveConnect = this.connectResolve;
+            // Clears the 10s handshake timer too - on success it used to be
+            // left armed, leaving a stray pending timer after every connect.
+            this.settleHandshake();
+            resolveConnect();
           }
           // Query battery and device name sequentially (GATT can only handle one at a time)
           try {
@@ -651,7 +868,18 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       case CMD.NEXT_PAGE: {
         // Capture-proven: unsolicited cd 8a 06 XX 00 00 — physical notebook button press = new page
         this.log(`Notebook button: new page (${Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ')})`);
-        this.onNextPage?.();
+        // Consumer code, invoked inside handleNotification's blanket try. A
+        // throw here would reach failInFlightDownload and silently settle an
+        // in-flight download with partial data - and Phase 2 downloads a page
+        // on every page turn, so a page-turn handler and an in-flight
+        // download routinely coexist. TabletPanel/ProbeApp assign onNextPage
+        // raw (only DeviceController routes it through the swallowing
+        // emitter), so the driver has to contain the throw itself.
+        try {
+          this.onNextPage?.();
+        } catch (err) {
+          this.log(`onNextPage handler threw: ${err instanceof Error ? err.message : err}`);
+        }
         break;
       }
       case CMD.ROM_INFO: {
@@ -663,8 +891,11 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
           this.romTotal = (data[6] << 8) | data[5];
           this.log(`ROM state: [${Array.from(data.slice(3, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ')}]`);
           this.log(`ROM usage: ${this.romUsed}/${this.romTotal}`);
-          // Now query actual page count
-          if (this.pageResolve) {
+          // Now query actual page count. Gated on downloadMode === 'bulk'
+          // (not just pageResolve truthiness) so an unsolicited ROM_INFO
+          // frame arriving mid single-page pull can't hijack it into
+          // restarting a bulk walk.
+          if (this.downloadMode === 'bulk' && this.pageResolve) {
             await this.write(makeFrame(CMD.CURRENT_PAGE));
           }
         }
@@ -673,9 +904,24 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       case CMD.CURRENT_PAGE: {
         // 0x85 reply: page count at bytes 3-4 (little-endian)
         if (data.length >= 5) {
+          // Gated on downloadMode: a bulk download issues its own
+          // CURRENT_PAGE query, and an overlapping page-count query used to
+          // intercept that reply, stalling the download to its 15s timeout.
+          // The page-count caller instead falls through to its own (much
+          // shorter) 5s timeout, which is the strictly better failure.
+          if (this.pageCountResolve && this.downloadMode !== 'bulk') {
+            const resolvePageCount = this.pageCountResolve;
+            this.settlePageCount();
+            resolvePageCount((data[4] << 8) | data[3]);
+            break;
+          }
           this.totalPages = (data[4] << 8) | data[3];
           this.log(`Stored pages: ${this.totalPages}`);
-          if (this.totalPages > 0 && this.pageResolve) {
+          // Gated on downloadMode === 'bulk' (not just pageResolve
+          // truthiness) for the same reason as the ROM_INFO case above: a
+          // single-page pull never wants this branch, even if an
+          // unsolicited CURRENT_PAGE frame arrives while one is in flight.
+          if (this.totalPages > 0 && this.downloadMode === 'bulk' && this.pageResolve) {
             if (this.downloadTimer) clearTimeout(this.downloadTimer);
             const timeoutMs = PAGE_DOWNLOAD_TIMEOUT_MS * Math.max(1, this.totalPages);
             this.downloadTimer = setTimeout(() => {
@@ -686,16 +932,18 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
                 this.pageResolve(pages);
                 this.pageResolve = null;
                 this.downloadTimer = null;
+                this.downloadMode = 'idle';
               }
             }, timeoutMs);
             // Captures show page request starts with page 0: cd 86 08 00 00 00 00 ed
             await this.requestPageDownload(0);
-          } else if (this.pageResolve) {
+          } else if (this.downloadMode === 'bulk' && this.pageResolve) {
             this.log('No pages stored on device');
             this.clearPageRetryTimer();
             if (this.downloadTimer) { clearTimeout(this.downloadTimer); this.downloadTimer = null; }
             this.pageResolve([]);
             this.pageResolve = null;
+            this.downloadMode = 'idle';
           }
         }
         break;
@@ -745,7 +993,15 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
 
     for (const pkt of packets) {
       const point = this.decodeLivePacket(pkt);
-      if (point) this.onPen?.(point);
+      if (!point) continue;
+      // Same reasoning as onNextPage: a throwing consumer must not take out
+      // the rest of the batch (a 22-byte frame carries two points) or escape
+      // into handleNotification's error path.
+      try {
+        this.onPen?.(point);
+      } catch (err) {
+        this.log(`onPen handler threw: ${err instanceof Error ? err.message : err}`);
+      }
     }
   }
 
