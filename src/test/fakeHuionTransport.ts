@@ -49,13 +49,14 @@ export class FakeHuionTransport implements HuionTransport {
   async write(data: Uint8Array): Promise<void> {
     if (!this.opened) throw new Error('FakeHuionTransport: write before open');
     this.written.push(new Uint8Array(data));
-    const responder = this.responders.get(data[1]);
-    if (!responder) return;
-    for (const frame of responder(data)) {
-      // Deliver asynchronously so the driver's await resolves first, matching
-      // the real radio's ordering.
-      await Promise.resolve();
-      this.notifyHandler?.(frame);
+    const frames = this.responders.get(data[1])?.(data) ?? [];
+    for (const frame of frames) {
+      // Macrotask, not microtask: the caller of write() is suspended on this
+      // same promise chain, so a microtask would resume us first and deliver
+      // the reply BEFORE write() settles - the inverse of a real radio, and
+      // enough to strand any driver path that assigns its resolver after the
+      // write (downloadPages does exactly that).
+      setTimeout(() => this.notifyHandler?.(frame), 0);
     }
   }
 
