@@ -8,11 +8,9 @@ import {
   HUION_DEFAULT_PAGE_WIDTH_A4,
   HUION_DEFAULT_PAGE_WIDTH_A5,
   makeFrame,
-  NOTIFY_UUID,
-  SERVICE_UUID,
   verifyChecksum,
-  WRITE_UUID,
 } from '@/utils/huionProtocol';
+import { BleHuionTransport, type HuionTransport } from '@/utils/huionTransport';
 
 export interface HuionPenPoint {
   x: number;
@@ -71,10 +69,14 @@ interface DecodedOfflinePoint {
 }
 
 export class HuionNoteBLE implements TabletBackendCapabilities {
-  private device: BluetoothDevice | null = null;
-  private server: BluetoothRemoteGATTServer | null = null;
-  private writeChar: BluetoothRemoteGATTCharacteristic | null = null;
-  private notifyChar: BluetoothRemoteGATTCharacteristic | null = null;
+  private transport: HuionTransport;
+
+  constructor(transport?: HuionTransport) {
+    this.transport = transport ?? new BleHuionTransport(
+      (msg) => this.log(msg),
+      (status) => this.setStatus(status),
+    );
+  }
 
   private challenge: [number, number, number] | null = null;
   private authenticated = false;
@@ -113,11 +115,8 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
 
   get isConnected() { return this.authenticated; }
   get isStreaming() { return this.streaming; }
-  get deviceName() { return this.device?.name ?? 'Unknown'; }
-  get notebookUuid() {
-    const rawId = this.device?.id || this.device?.name || 'unknown';
-    return `huion:${rawId}`;
-  }
+  get deviceName() { return this.transport.deviceName; }
+  get notebookUuid() { return `huion:${this.transport.deviceId}`; }
   get capabilities() {
     return { paper: true, tablet: true } as const;
   }
@@ -127,96 +126,39 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   private connectReject: ((err: Error) => void) | null = null;
 
   async connect(): Promise<void> {
-    this.setStatus('Scanning...');
-    this.log('[1/7] Requesting BLE device (filters: Huion, HUION, Note)...');
-
-    try {
-      this.device = await navigator.bluetooth.requestDevice({
-        filters: [{ namePrefix: 'Huion' }, { namePrefix: 'HUION' }, { namePrefix: 'Note' }],
-        optionalServices: [SERVICE_UUID, 'battery_service'],
-      });
-    } catch (e: any) {
-      throw new Error(`BLE device request failed: ${e?.message ?? e}. Is the device on and in range? Did you pick it in the Chrome popup?`);
-    }
-
-    this.log(`[2/7] Device selected: ${this.device.name ?? 'unnamed'} (${this.device.id})`);
-
-    this.device.addEventListener('gattserverdisconnected', () => {
-      this.authenticated = false;
-      this.streaming = false;
-      this.setStatus('Disconnected');
-      this.log('Device disconnected');
-      if (this.connectReject) {
-        this.connectReject(new Error('Device disconnected during handshake'));
-        this.connectResolve = null;
-        this.connectReject = null;
-      }
-      if (this.pageResolve) {
-        this.log('Download interrupted by disconnect');
-        const pages = [...this.downloadedPages];
-        this.pageResolve(pages);
-        this.pageResolve = null;
-        this.clearPageRetryTimer();
-        if (this.downloadTimer) {
-          clearTimeout(this.downloadTimer);
-          this.downloadTimer = null;
-        }
-      }
-    });
-
-    this.setStatus('Connecting GATT...');
-    this.log('[3/7] Connecting GATT server...');
-
-    try {
-      this.server = await this.device.gatt!.connect();
-    } catch (e: any) {
-      throw new Error(`GATT connect failed: ${e?.message ?? e}`);
-    }
-
-    this.log('[4/7] GATT connected, discovering service FFE0...');
-
-    try {
-      const svc = await this.server.getPrimaryService(SERVICE_UUID);
-      this.writeChar = await svc.getCharacteristic(WRITE_UUID);
-      this.notifyChar = await svc.getCharacteristic(NOTIFY_UUID);
-    } catch (e: any) {
-      throw new Error(`Service/characteristic discovery failed: ${e?.message ?? e}. Is this a Huion Note device?`);
-    }
-
-    this.log('[5/7] FFE0/FFE1/FFE2 found, enabling notifications...');
-
-    // Attach listener BEFORE startNotifications to avoid missing early packets
-    this.notifyChar.addEventListener('characteristicvaluechanged', (e: Event) => {
-      const val = (e.target as BluetoothRemoteGATTCharacteristic).value!;
-      this.handleNotification(new Uint8Array(val.buffer, val.byteOffset, val.byteLength))
+    this.transport.onNotify((bytes) => {
+      this.handleNotification(bytes)
         .catch((err) => this.log(`Notification handler error: ${err?.message ?? err}`));
     });
+    this.transport.onDisconnect(() => this.handleDisconnect());
+    await this.transport.open();
+    await this.performHandshake();
+  }
 
-    try {
-      await this.notifyChar.startNotifications();
-      this.log('FFE1 notifications enabled');
-    } catch (e: any) {
-      throw new Error(`Failed to start FFE1 notifications: ${e?.message ?? e}`);
+  private handleDisconnect() {
+    this.authenticated = false;
+    this.streaming = false;
+    this.setStatus('Disconnected');
+    this.log('Device disconnected');
+    if (this.connectReject) {
+      this.connectReject(new Error('Device disconnected during handshake'));
+      this.connectResolve = null;
+      this.connectReject = null;
     }
-
-    // The Huion APK also enables notifications on FFE2 (the write char).
-    // This is unusual but was observed in the decomp — some firmware versions
-    // may send responses on FFE2 or need the CCCD written on both.
-    try {
-      this.writeChar.addEventListener('characteristicvaluechanged', (e: Event) => {
-        const val = (e.target as BluetoothRemoteGATTCharacteristic).value!;
-        const bytes = new Uint8Array(val.buffer, val.byteOffset, val.byteLength);
-        this.log(`RX (FFE2): ${Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ')} [log only, not processed]`);
-      });
-      await this.writeChar.startNotifications();
-      this.log('FFE2 notifications also enabled (log only)');
-    } catch {
-      this.log('FFE2 notifications not supported (normal)');
+    if (this.pageResolve) {
+      this.log('Download interrupted by disconnect');
+      const pages = [...this.downloadedPages];
+      this.pageResolve(pages);
+      this.pageResolve = null;
+      this.clearPageRetryTimer();
+      if (this.downloadTimer) {
+        clearTimeout(this.downloadTimer);
+        this.downloadTimer = null;
+      }
     }
+  }
 
-    // Wait for BLE stack to settle — the APK waits ~2.1s after service discovery
-    await this.sleep(500);
-
+  private async performHandshake(): Promise<void> {
     this.log('[6/7] Notifications ready, starting handshake (CD 81 08 ...)...');
     this.setStatus('Handshaking...');
 
@@ -240,7 +182,7 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   async disconnect(): Promise<void> {
     if (this.streaming) await this.stopStreaming();
     this.clearPageRetryTimer();
-    this.device?.gatt?.disconnect();
+    await this.transport.close();
     this.authenticated = false;
     this.streaming = false;
     this.setStatus('Disconnected');
@@ -304,30 +246,8 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
 
   // --- Private ---
 
-  private async write(data: Uint8Array) {
-    if (!this.writeChar) throw new Error('Not connected');
-    const hex = Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ');
-    this.log(`TX: ${hex}`);
-    const payload = new Uint8Array(data);
-    // Try write-without-response first (most BLE devices prefer this),
-    // fall back to write-with-response, then deprecated writeValue
-    try {
-      if (this.writeChar.writeValueWithoutResponse) {
-        await this.writeChar.writeValueWithoutResponse(payload);
-      } else {
-        throw new Error('writeValueWithoutResponse unavailable');
-      }
-    } catch {
-      try {
-        if (this.writeChar.writeValueWithResponse) {
-          await this.writeChar.writeValueWithResponse(payload);
-        } else {
-          throw new Error('writeValueWithResponse unavailable');
-        }
-      } catch {
-        await this.writeChar.writeValue(payload);
-      }
-    }
+  private write(data: Uint8Array): Promise<void> {
+    return this.transport.write(data);
   }
 
   private sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
