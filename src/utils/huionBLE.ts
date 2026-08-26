@@ -96,6 +96,7 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   private expectedPackageCount = 0;
   private currentDownloadPage = 0;
   private pageResolve: ((pages: HuionPage[]) => void) | null = null;
+  private singlePageResolve: ((page: HuionPage) => void) | null = null;
   private pageCountResolve: ((count: number) => void) | null = null;
   private downloadedPages: HuionPage[] = [];
   private totalPages = 0;
@@ -146,7 +147,20 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       this.connectResolve = null;
       this.connectReject = null;
     }
-    if (this.pageResolve) {
+    if (this.singlePageResolve) {
+      this.log('Single-page download interrupted by disconnect');
+      const packages = this.pagePackages.get(this.currentDownloadPage) || [];
+      const page = this.decodePage(this.currentDownloadPage, packages);
+      const resolvePage = this.singlePageResolve;
+      this.singlePageResolve = null;
+      this.pageResolve = null;
+      this.clearPageRetryTimer();
+      if (this.downloadTimer) {
+        clearTimeout(this.downloadTimer);
+        this.downloadTimer = null;
+      }
+      resolvePage(page);
+    } else if (this.pageResolve) {
       this.log('Download interrupted by disconnect');
       const pages = [...this.downloadedPages];
       this.pageResolve(pages);
@@ -242,6 +256,61 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
           resolve(pages);
         }
       }, PAGE_DOWNLOAD_TIMEOUT_MS);
+    });
+  }
+
+  /**
+   * Pull a single page (per spec finding C1/C2: pages commit to device
+   * memory on page turn, and bulk download is slow and flaky, so the
+   * session engine wants to pull pages one at a time as they commit).
+   * Reuses the same request/package-assembly machinery as downloadPages(),
+   * but resolves with just this page instead of walking the whole book.
+   */
+  async downloadPage(pageNum: number): Promise<HuionPage> {
+    if (!this.authenticated) throw new Error('Not authenticated');
+    // Reset per-page buffers so consecutive single-page pulls (and any
+    // leftover state from a prior downloadPages() run) cannot contaminate
+    // this one - mirrors the reset downloadPages() does at its own entry.
+    this.packageRetries.clear();
+    this.pagePackages.clear();
+    this.expectedPackageCount = 0;
+    this.clearPageRetryTimer();
+
+    return new Promise<HuionPage>((resolve, reject) => {
+      // Assigned before requestPageDownload's write() is even called, so
+      // there is no dependency on the fake transport's macrotask-vs-microtask
+      // reply timing here (unlike downloadPages(), which assigns pageResolve
+      // only after awaiting its write - see huionFixtures.ts / FakeHuionTransport).
+      this.singlePageResolve = resolve;
+      // scheduleOfflinePageVerification()/verifyAndRecoverOfflinePage() gate
+      // on `pageResolve` being set to know a download is in flight; the
+      // actual resolution for a single-page pull goes through
+      // singlePageResolve instead, which finishCurrentPageDownload checks first.
+      this.pageResolve = () => {};
+      this.downloadTimer = setTimeout(() => {
+        if (this.singlePageResolve) {
+          this.log(`Page ${pageNum} download timed out`);
+          const packages = this.pagePackages.get(this.currentDownloadPage) || [];
+          const page = this.decodePage(this.currentDownloadPage, packages);
+          const resolvePage = this.singlePageResolve;
+          this.singlePageResolve = null;
+          this.pageResolve = null;
+          this.clearPageRetryTimer();
+          this.downloadTimer = null;
+          resolvePage(page);
+        }
+      }, PAGE_DOWNLOAD_TIMEOUT_MS);
+
+      this.requestPageDownload(pageNum).catch((err) => {
+        this.singlePageResolve = null;
+        this.pageResolve = null;
+        this.clearPageRetryTimer();
+        if (this.downloadTimer) {
+          clearTimeout(this.downloadTimer);
+          this.downloadTimer = null;
+        }
+        reject(err);
+      });
     });
   }
 
@@ -378,6 +447,20 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     }
 
     const page = this.decodePage(this.currentDownloadPage, packages);
+
+    if (this.singlePageResolve) {
+      const resolvePage = this.singlePageResolve;
+      this.singlePageResolve = null;
+      this.pageResolve = null;
+      if (this.downloadTimer) {
+        clearTimeout(this.downloadTimer);
+        this.downloadTimer = null;
+      }
+      this.setStatus('Connected');
+      resolvePage(page);
+      return;
+    }
+
     this.downloadedPages.push(page);
 
     if (this.currentDownloadPage + 1 < this.totalPages) {

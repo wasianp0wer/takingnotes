@@ -148,3 +148,43 @@ describe('getStoredPageCount', () => {
     expect(await device.getStoredPageCount()).toBe(9);
   });
 });
+
+describe('downloadPage', () => {
+  it('requests the page it was asked for', async () => {
+    const transport = connectedFake();
+    transport.on(CMD.REQUEST_PAGE, () => [
+      // Reply: zero packages -> an empty page, which the driver finishes immediately.
+      withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, 0, 0, 0, 0]),
+    ]);
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    const page = await device.downloadPage(3);
+
+    const request = transport.written.find((frame) => frame[1] === CMD.REQUEST_PAGE);
+    expect(request![3]).toBe(3);
+    expect(page.pageNum).toBe(3);
+    expect(page.strokes).toEqual([]);
+  });
+
+  it('rejects when not authenticated', async () => {
+    const device = new HuionNoteBLE(new FakeHuionTransport());
+    await expect(device.downloadPage(0)).rejects.toThrow();
+  });
+
+  it('leaves bulk download state untouched', async () => {
+    const transport = connectedFake();
+    transport.on(CMD.REQUEST_PAGE, () => [
+      withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, 0, 0, 0, 0]),
+    ]);
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    await device.downloadPage(1);
+    await device.downloadPage(2);
+
+    // A second single-page pull must not inherit the first one's buffers.
+    const requests = transport.written.filter((frame) => frame[1] === CMD.REQUEST_PAGE);
+    expect(requests.map((frame) => frame[3])).toEqual([1, 2]);
+  });
+});
