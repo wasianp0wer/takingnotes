@@ -122,6 +122,9 @@ export function ProbeApp() {
   const [live, setLive] = useState<LiveStats>(EMPTY_LIVE);
   const [snapshotLabel, setSnapshotLabel] = useState('before');
   const [truncationSeen, setTruncationSeen] = useState(false);
+  const [pageCount, setPageCount] = useState<number | null>(null);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [singlePage, setSinglePage] = useState<PageStat | null>(null);
 
   const addLog = useCallback((msg: string) => {
     const line = `${new Date().toLocaleTimeString()}  ${msg}`;
@@ -261,6 +264,46 @@ export function ProbeApp() {
     }
   }, [addLog, snapshotLabel, truncationSeen]);
 
+  // Task 4's operation, on real hardware: standalone CURRENT_PAGE (0x85)
+  // query. Read-only.
+  const readPageCount = useCallback(async () => {
+    const huion = huionRef.current;
+    if (!huion) return;
+    setBusy('Querying stored page count');
+    try {
+      const count = await huion.getStoredPageCount();
+      setPageCount(count);
+      addLog(`Stored page count (0x85): ${count}`);
+    } catch (error) {
+      addLog(`PAGE COUNT FAILED: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBusy(null);
+    }
+  }, [addLog]);
+
+  // Task 3's operation, on real hardware: pull exactly one stored page rather
+  // than the whole book. Read-only — this probe never sends 0x8B/0x8C.
+  const downloadSinglePage = useCallback(async () => {
+    const huion = huionRef.current;
+    if (!huion) return;
+    setBusy(`Downloading page ${pageIndex} (up to ~15s)`);
+    const startedAt = performance.now();
+    try {
+      addLog(`--- SINGLE PAGE ${pageIndex} start ---`);
+      const page = await huion.downloadPage(pageIndex);
+      const [stat] = summarizePages([page]);
+      setSinglePage(stat);
+      addLog(
+        `--- SINGLE PAGE ${stat.pageNum}: ${stat.strokes} strokes, ${stat.points} points ` +
+        `(${Math.round(performance.now() - startedAt)}ms) ---`,
+      );
+    } catch (error) {
+      addLog(`SINGLE PAGE FAILED: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBusy(null);
+    }
+  }, [addLog, pageIndex]);
+
   const startStreaming = useCallback(async () => {
     const huion = huionRef.current;
     if (!huion) return;
@@ -352,6 +395,11 @@ export function ProbeApp() {
       {/* ---- Controls ---- */}
       <section style={S.card}>
         <h2 style={S.h2}>Controls</h2>
+        <div style={S.expDetail}>
+          “Page count” and “Download page N” are the targeted, read-only alternatives to a full
+          snapshot — use them to verify the two operations the session engine depends on without
+          re-downloading the whole book. Nothing here deletes anything.
+        </div>
         <div style={S.row}>
           <label style={S.label}>Snapshot label</label>
           <input
@@ -363,6 +411,32 @@ export function ProbeApp() {
           <button style={S.btn(connected && !busy)} onClick={takeSnapshot} disabled={!connected || !!busy}>
             Snapshot ROM
           </button>
+        </div>
+        <div style={S.row}>
+          <button style={S.btn(connected && !busy)} onClick={readPageCount} disabled={!connected || !!busy}>
+            Page count
+          </button>
+          <span style={S.status}>
+            {pageCount === null ? 'not queried yet' : `${pageCount} page(s) stored (0x85)`}
+          </span>
+        </div>
+        <div style={S.row}>
+          <label style={S.label}>Page #</label>
+          <input
+            style={S.inputNarrow}
+            type="number"
+            min={0}
+            value={pageIndex}
+            onChange={(e) => setPageIndex(Math.max(0, Math.trunc(Number(e.target.value)) || 0))}
+          />
+          <button style={S.btn(connected && !busy)} onClick={downloadSinglePage} disabled={!connected || !!busy}>
+            Download page {pageIndex}
+          </button>
+          <span style={S.status}>
+            {singlePage
+              ? `p${singlePage.pageNum}: ${singlePage.strokes} strokes, ${singlePage.points} points`
+              : 'not pulled yet'}
+          </span>
         </div>
         <div style={S.row}>
           <button
@@ -554,6 +628,16 @@ const S = {
     fontFamily: 'inherit',
     fontSize: 12,
     width: 160,
+  } as const,
+  inputNarrow: {
+    background: '#171717',
+    border: '1px solid #444',
+    borderRadius: 5,
+    color: '#e5e5e5',
+    padding: '8px 10px',
+    fontFamily: 'inherit',
+    fontSize: 12,
+    width: 70,
   } as const,
   experiment: { borderTop: '1px solid #333', paddingTop: 10, marginTop: 10 } as const,
   expTitle: { fontSize: 13, marginBottom: 4, color: '#e5e5e5' } as const,
