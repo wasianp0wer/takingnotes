@@ -168,6 +168,7 @@ describe('pages repository', () => {
       setPageTranscript(page.id, {
         markdown: 'hi',
         model: 'm',
+        promptVersion: 'v1',
         status: 'done',
         error: null,
         updatedAt: 1,
@@ -198,6 +199,7 @@ describe('pages repository', () => {
     await setPageTranscript(page.id, {
       markdown: '# Heading',
       model: 'some-vision-model',
+      promptVersion: 'handwriting-v1',
       status: 'done',
       error: null,
       updatedAt: 42,
@@ -206,6 +208,10 @@ describe('pages repository', () => {
     const loaded = await getPage(page.id);
     expect(loaded?.transcript?.markdown).toBe('# Heading');
     expect(loaded?.transcript?.status).toBe('done');
+    // Both provenance fields must survive the round trip - they are what makes
+    // "which pages need re-running after a model or prompt change" answerable.
+    expect(loaded?.transcript?.model).toBe('some-vision-model');
+    expect(loaded?.transcript?.promptVersion).toBe('handwriting-v1');
   });
 
   it('throws when updating an unknown page', async () => {
@@ -213,6 +219,7 @@ describe('pages repository', () => {
       setPageTranscript('missing', {
         markdown: '',
         model: 'm',
+        promptVersion: 'v1',
         status: 'failed',
         error: 'nope',
         updatedAt: 1,

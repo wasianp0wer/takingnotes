@@ -17,7 +17,17 @@ export interface PageStroke {
 
 export interface TranscriptRecord {
   markdown: string;
+  /** Ollama model that produced this text, e.g. `gemma3:4b`. */
   model: string;
+  /**
+   * Identifies the prompt that produced this text. Transcription quality
+   * depends at least as much on the prompt as on the model, and prompts get
+   * tuned far more often than models get swapped - without this, a prompt
+   * change leaves no way to find which transcripts are stale short of
+   * re-running every page. Required rather than optional so a caller cannot
+   * silently omit it.
+   */
+  promptVersion: string;
   status: TranscriptStatus;
   error: string | null;
   updatedAt: number;
