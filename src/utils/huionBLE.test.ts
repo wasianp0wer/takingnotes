@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { FakeHuionTransport } from '@/test/fakeHuionTransport';
 import { connectedFake, withChecksum } from '@/test/huionFixtures';
 import { HuionNoteBLE } from '@/utils/huionBLE';
 import { CMD, computeAuthResponse } from '@/utils/huionProtocol';
@@ -44,5 +45,36 @@ describe('HuionNoteBLE handshake', () => {
     transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
 
     expect(turns).toBe(1);
+  });
+});
+
+describe('getStoredPageCount', () => {
+  it('returns the page count the device reports', async () => {
+    const transport = connectedFake();
+    // 0x85 reply carries the count at bytes 3-4, little-endian.
+    transport.on(CMD.CURRENT_PAGE, () => [
+      withChecksum([0xcd, CMD.CURRENT_PAGE, 0x08, 7, 0, 0, 0]),
+    ]);
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    expect(await device.getStoredPageCount()).toBe(7);
+  });
+
+  it('decodes a count above 255 from both bytes', async () => {
+    const transport = connectedFake();
+    // 300 = 0x012C -> low byte 0x2C, high byte 0x01
+    transport.on(CMD.CURRENT_PAGE, () => [
+      withChecksum([0xcd, CMD.CURRENT_PAGE, 0x08, 0x2c, 0x01, 0, 0]),
+    ]);
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    expect(await device.getStoredPageCount()).toBe(300);
+  });
+
+  it('rejects when not authenticated', async () => {
+    const device = new HuionNoteBLE(new FakeHuionTransport());
+    await expect(device.getStoredPageCount()).rejects.toThrow();
   });
 });

@@ -96,6 +96,7 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   private expectedPackageCount = 0;
   private currentDownloadPage = 0;
   private pageResolve: ((pages: HuionPage[]) => void) | null = null;
+  private pageCountResolve: ((count: number) => void) | null = null;
   private downloadedPages: HuionPage[] = [];
   private totalPages = 0;
   private romUsed = 0;
@@ -241,6 +242,25 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
           resolve(pages);
         }
       }, PAGE_DOWNLOAD_TIMEOUT_MS);
+    });
+  }
+
+  /**
+   * Standalone CURRENT_PAGE (0x85) query. Used as the session page baseline:
+   * a session's pages are the ones from this index onward.
+   */
+  async getStoredPageCount(): Promise<number> {
+    if (!this.authenticated) throw new Error('Not authenticated');
+    return new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pageCountResolve = null;
+        reject(new Error('Page count query timed out'));
+      }, 5000);
+      this.pageCountResolve = (count) => {
+        clearTimeout(timer);
+        resolve(count);
+      };
+      this.write(makeFrame(CMD.CURRENT_PAGE)).catch(reject);
     });
   }
 
@@ -535,6 +555,12 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       case CMD.CURRENT_PAGE: {
         // 0x85 reply: page count at bytes 3-4 (little-endian)
         if (data.length >= 5) {
+          if (this.pageCountResolve) {
+            const resolvePageCount = this.pageCountResolve;
+            this.pageCountResolve = null;
+            resolvePageCount((data[4] << 8) | data[3]);
+            break;
+          }
           this.totalPages = (data[4] << 8) | data[3];
           this.log(`Stored pages: ${this.totalPages}`);
           if (this.totalPages > 0 && this.pageResolve) {
