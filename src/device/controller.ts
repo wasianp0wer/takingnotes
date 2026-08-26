@@ -21,8 +21,6 @@ export interface DeviceController {
   stopStreaming(): Promise<void>;
   getStoredPageCount(): Promise<number>;
   downloadPage(pageNum: number): Promise<HuionPage>;
-  /** Test seam - see controller.test.ts. */
-  __emitPenForTest(point: HuionPenPoint): void;
 }
 
 const initialState: DeviceState = {
@@ -118,9 +116,6 @@ export function createDeviceController(
     },
     downloadPage(pageNum) {
       return device.downloadPage(pageNum);
-    },
-    __emitPenForTest(point) {
-      penEmitter.emit(point);
     },
   };
 }

@@ -44,6 +44,25 @@ describe('createEmitter', () => {
     expect(healthy).toHaveBeenCalledWith(1);
   });
 
+  it('skips a subscriber removed mid-emit but still delivers to the rest', () => {
+    // A Phase 2 session ending unsubscribes the recorder from inside a pen
+    // batch; the point still in flight must not reach the torn-down consumer,
+    // while every other subscriber carries on receiving it.
+    const emitter = createEmitter<number>();
+    const removed = vi.fn();
+    const survivor = vi.fn();
+    let unsubscribeRemoved: (() => void) | null = null;
+
+    emitter.subscribe(() => unsubscribeRemoved?.());
+    unsubscribeRemoved = emitter.subscribe(removed);
+    emitter.subscribe(survivor);
+
+    emitter.emit(7);
+
+    expect(removed).not.toHaveBeenCalled();
+    expect(survivor).toHaveBeenCalledWith(7);
+  });
+
   it('is unaffected by a subscriber added during emit', () => {
     const emitter = createEmitter<number>();
     const late = vi.fn();

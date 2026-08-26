@@ -16,9 +16,13 @@ export function createEmitter<T>(): Emitter<T> {
       return () => { listeners.delete(listener); };
     },
     emit(value) {
-      // Iterate a copy so a listener that subscribes or unsubscribes during
-      // delivery cannot change who receives this event.
+      // Iterate a copy so a listener added during delivery does not receive
+      // this event. Removal is the opposite: re-check membership before each
+      // call, so a listener that unsubscribed earlier in this same emit is
+      // skipped. When a Phase 2 session ends the recorder unsubscribes; a pen
+      // point already mid-batch must not still reach the torn-down consumer.
       for (const listener of [...listeners]) {
+        if (!listeners.has(listener)) continue;
         try {
           listener(value);
         } catch (error) {
