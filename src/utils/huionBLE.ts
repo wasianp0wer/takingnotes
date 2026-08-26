@@ -258,7 +258,10 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     try {
       await this.write(makeFrame(CMD.ROM_INFO));
     } catch (err) {
-      this.downloadMode = 'idle';
+      // Nothing is in flight yet (pageResolve isn't set until below), so
+      // this just releases the mutex - same effect as the manual version
+      // this replaced, routed through the shared helper for consistency.
+      this.failInFlightDownload(err);
       throw err;
     }
 
@@ -382,6 +385,60 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     }
   }
 
+  /**
+   * Aborts whatever download is in flight: clears the download and retry
+   * timers, releases the `downloadMode` mutex, and settles the pending
+   * promise using the same partial-data convention as the existing
+   * timeout/disconnect paths (resolve with whatever was decoded so far -
+   * never reject once a download has already started exchanging packets).
+   * A no-op (beyond making sure downloadMode is 'idle') if nothing is
+   * actually in flight, so it's safe to call defensively.
+   *
+   * Every write failure that happens *after* a download's own initial
+   * request has already succeeded - the ROM_INFO handler's CURRENT_PAGE
+   * query, the CURRENT_PAGE handler's initial requestPageDownload(0),
+   * finishCurrentPageDownload()'s page-to-page continuation, and the
+   * REGET_PACKAGE retry writes in handleOfflinePackageResponse() and
+   * verifyAndRecoverOfflinePage() - must route through here. The spec
+   * calls bulk download "flaky", so a transient write failure there is
+   * realistic, not hypothetical. Leaving downloadMode set after one of
+   * these fails would wedge every later downloadPage()/downloadPages()
+   * call behind whatever's left of the current downloadTimer (which, for
+   * a failure mid-way through a multi-page bulk walk, could be most of
+   * that walk's whole timeout budget) instead of recovering immediately.
+   */
+  private failInFlightDownload(reason: unknown): void {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    this.clearPageRetryTimer();
+    if (this.downloadTimer) {
+      clearTimeout(this.downloadTimer);
+      this.downloadTimer = null;
+    }
+
+    if (this.singlePageResolve) {
+      this.log(`Single-page download aborted: ${message}`);
+      const resolvePage = this.singlePageResolve;
+      this.singlePageResolve = null;
+      this.downloadMode = 'idle';
+      const packages = this.pagePackages.get(this.currentDownloadPage) || [];
+      resolvePage(this.decodePage(this.currentDownloadPage, packages));
+      return;
+    }
+
+    if (this.pageResolve) {
+      this.log(`Bulk download aborted: ${message}`);
+      const resolvePages = this.pageResolve;
+      this.pageResolve = null;
+      this.downloadMode = 'idle';
+      resolvePages([...this.downloadedPages]);
+      return;
+    }
+
+    // Nothing in flight (already settled by something else, or never
+    // started) - still make sure the mutex isn't left held.
+    this.downloadMode = 'idle';
+  }
+
   private scheduleOfflinePageVerification() {
     this.clearPageRetryTimer();
     if (this.downloadMode === 'idle' || this.expectedPackageCount <= 0) {
@@ -390,6 +447,7 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     this.pageRetryTimer = setTimeout(() => {
       void this.verifyAndRecoverOfflinePage().catch((err) => {
         this.log(`Offline page verification failed: ${err?.message ?? err}`);
+        this.failInFlightDownload(err);
       });
     }, PACKAGE_RETRY_IDLE_MS);
   }
@@ -561,7 +619,21 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     // Framed command response
     if (data.length >= 3 && data[0] === 0xCD) {
       const cmd = data[1];
-      await this.handleCommand(cmd, data);
+      try {
+        await this.handleCommand(cmd, data);
+      } catch (err) {
+        // Single choke point for every write failure that can occur inside
+        // handleCommand's cascades (ROM_INFO's CURRENT_PAGE query,
+        // CURRENT_PAGE's requestPageDownload(0), finishCurrentPageDownload's
+        // page-to-page continuation, and the REGET_PACKAGE retry writes) -
+        // failInFlightDownload() is a no-op unless a download is actually
+        // in flight, so this is safe for non-download failures too (e.g. a
+        // handshake write, though those already have their own handling).
+        // Rethrown so the existing generic logger at the call site below
+        // still logs it, preserving prior behaviour.
+        this.failInFlightDownload(err);
+        throw err;
+      }
       // Also check if it's an 11-byte live packet disguised as 0x8D
       if (cmd === CMD.ONLINE_ENABLE && data.length >= 11 && data[data.length - 1] !== 0xED) {
         this.handleOnlineData(data);

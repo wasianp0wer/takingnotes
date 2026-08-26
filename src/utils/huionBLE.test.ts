@@ -312,4 +312,66 @@ describe('downloadPage', () => {
       vi.useRealTimers();
     }
   });
+
+  it('does not wedge downloadMode when a continuation write fails mid-bulk-download', async () => {
+    // The spec calls bulk download "flaky", so a transient BLE write
+    // failure partway through is realistic. This targets the
+    // CURRENT_PAGE handler's requestPageDownload(0) write - one of three
+    // continuation writes (triggered from inside handleCommand, not from
+    // a method's own initial call) that used to propagate up to the
+    // generic notification-handler catch and get silently logged,
+    // leaving downloadMode stuck at 'bulk' with nothing left to reset it
+    // short of the download's own (possibly very long, for a multi-page
+    // walk) scaled timeout.
+    const transport = connectedFake();
+    transport.on(CMD.ROM_INFO, () => [
+      withChecksum([0xcd, CMD.ROM_INFO, 0x08, 0, 0, 0, 0]),
+    ]);
+    transport.on(CMD.CURRENT_PAGE, () => [
+      // 3 pages stored, so the resulting scaled timeout (3 * 15s) is far
+      // longer than this test should ever need to wait.
+      withChecksum([0xcd, CMD.CURRENT_PAGE, 0x08, 3, 0, 0, 0]),
+    ]);
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    const originalWrite = transport.write.bind(transport);
+    transport.write = (data: Uint8Array) => {
+      if (data[1] === CMD.REQUEST_PAGE) {
+        return Promise.reject(new Error('simulated BLE write failure'));
+      }
+      return originalWrite(data);
+    };
+
+    vi.useFakeTimers();
+    try {
+      const bulkPromise = device.downloadPages();
+      // Cascade: ROM_INFO ack -> write(CURRENT_PAGE) -> CURRENT_PAGE ack ->
+      // requestPageDownload(0)'s REQUEST_PAGE write, which fails.
+      await vi.advanceTimersByTimeAsync(100);
+
+      // Checked first, so a regression fails fast (a rejection) instead of
+      // hanging until the 5s test timeout: downloadMode must actually have
+      // been released by the failed continuation write, not just the
+      // original bulk download's own promise. A subsequent single-page
+      // pull must succeed rather than be rejected as "already in progress".
+      transport.write = originalWrite;
+      transport.on(CMD.REQUEST_PAGE, () => [
+        withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, 0, 0, 0, 0]),
+      ]);
+      const pagePromise = device.downloadPage(0);
+      // Still under fake timers - this pull's own REQUEST_PAGE reply is
+      // scheduled via setTimeout(0) too, so it needs its own advance.
+      await vi.advanceTimersByTimeAsync(100);
+      const page = await pagePromise;
+      expect(page.pageNum).toBe(0);
+
+      // The original in-flight bulk download must also have settled (with
+      // partial data, the existing convention) rather than being left to
+      // hang until its full 45s scaled timeout.
+      await expect(bulkPromise).resolves.toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
