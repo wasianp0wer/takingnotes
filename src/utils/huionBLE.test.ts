@@ -187,4 +187,129 @@ describe('downloadPage', () => {
     const requests = transport.written.filter((frame) => frame[1] === CMD.REQUEST_PAGE);
     expect(requests.map((frame) => frame[3])).toEqual([1, 2]);
   });
+
+  it('does not let page 1 data leak into page 2 (real package data, not just an empty page)', async () => {
+    const transport = connectedFake();
+    // Page 1 gets a real reply carrying two package frames with an actual
+    // stroke; page 2 gets an empty reply. If page 2's decode somehow saw
+    // page 1's leftover packages/expectedPackageCount, it would decode a
+    // non-empty page instead of an empty one.
+    transport.on(CMD.REQUEST_PAGE, (frame) => {
+      if (frame[3] === 1) {
+        return [
+          withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, 2, 0, 0, 0]),
+          // pkg 1: one active point (x=1000,y=1000,pressure=4096,status=1)
+          withChecksum([0xcd, CMD.PAGE_PACKAGE, 0x0c, 1, 0, 0xe8, 0x03, 0xe8, 0x03, 0x00, 0x30]),
+          // pkg 2 (== expectedPackageCount): a second active point far
+          // enough away to survive the distance filter and close the stroke.
+          withChecksum([0xcd, CMD.PAGE_PACKAGE, 0x0c, 2, 0, 0x88, 0x13, 0x88, 0x13, 0x00, 0x30]),
+        ];
+      }
+      return [withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, 0, 0, 0, 0])];
+    });
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    const page1 = await device.downloadPage(1);
+    expect(page1.strokes.length).toBeGreaterThan(0);
+    expect(page1.strokes[0].points.length).toBeGreaterThan(0);
+
+    const page2 = await device.downloadPage(2);
+    expect(page2.pageNum).toBe(2);
+    expect(page2.strokes).toEqual([]);
+  });
+
+  it('is not hijacked by an unsolicited ROM_INFO/CURRENT_PAGE pair mid-pull', async () => {
+    // The device is known to send unsolicited frames (CMD.NEXT_PAGE fires on
+    // a physical page-turn button press), so an unsolicited ROM_INFO/
+    // CURRENT_PAGE pair arriving mid single-page pull is plausible, not
+    // contrived. The old implementation gated the bulk-orchestration
+    // branches on `pageResolve` truthiness, and downloadPage() set a
+    // placeholder pageResolve so those guards would pass - letting the pair
+    // kick off a bulk restart at page 0 in the middle of the page-3 pull.
+    //
+    // Driven entirely via transport.emit() (bypassing the responder/
+    // macrotask machinery) so the sequencing is deterministic rather than a
+    // race between the page's own reply and the injected frames: each emit
+    // call runs the driver's handling synchronously up to its next await,
+    // so by the time one emit() returns, any write() it triggered has
+    // already landed in `transport.written`.
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    const promise = device.downloadPage(3);
+    // Page 3's own ack: 1 package expected, so the pull stays open (doesn't
+    // finish on the ack alone) while the injected chatter below plays out.
+    transport.emit(withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, 1, 0, 0, 0]));
+
+    // Unsolicited ROM_INFO arrives mid-pull...
+    transport.emit(withChecksum([0xcd, CMD.ROM_INFO, 0x08, 0, 0, 0, 0]));
+    // ...followed by its CURRENT_PAGE reply, reporting 5 pages stored. A
+    // hijacked driver reacts to this by firing its own REQUEST_PAGE(0).
+    transport.emit(withChecksum([0xcd, CMD.CURRENT_PAGE, 0x08, 5, 0, 0, 0]));
+    // The device's actual (delayed) ack for the real request, this time
+    // carrying 0 packages. A hijacked driver instead treats this as the ack
+    // for the REQUEST_PAGE(0) it fired itself, and resolves page 0.
+    transport.emit(withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, 0, 0, 0, 0]));
+
+    const page = await promise;
+
+    expect(page.pageNum).toBe(3);
+    const requestPageFrames = transport.written.filter((frame) => frame[1] === CMD.REQUEST_PAGE);
+    expect(requestPageFrames).toHaveLength(1);
+    expect(requestPageFrames[0][3]).toBe(3);
+  });
+
+  it('rejects a concurrent downloadPages() instead of silently discarding it', async () => {
+    // Reproduces the hang finding: downloadPages() used to share pageResolve
+    // with downloadPage() with no mutual exclusion, so starting a bulk
+    // download while a single-page pull was in flight would overwrite
+    // pageResolve with the bulk resolver, which finishCurrentPageDownload's
+    // singlePageResolve branch would then null out and never call - the
+    // bulk caller (TabletPanel) would hang forever.
+    const transport = connectedFake();
+    transport.on(CMD.REQUEST_PAGE, () => [
+      withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, 0, 0, 0, 0]),
+    ]);
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    const singlePromise = device.downloadPage(1);
+    await expect(device.downloadPages()).rejects.toThrow(/single/i);
+
+    // The in-flight single-page pull must be unaffected and finish cleanly.
+    const page = await singlePromise;
+    expect(page.pageNum).toBe(1);
+
+    // Back to idle: a real downloadPages() call now succeeds normally.
+    transport.on(CMD.ROM_INFO, () => [
+      withChecksum([0xcd, CMD.ROM_INFO, 0x08, 0, 0, 0, 0]),
+    ]);
+    transport.on(CMD.CURRENT_PAGE, () => [
+      withChecksum([0xcd, CMD.CURRENT_PAGE, 0x08, 0, 0, 0, 0]),
+    ]);
+    await expect(device.downloadPages()).resolves.toEqual([]);
+  });
+
+  it('rejects a concurrent downloadPage() while a bulk download is in flight', async () => {
+    const transport = connectedFake();
+    // No ROM_INFO/CURRENT_PAGE responders configured, so downloadPages()
+    // stays pending on its own 15s timeout for the duration of this test -
+    // long enough to assert the mutual exclusion without needing it to
+    // resolve. Use fake timers so the test doesn't actually wait 15s.
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    vi.useFakeTimers();
+    try {
+      const bulkPromise = device.downloadPages();
+      await expect(device.downloadPage(0)).rejects.toThrow(/bulk/i);
+      // PAGE_DOWNLOAD_TIMEOUT_MS is private to huionBLE.ts; 15s matches it.
+      await vi.advanceTimersByTimeAsync(15_000);
+      await bulkPromise;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

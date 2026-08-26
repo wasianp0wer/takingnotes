@@ -98,6 +98,17 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   private pageResolve: ((pages: HuionPage[]) => void) | null = null;
   private singlePageResolve: ((page: HuionPage) => void) | null = null;
   private pageCountResolve: ((count: number) => void) | null = null;
+  /**
+   * Explicit mutual-exclusion state for the two download paths. Neither
+   * `downloadPage()` nor `downloadPages()` may start while the other (or
+   * another instance of itself) is in flight - both check this at entry and
+   * reset it to 'idle' on every one of their exit paths. The ROM_INFO and
+   * CURRENT_PAGE handlers also gate their bulk-orchestration branches on
+   * this being exactly 'bulk', so a single-page pull cannot be hijacked by
+   * an unsolicited ROM_INFO/CURRENT_PAGE frame (the device is known to send
+   * unsolicited frames - see the CMD.NEXT_PAGE case below).
+   */
+  private downloadMode: 'idle' | 'single' | 'bulk' = 'idle';
   private downloadedPages: HuionPage[] = [];
   private totalPages = 0;
   private romUsed = 0;
@@ -153,12 +164,12 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       const page = this.decodePage(this.currentDownloadPage, packages);
       const resolvePage = this.singlePageResolve;
       this.singlePageResolve = null;
-      this.pageResolve = null;
       this.clearPageRetryTimer();
       if (this.downloadTimer) {
         clearTimeout(this.downloadTimer);
         this.downloadTimer = null;
       }
+      this.downloadMode = 'idle';
       resolvePage(page);
     } else if (this.pageResolve) {
       this.log('Download interrupted by disconnect');
@@ -170,6 +181,7 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
         clearTimeout(this.downloadTimer);
         this.downloadTimer = null;
       }
+      this.downloadMode = 'idle';
     }
   }
 
@@ -234,13 +246,22 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
 
   async downloadPages(): Promise<HuionPage[]> {
     if (!this.authenticated) throw new Error('Not authenticated');
+    if (this.downloadMode !== 'idle') {
+      throw new Error(`Cannot start bulk download: a ${this.downloadMode} download is already in progress`);
+    }
+    this.downloadMode = 'bulk';
     this.log('Requesting ROM info...');
     this.packageRetries.clear();
     this.pagePackages.clear();
     this.expectedPackageCount = 0;
     this.clearPageRetryTimer();
-    await this.write(makeFrame(CMD.ROM_INFO));
-    
+    try {
+      await this.write(makeFrame(CMD.ROM_INFO));
+    } catch (err) {
+      this.downloadMode = 'idle';
+      throw err;
+    }
+
     return new Promise((resolve) => {
       this.pageResolve = resolve;
       this.downloadedPages = [];
@@ -253,6 +274,7 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
           this.clearPageRetryTimer();
           this.pageResolve = null;
           this.downloadTimer = null;
+          this.downloadMode = 'idle';
           resolve(pages);
         }
       }, PAGE_DOWNLOAD_TIMEOUT_MS);
@@ -268,12 +290,21 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
    */
   async downloadPage(pageNum: number): Promise<HuionPage> {
     if (!this.authenticated) throw new Error('Not authenticated');
-    // Reset per-page buffers so consecutive single-page pulls (and any
-    // leftover state from a prior downloadPages() run) cannot contaminate
-    // this one - mirrors the reset downloadPages() does at its own entry.
-    this.packageRetries.clear();
+    if (this.downloadMode !== 'idle') {
+      throw new Error(`Cannot start single-page download: a ${this.downloadMode} download is already in progress`);
+    }
+    this.downloadMode = 'single';
+    // Not needed for isolation between consecutive single-page pulls -
+    // requestPageDownload() below already resets packageRetries,
+    // expectedPackageCount, and pagePackages's entry for the *current* page
+    // key on every call, which is sufficient since nothing ever reads a
+    // pagePackages entry for any page other than currentDownloadPage. This
+    // clear() is kept anyway to bound pagePackages's size across a long
+    // session that pulls many single pages one at a time (Phase 2's use
+    // case) - see the deferred "pagePackages.clear() vs per-key reset
+    // inconsistency" note; downloadPages() has the same clear() at its own
+    // entry for the same reason.
     this.pagePackages.clear();
-    this.expectedPackageCount = 0;
     this.clearPageRetryTimer();
 
     return new Promise<HuionPage>((resolve, reject) => {
@@ -281,12 +312,11 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       // there is no dependency on the fake transport's macrotask-vs-microtask
       // reply timing here (unlike downloadPages(), which assigns pageResolve
       // only after awaiting its write - see huionFixtures.ts / FakeHuionTransport).
-      this.singlePageResolve = resolve;
       // scheduleOfflinePageVerification()/verifyAndRecoverOfflinePage() gate
-      // on `pageResolve` being set to know a download is in flight; the
-      // actual resolution for a single-page pull goes through
-      // singlePageResolve instead, which finishCurrentPageDownload checks first.
-      this.pageResolve = () => {};
+      // on `downloadMode !== 'idle'` to know a download is in flight, so no
+      // placeholder pageResolve is needed here - pageResolve stays untouched
+      // (and null) for the whole single-page path.
+      this.singlePageResolve = resolve;
       this.downloadTimer = setTimeout(() => {
         if (this.singlePageResolve) {
           this.log(`Page ${pageNum} download timed out`);
@@ -294,21 +324,21 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
           const page = this.decodePage(this.currentDownloadPage, packages);
           const resolvePage = this.singlePageResolve;
           this.singlePageResolve = null;
-          this.pageResolve = null;
           this.clearPageRetryTimer();
           this.downloadTimer = null;
+          this.downloadMode = 'idle';
           resolvePage(page);
         }
       }, PAGE_DOWNLOAD_TIMEOUT_MS);
 
       this.requestPageDownload(pageNum).catch((err) => {
         this.singlePageResolve = null;
-        this.pageResolve = null;
         this.clearPageRetryTimer();
         if (this.downloadTimer) {
           clearTimeout(this.downloadTimer);
           this.downloadTimer = null;
         }
+        this.downloadMode = 'idle';
         reject(err);
       });
     });
@@ -354,7 +384,7 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
 
   private scheduleOfflinePageVerification() {
     this.clearPageRetryTimer();
-    if (!this.pageResolve || this.expectedPackageCount <= 0) {
+    if (this.downloadMode === 'idle' || this.expectedPackageCount <= 0) {
       return;
     }
     this.pageRetryTimer = setTimeout(() => {
@@ -390,7 +420,7 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
 
   private async verifyAndRecoverOfflinePage() {
     this.pageRetryTimer = null;
-    if (!this.pageResolve || this.expectedPackageCount <= 0) {
+    if (this.downloadMode === 'idle' || this.expectedPackageCount <= 0) {
       return;
     }
 
@@ -451,11 +481,11 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     if (this.singlePageResolve) {
       const resolvePage = this.singlePageResolve;
       this.singlePageResolve = null;
-      this.pageResolve = null;
       if (this.downloadTimer) {
         clearTimeout(this.downloadTimer);
         this.downloadTimer = null;
       }
+      this.downloadMode = 'idle';
       this.setStatus('Connected');
       resolvePage(page);
       return;
@@ -476,6 +506,7 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     }
     this.pageResolve?.(this.downloadedPages);
     this.pageResolve = null;
+    this.downloadMode = 'idle';
   }
 
   private async handleOfflinePackageResponse(pkgNum: number, data: Uint8Array, source: 'stream' | 'reget') {
@@ -632,8 +663,11 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
           this.romTotal = (data[6] << 8) | data[5];
           this.log(`ROM state: [${Array.from(data.slice(3, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ')}]`);
           this.log(`ROM usage: ${this.romUsed}/${this.romTotal}`);
-          // Now query actual page count
-          if (this.pageResolve) {
+          // Now query actual page count. Gated on downloadMode === 'bulk'
+          // (not just pageResolve truthiness) so an unsolicited ROM_INFO
+          // frame arriving mid single-page pull can't hijack it into
+          // restarting a bulk walk.
+          if (this.downloadMode === 'bulk' && this.pageResolve) {
             await this.write(makeFrame(CMD.CURRENT_PAGE));
           }
         }
@@ -650,7 +684,11 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
           }
           this.totalPages = (data[4] << 8) | data[3];
           this.log(`Stored pages: ${this.totalPages}`);
-          if (this.totalPages > 0 && this.pageResolve) {
+          // Gated on downloadMode === 'bulk' (not just pageResolve
+          // truthiness) for the same reason as the ROM_INFO case above: a
+          // single-page pull never wants this branch, even if an
+          // unsolicited CURRENT_PAGE frame arrives while one is in flight.
+          if (this.totalPages > 0 && this.downloadMode === 'bulk' && this.pageResolve) {
             if (this.downloadTimer) clearTimeout(this.downloadTimer);
             const timeoutMs = PAGE_DOWNLOAD_TIMEOUT_MS * Math.max(1, this.totalPages);
             this.downloadTimer = setTimeout(() => {
@@ -661,16 +699,18 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
                 this.pageResolve(pages);
                 this.pageResolve = null;
                 this.downloadTimer = null;
+                this.downloadMode = 'idle';
               }
             }, timeoutMs);
             // Captures show page request starts with page 0: cd 86 08 00 00 00 00 ed
             await this.requestPageDownload(0);
-          } else if (this.pageResolve) {
+          } else if (this.downloadMode === 'bulk' && this.pageResolve) {
             this.log('No pages stored on device');
             this.clearPageRetryTimer();
             if (this.downloadTimer) { clearTimeout(this.downloadTimer); this.downloadTimer = null; }
             this.pageResolve([]);
             this.pageResolve = null;
+            this.downloadMode = 'idle';
           }
         }
         break;
