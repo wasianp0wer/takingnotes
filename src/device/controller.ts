@@ -90,13 +90,14 @@ export function createDeviceController(
       return logEmitter.subscribe(fn);
     },
     async connect() {
+      // device.connect() itself calls onStatus('Authenticated') and then
+      // onStatus('Connected') during the handshake - both with isConnected
+      // already true - strictly before its promise resolves (VERIFY_RESPONSE
+      // sets `authenticated = true` and calls setStatus, then MAX_INFO calls
+      // setStatus('Connected') and only then resolves connectResolve()). The
+      // shared onStatus handler above already picks both up, so no separate
+      // setState is needed here, matching disconnect/startStreaming/stopStreaming.
       await device.connect();
-      setState({
-        isConnected: device.isConnected,
-        isStreaming: device.isStreaming,
-        deviceName: device.deviceName,
-        status: 'Connected',
-      });
     },
     async disconnect() {
       // device.disconnect() flips its internal flags and calls onStatus
