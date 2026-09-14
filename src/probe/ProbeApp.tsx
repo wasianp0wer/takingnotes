@@ -65,6 +65,13 @@ const EXPERIMENTS = [
   },
 ] as const;
 
+function fmtDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(total / 60);
+  const sec = total % 60;
+  return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
+}
+
 function summarizePages(pages: HuionPage[]): PageStat[] {
   return pages.map((page) => ({
     pageNum: page.pageNum,
@@ -126,17 +133,55 @@ export function ProbeApp() {
   const [pageIndex, setPageIndex] = useState(0);
   const [singlePage, setSinglePage] = useState<PageStat | null>(null);
 
+  // --- Stability / page-turn instrumentation -------------------------------
+  // connectedAt drives the uptime clock; lastFrameAt is how we tell a live
+  // connection from one that is silently dead (GATT still "connected" but no
+  // bytes arriving). claimedTurns is YOUR count of physical button presses,
+  // compared against the 0x8A frames the driver actually saw.
+  const [connectedAt, setConnectedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [claimedTurns, setClaimedTurns] = useState(0);
+  const [drops, setDrops] = useState<{ at: string; uptimeS: number; note: string }[]>([]);
+  const lastFrameAtRef = useRef<number | null>(null);
+  const connectedAtRef = useRef<number | null>(null);
+  const [lastFrameAt, setLastFrameAt] = useState<number | null>(null);
+
   const addLog = useCallback((msg: string) => {
     const line = `${new Date().toLocaleTimeString()}  ${msg}`;
     setLog((prev) => [...prev.slice(-600), line]);
     if (/timed out|interrupted by disconnect/i.test(msg)) {
       setTruncationSeen(true);
     }
+    // The driver logs every inbound frame as "RX: ...", including the 6-byte
+    // page-turn frame even while streaming (only 11-byte live pen packets are
+    // suppressed). So this is a faithful liveness signal.
+    if (msg.startsWith('RX:')) {
+      lastFrameAtRef.current = Date.now();
+      setLastFrameAt(lastFrameAtRef.current);
+    }
   }, []);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ block: 'end' });
   }, [log]);
+
+  useEffect(() => { connectedAtRef.current = connectedAt; }, [connectedAt]);
+
+  // 1Hz tick so uptime and last-frame age stay live without re-rendering on
+  // every pen point.
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Tab backgrounding is a prime suspect for dropped connections - browsers
+  // throttle timers and can suspend BLE work in hidden tabs. Record it so a
+  // drop can be correlated against it.
+  useEffect(() => {
+    const onVis = () => addLog(`*** TAB ${document.hidden ? 'HIDDEN' : 'VISIBLE'} ***`);
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [addLog]);
 
   const drawLivePoint = useCallback((point: HuionPenPoint) => {
     const canvas = canvasRef.current;
@@ -192,10 +237,26 @@ export function ProbeApp() {
     try {
       const huion = new HuionNoteBLE();
       huion.onLog = (msg) => { addLog(msg); console.log('[huion]', msg); };
-      huion.onStatus = setStatus;
+      huion.onStatus = (next) => {
+        setStatus(next);
+        if (/disconnect/i.test(next)) {
+          const startedAt = connectedAtRef.current;
+          const uptimeS = startedAt ? Math.round((Date.now() - startedAt) / 1000) : 0;
+          const sinceFrame = lastFrameAtRef.current
+            ? Math.round((Date.now() - lastFrameAtRef.current) / 1000)
+            : -1;
+          setDrops((prev) => [...prev, {
+            at: new Date().toLocaleTimeString(),
+            uptimeS,
+            note: `last frame ${sinceFrame}s before drop${document.hidden ? ', tab was HIDDEN' : ''}`,
+          }]);
+          addLog(`*** DISCONNECTED after ${uptimeS}s uptime; last inbound frame ${sinceFrame}s earlier ***`);
+          setConnectedAt(null);
+        }
+      };
       huion.onPen = handlePen;
       huion.onNextPage = () => {
-        addLog('*** PAGE TURN button pressed (0x8A) ***');
+        addLog('*** PAGE TURN detected (0x8A) ***');
         setLive((prev) => ({ ...prev, pageTurns: prev.pageTurns + 1 }));
       };
       huionRef.current = huion;
@@ -203,6 +264,10 @@ export function ProbeApp() {
       await huion.connect();
       setConnected(true);
       setDeviceName(huion.deviceName);
+      const startedAt = Date.now();
+      setConnectedAt(startedAt);
+      lastFrameAtRef.current = startedAt;
+      setLastFrameAt(startedAt);
       addLog(
         `Connected. model="${huion.config.modelName}" isA4=${huion.config.isA4} ` +
         `page=${huion.config.pageWidth}x${huion.config.pageHeight} battery=${huion.config.battery}`,
@@ -372,6 +437,75 @@ export function ProbeApp() {
           </span>
         </div>
         {busy && <div style={S.busy}>{busy}…</div>}
+      </section>
+
+
+      {/* ---- Stability & page turns (field-issue instrumentation) ---- */}
+      <section style={S.card}>
+        <h2 style={S.h2}>Stability &amp; page turns</h2>
+        <div style={S.row}>
+          <Stat label="uptime" value={connectedAt ? fmtDuration(now - connectedAt) : '—'} />
+          <Stat
+            label="last frame"
+            value={connected && lastFrameAt ? `${Math.round((now - lastFrameAt) / 1000)}s ago` : '—'}
+          />
+          <Stat label="drops" value={drops.length} />
+        </div>
+
+        <div style={S.warnInline}>
+          A connection can be &ldquo;connected&rdquo; and silently dead. If <strong>last frame</strong>
+          {' '}keeps climbing while you are writing, the link is gone but nothing has told us yet.
+        </div>
+
+        <div style={{ ...S.row, marginTop: 14, alignItems: 'flex-end' }}>
+          <div>
+            <div style={S.statValue}>{claimedTurns}</div>
+            <div style={S.statLabel}>you pressed</div>
+          </div>
+          <div style={{ fontSize: 20, color: '#777' }}>vs</div>
+          <div>
+            <div style={{ ...S.statValue, color: claimedTurns === live.pageTurns ? '#38bdf8' : '#f87171' }}>
+              {live.pageTurns}
+            </div>
+            <div style={S.statLabel}>detected (0x8A)</div>
+          </div>
+          <button
+            style={{ ...S.btn(connected), marginLeft: 12 }}
+            disabled={!connected}
+            onClick={() => {
+              setClaimedTurns((n) => n + 1);
+              addLog('### I PRESSED THE PAGE-TURN BUTTON ###');
+            }}
+          >
+            I pressed it
+          </button>
+          <button style={S.btnSmall(true)} onClick={() => setClaimedTurns(0)}>reset</button>
+        </div>
+        <div style={S.expDetail}>
+          Click <strong>I pressed it</strong> every single time you physically press the pad&rsquo;s
+          page-turn button. A mismatch localises the fault: check the log for an
+          {' '}<code>RX: cd 8a ...</code> line next to your click. Present but no
+          {' '}<code>PAGE TURN detected</code> means the frame arrived and dispatch dropped it;
+          absent entirely means it never left the pad.
+        </div>
+
+        {drops.length > 0 && (
+          <table style={{ ...S.table, marginTop: 14 }}>
+            <thead>
+              <tr>{['#', 'at', 'uptime', 'detail'].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr>
+            </thead>
+            <tbody>
+              {drops.map((d, i) => (
+                <tr key={i}>
+                  <td style={S.td}>{i + 1}</td>
+                  <td style={S.td}>{d.at}</td>
+                  <td style={S.td}>{fmtDuration(d.uptimeS * 1000)}</td>
+                  <td style={S.td}>{d.note}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       {/* ---- Experiments ---- */}
@@ -560,7 +694,31 @@ export function ProbeApp() {
           ))}
           <div ref={logEndRef} />
         </div>
-        <button style={S.btnSmall(true)} onClick={() => setLog([])}>Clear log</button>
+        <div style={S.row}>
+          <button style={S.btnSmall(true)} onClick={() => setLog([])}>Clear log</button>
+          <button
+            style={S.btnSmall(true)}
+            onClick={() => {
+              const header = [
+                `# Huion probe log  ${new Date().toISOString()}`,
+                `device: ${deviceName || 'n/a'}`,
+                `drops: ${drops.length}`,
+                `page turns: claimed ${claimedTurns} / detected ${live.pageTurns}`,
+                `live: ${live.points} points, ${live.strokes} strokes`,
+                '',
+              ].join('\n');
+              const blob = new Blob([header + log.join('\n')], { type: 'text/plain' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `huion-probe-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.txt`;
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+          >
+            Save log to file
+          </button>
+        </div>
       </section>
     </div>
   );
