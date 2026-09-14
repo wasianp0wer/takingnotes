@@ -25,3 +25,9 @@ jadx_out/
 
 # Local app artifacts
 .*.png
+
+# Handwriting samples for the transcription harness (personal, not committed)
+samples/
+
+# Throwaway spike harness (task #1)
+scripts/spike/
