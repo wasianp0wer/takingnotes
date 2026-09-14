@@ -117,7 +117,7 @@ export function ProbeApp() {
   const huionRef = useRef<HuionNoteBLE | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastLivePointRef = useRef<HuionPenPoint | null>(null);
-  const logEndRef = useRef<HTMLDivElement | null>(null);
+  const logBoxRef = useRef<HTMLDivElement | null>(null);
 
   const [connected, setConnected] = useState(false);
   const [deviceName, setDeviceName] = useState('');
@@ -145,6 +145,7 @@ export function ProbeApp() {
   const lastFrameAtRef = useRef<number | null>(null);
   const connectedAtRef = useRef<number | null>(null);
   const [lastFrameAt, setLastFrameAt] = useState<number | null>(null);
+  const [followLog, setFollowLog] = useState(true);
 
   const addLog = useCallback((msg: string) => {
     const line = `${new Date().toLocaleTimeString()}  ${msg}`;
@@ -161,9 +162,14 @@ export function ProbeApp() {
     }
   }, []);
 
+  // Scroll the log box itself rather than calling scrollIntoView, which walks
+  // every scrollable ancestor and drags the whole page down to the log on each
+  // new line - making the controls above unusable while the pad is streaming.
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ block: 'end' });
-  }, [log]);
+    if (!followLog) return;
+    const box = logBoxRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [log, followLog]);
 
   useEffect(() => { connectedAtRef.current = connectedAt; }, [connectedAt]);
 
@@ -688,13 +694,37 @@ export function ProbeApp() {
       {/* ---- Log ---- */}
       <section style={S.card}>
         <h2 style={S.h2}>Protocol log</h2>
-        <div style={S.log}>
+        <div
+          ref={logBoxRef}
+          style={S.log}
+          onScroll={(e) => {
+            // Scrolling up parks the view; returning to the bottom resumes
+            // following. Standard terminal behaviour - never fight the reader.
+            const el = e.currentTarget;
+            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+            setFollowLog((prev) => (prev === atBottom ? prev : atBottom));
+          }}
+        >
           {log.map((line, i) => (
             <div key={i} style={S.logLine}>{line}</div>
           ))}
-          <div ref={logEndRef} />
         </div>
         <div style={S.row}>
+          <span style={{ ...S.statLabel, color: followLog ? '#777' : '#fbbf24' }}>
+            {followLog ? 'following latest' : 'paused — scrolled up'}
+          </span>
+          {!followLog && (
+            <button
+              style={S.btnSmall(true)}
+              onClick={() => {
+                const box = logBoxRef.current;
+                if (box) box.scrollTop = box.scrollHeight;
+                setFollowLog(true);
+              }}
+            >
+              Jump to latest
+            </button>
+          )}
           <button style={S.btnSmall(true)} onClick={() => setLog([])}>Clear log</button>
           <button
             style={S.btnSmall(true)}
