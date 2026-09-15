@@ -121,6 +121,17 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   private romTotal = 0;
   private downloadTimer: ReturnType<typeof setTimeout> | null = null;
   private pageRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True while a recovery pass is walking the missing-package list. The pass
+   *  is a long `write; sleep(40)` loop - over a thousand packages it runs for
+   *  ~45s - and it is (re)scheduled on EVERY inbound package, so without this
+   *  guard passes stack up and each one writes independently. Four overlapping
+   *  passes is ~90 writes/sec, which overruns the controller and kills the
+   *  link. clearPageRetryTimer() cannot help: it cancels a queued timer, not a
+   *  loop that is already running. */
+  private recoveryInFlight = false;
+  /** Set when a verification request arrives while a pass is in flight, so the
+   *  wakeup is deferred rather than dropped. */
+  private recoveryWakeupPending = false;
   /**
    * Status line as it stood before the in-flight single-page pull started, so
    * the pull can put it back instead of hardcoding 'Connected' - a Phase 2
@@ -616,6 +627,31 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     if (this.downloadMode === 'idle' || this.expectedPackageCount <= 0) {
       return;
     }
+    if (this.recoveryInFlight) {
+      // A pass is already walking the list; it will pick up anything that has
+      // arrived since. Remember that we were asked so the wakeup isn't lost.
+      this.recoveryWakeupPending = true;
+      return;
+    }
+
+    this.recoveryInFlight = true;
+    this.recoveryWakeupPending = false;
+    try {
+      await this.runRecoveryPass();
+    } finally {
+      this.recoveryInFlight = false;
+      if (this.recoveryWakeupPending) {
+        this.recoveryWakeupPending = false;
+        this.scheduleOfflinePageVerification();
+      }
+    }
+  }
+
+  private async runRecoveryPass() {
+    // The page this pass is recovering. A pass outlives plenty of state
+    // changes - a disconnect, a bulk walk moving on - so every iteration
+    // re-checks rather than trusting the entry condition.
+    const page = this.currentDownloadPage;
 
     const packages = this.pagePackages.get(this.currentDownloadPage) || [];
     const missing: number[] = [];
@@ -635,6 +671,13 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
       const retries = this.packageRetries.get(pkgNum) ?? 0;
       if (retries >= MAX_PACKAGE_RETRIES) {
         continue;
+      }
+
+      if (this.downloadMode === 'idle' || this.currentDownloadPage !== page) {
+        // Link dropped or the download moved on while we were sleeping.
+        // Writing now either throws into a dead GATT connection or corrupts
+        // whatever download took our place.
+        return;
       }
 
       this.packageRetries.set(pkgNum, retries + 1);

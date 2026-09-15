@@ -561,3 +561,80 @@ describe('destructive commands', () => {
     await expect(device.clearCache()).rejects.toThrow();
   });
 });
+
+describe('offline package recovery', () => {
+  /**
+   * Drives the driver into the missing-package recovery path: the device
+   * reports N packages for the page and then never sends any, so
+   * verifyAndRecoverOfflinePage() has a full list of missing packages to
+   * re-request. N is chosen so one pass (N * 40ms) outlives
+   * PACKAGE_RETRY_IDLE_MS (1000ms), which is what makes overlap possible.
+   */
+  function pendingRecovery(expectedPackages: number) {
+    const transport = connectedFake();
+    transport.on(CMD.REQUEST_PAGE, () => [
+      withChecksum([0xcd, CMD.REQUEST_PAGE, 0x08, expectedPackages & 0xff, (expectedPackages >> 8) & 0xff, 0, 0]),
+    ]);
+    // Swallow the re-requests: no package ever arrives, so the missing list stays full.
+    transport.on(CMD.REGET_PACKAGE, () => []);
+    return transport;
+  }
+
+  const regetGaps = (transport: { written: Uint8Array[]; writtenAt: number[] }) => {
+    const times = transport.writtenAt.filter((_, i) => transport.written[i][1] === CMD.REGET_PACKAGE);
+    return times.slice(1).map((t, i) => t - times[i]);
+  };
+
+  it('paces re-requests instead of running overlapping recovery passes', async () => {
+    const transport = pendingRecovery(40);
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    void device.downloadPage(0).catch(() => { /* times out; not what we are asserting */ });
+
+    // Let the first recovery pass start and get well into its walk.
+    await new Promise((r) => setTimeout(r, 1500));
+    // A package arriving mid-pass reschedules verification. With no reentrancy
+    // guard that starts a SECOND pass alongside the first, and the two
+    // interleave - which is the ~90 writes/sec storm seen in the field.
+    transport.emit(withChecksum([0xcd, CMD.PAGE_PACKAGE, 0x08, 1, 0, 0]));
+    await new Promise((r) => setTimeout(r, 2500));
+
+    const gaps = regetGaps(transport);
+    expect(gaps.length).toBeGreaterThan(5);
+    // The loop sleeps 40ms between re-requests. Anything materially tighter
+    // means more than one pass is writing at once.
+    const tooTight = gaps.filter((g) => g < 25);
+    expect(tooTight).toEqual([]);
+
+    await device.disconnect().catch(() => {});
+  }, 20_000);
+
+  it('stops re-requesting once the link has dropped', async () => {
+    // 60 packages => a pass takes ~2.4s, comfortably longer than the 1s retry
+    // timer, so the second pass provably starts while the first is still
+    // walking and both are alive when the link drops.
+    const transport = pendingRecovery(60);
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+
+    void device.downloadPage(0).catch(() => { /* expected to settle on disconnect */ });
+
+    // t=1000 first pass starts (runs to ~3400).
+    await new Promise((r) => setTimeout(r, 1100));
+    transport.emit(withChecksum([0xcd, CMD.PAGE_PACKAGE, 0x08, 1, 0, 0])); // reschedules -> second pass at ~2100
+    await new Promise((r) => setTimeout(r, 1500)); // t=2600: pre-fix, two passes in flight
+
+    expect(transport.written.some((f) => f[1] === CMD.REGET_PACKAGE)).toBe(true); // really in flight
+    transport.dropConnection();
+    const attemptsAtDrop = transport.writeAttempts;
+
+    await new Promise((r) => setTimeout(r, 600));
+
+    // Each live pass only checks downloadMode at entry, so every one of them
+    // wakes from its sleep and writes into a dead GATT connection - which is
+    // why the field log showed four 'GATT Server is disconnected' errors from
+    // a single drop. One straggler is fine; a pile of them means overlap.
+    expect(transport.writeAttempts - attemptsAtDrop).toBeLessThanOrEqual(1);
+  }, 20_000);
+});

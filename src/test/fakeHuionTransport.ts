@@ -14,6 +14,16 @@ export class FakeHuionTransport implements HuionTransport {
   /** Every frame the driver has written, in order. */
   readonly written: Uint8Array[] = [];
 
+  /** Wall-clock ms of each write, parallel to `written`. Lets a test assert on
+   *  pacing - the difference between one recovery loop and several overlapping
+   *  ones is the gap between writes, not their count. */
+  readonly writtenAt: number[] = [];
+
+  /** Writes ATTEMPTED, including those rejected because the link is closed.
+   *  `written` only records writes that succeeded, so a test asking "did the
+   *  driver keep writing after the drop?" has to count attempts instead. */
+  writeAttempts = 0;
+
   private notifyHandler: ((data: Uint8Array) => void) | null = null;
   private disconnectHandler: (() => void) | null = null;
   private responders = new Map<number, (frame: Uint8Array) => Uint8Array[]>();
@@ -48,8 +58,10 @@ export class FakeHuionTransport implements HuionTransport {
   }
 
   async write(data: Uint8Array): Promise<void> {
+    this.writeAttempts++;
     if (!this.opened) throw new Error('FakeHuionTransport: write before open');
     this.written.push(new Uint8Array(data));
+    this.writtenAt.push(Date.now());
     const frames = this.responders.get(data[1])?.(data) ?? [];
     for (const frame of frames) {
       // Macrotask, not microtask: the caller of write() is suspended on this
