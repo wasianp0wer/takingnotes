@@ -146,10 +146,21 @@ export function ProbeApp() {
   const connectedAtRef = useRef<number | null>(null);
   const [lastFrameAt, setLastFrameAt] = useState<number | null>(null);
   const [followLog, setFollowLog] = useState(true);
+  // Markers are the evidence: presses, detections, drops, page-turn frames.
+  // They live in their own buffer so a retry storm on the verbose RX/TX log can
+  // never flush them - which is exactly what destroyed the last session's data.
+  const [markers, setMarkers] = useState<string[]>([]);
+  const [hideNoise, setHideNoise] = useState(false);
+
+  const addMarker = useCallback((msg: string) => {
+    setMarkers((prev) => [...prev.slice(-4999), `${new Date().toLocaleTimeString()}  ${msg}`]);
+  }, []);
 
   const addLog = useCallback((msg: string) => {
     const line = `${new Date().toLocaleTimeString()}  ${msg}`;
-    setLog((prev) => [...prev.slice(-600), line]);
+    // 20k lines: a 90-writes/sec storm burns ~180 lines/sec, so this holds
+    // roughly two minutes of worst case instead of three seconds.
+    setLog((prev) => [...prev.slice(-19999), line]);
     if (/timed out|interrupted by disconnect/i.test(msg)) {
       setTruncationSeen(true);
     }
@@ -159,8 +170,15 @@ export function ProbeApp() {
     if (msg.startsWith('RX:')) {
       lastFrameAtRef.current = Date.now();
       setLastFrameAt(lastFrameAtRef.current);
+      // The 0x8A page-turn frame arriving is the single most important piece of
+      // evidence for issue B: it separates "the pad never sent it" from "it
+      // arrived and we dropped it".
+      if (/^RX: cd 8a/.test(msg)) addMarker(`<<< 0x8A PAGE-TURN FRAME ARRIVED  (${msg.slice(4)})`);
     }
-  }, []);
+    if (/failed|error|timed out|disconnect/i.test(msg) && !msg.startsWith('RX:') && !msg.startsWith('TX:')) {
+      addMarker(`! ${msg}`);
+    }
+  }, [addMarker]);
 
   // Scroll the log box itself rather than calling scrollIntoView, which walks
   // every scrollable ancestor and drags the whole page down to the log on each
@@ -184,10 +202,13 @@ export function ProbeApp() {
   // throttle timers and can suspend BLE work in hidden tabs. Record it so a
   // drop can be correlated against it.
   useEffect(() => {
-    const onVis = () => addLog(`*** TAB ${document.hidden ? 'HIDDEN' : 'VISIBLE'} ***`);
+    const onVis = () => {
+      addLog(`*** TAB ${document.hidden ? 'HIDDEN' : 'VISIBLE'} ***`);
+      addMarker(`TAB ${document.hidden ? 'HIDDEN' : 'VISIBLE'}`);
+    };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
-  }, [addLog]);
+  }, [addLog, addMarker]);
 
   const drawLivePoint = useCallback((point: HuionPenPoint) => {
     const canvas = canvasRef.current;
@@ -251,18 +272,22 @@ export function ProbeApp() {
           const sinceFrame = lastFrameAtRef.current
             ? Math.round((Date.now() - lastFrameAtRef.current) / 1000)
             : -1;
+          if (startedAt === null) return; // already recorded this drop
           setDrops((prev) => [...prev, {
             at: new Date().toLocaleTimeString(),
             uptimeS,
             note: `last frame ${sinceFrame}s before drop${document.hidden ? ', tab was HIDDEN' : ''}`,
           }]);
           addLog(`*** DISCONNECTED after ${uptimeS}s uptime; last inbound frame ${sinceFrame}s earlier ***`);
+          addMarker(`!!! DISCONNECTED after ${uptimeS}s uptime; last inbound frame ${sinceFrame}s earlier${document.hidden ? '; TAB HIDDEN' : ''}`);
           setConnectedAt(null);
+          connectedAtRef.current = null;
         }
       };
       huion.onPen = handlePen;
       huion.onNextPage = () => {
         addLog('*** PAGE TURN detected (0x8A) ***');
+        addMarker('>>> PAGE TURN DISPATCHED to app');
         setLive((prev) => ({ ...prev, pageTurns: prev.pageTurns + 1 }));
       };
       huionRef.current = huion;
@@ -274,6 +299,7 @@ export function ProbeApp() {
       setConnectedAt(startedAt);
       lastFrameAtRef.current = startedAt;
       setLastFrameAt(startedAt);
+      addMarker(`CONNECTED to ${huion.deviceName}`);
       addLog(
         `Connected. model="${huion.config.modelName}" isA4=${huion.config.isA4} ` +
         `page=${huion.config.pageWidth}x${huion.config.pageHeight} battery=${huion.config.battery}`,
@@ -283,7 +309,7 @@ export function ProbeApp() {
     } finally {
       setBusy(null);
     }
-  }, [addLog, handlePen]);
+  }, [addLog, addMarker, handlePen]);
 
   const disconnect = useCallback(async () => {
     setBusy('Disconnecting');
@@ -481,6 +507,7 @@ export function ProbeApp() {
             onClick={() => {
               setClaimedTurns((n) => n + 1);
               addLog('### I PRESSED THE PAGE-TURN BUTTON ###');
+              addMarker('### I PRESSED THE PAGE-TURN BUTTON ###');
             }}
           >
             I pressed it
@@ -514,6 +541,35 @@ export function ProbeApp() {
         )}
       </section>
 
+
+      {/* ---- Markers: the evidence, immune to log flushing ---- */}
+      <section style={S.card}>
+        <h2 style={S.h2}>Event timeline ({markers.length})</h2>
+        <div style={S.expDetail}>
+          Presses, dispatches, raw 0x8A frames, drops and tab changes only. Kept in a separate
+          buffer so a retry storm on the raw log can never flush it.
+        </div>
+        <div style={{ ...S.log, height: 200, marginTop: 10 }}>
+          {markers.length === 0
+            ? <div style={S.muted}>No events yet.</div>
+            : markers.map((line, i) => (
+                <div
+                  key={i}
+                  style={{
+                    ...S.logLine,
+                    color: line.includes('!!!') || line.startsWith('!') ? '#f87171'
+                      : line.includes('0x8A PAGE-TURN FRAME') ? '#4ade80'
+                      : line.includes('I PRESSED') ? '#fbbf24'
+                      : line.includes('PAGE TURN DISPATCHED') ? '#38bdf8'
+                      : '#a3a3a3',
+                  }}
+                >
+                  {line}
+                </div>
+              ))}
+        </div>
+      </section>
+
       {/* ---- Experiments ---- */}
       <section style={S.card}>
         <h2 style={S.h2}>Experiments</h2>
@@ -524,7 +580,10 @@ export function ProbeApp() {
             <button
               style={S.btnSmall(connected && !busy)}
               disabled={!connected || !!busy}
-              onClick={() => addLog(`===== BEGIN EXPERIMENT: ${experiment.title} =====`)}
+              onClick={() => {
+                addLog(`===== BEGIN EXPERIMENT: ${experiment.title} =====`);
+                addMarker(`===== BEGIN EXPERIMENT: ${experiment.title} =====`);
+              }}
             >
               Mark start in log
             </button>
@@ -693,7 +752,18 @@ export function ProbeApp() {
 
       {/* ---- Log ---- */}
       <section style={S.card}>
-        <h2 style={S.h2}>Protocol log</h2>
+        <h2 style={S.h2}>Protocol log ({log.length})</h2>
+        <div style={{ ...S.row, marginBottom: 8 }}>
+          <label style={{ ...S.label, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={hideNoise}
+              onChange={(e) => setHideNoise(e.target.checked)}
+              style={{ marginRight: 6 }}
+            />
+            hide RX/TX frames (display only &mdash; they are still recorded and exported)
+          </label>
+        </div>
         <div
           ref={logBoxRef}
           style={S.log}
@@ -705,7 +775,7 @@ export function ProbeApp() {
             setFollowLog((prev) => (prev === atBottom ? prev : atBottom));
           }}
         >
-          {log.map((line, i) => (
+          {(hideNoise ? log.filter((l) => !/ (RX|TX): /.test(l)) : log).map((line, i) => (
             <div key={i} style={S.logLine}>{line}</div>
           ))}
         </div>
@@ -735,9 +805,18 @@ export function ProbeApp() {
                 `drops: ${drops.length}`,
                 `page turns: claimed ${claimedTurns} / detected ${live.pageTurns}`,
                 `live: ${live.points} points, ${live.strokes} strokes`,
+                `raw log lines: ${log.length} (cap 20000) | markers: ${markers.length}`,
                 '',
               ].join('\n');
-              const blob = new Blob([header + log.join('\n')], { type: 'text/plain' });
+              const body = [
+                header,
+                '## EVENT TIMELINE (presses, 0x8A frames, dispatches, drops)',
+                markers.join('\n') || '(none)',
+                '',
+                '## RAW PROTOCOL LOG',
+                log.join('\n'),
+              ].join('\n');
+              const blob = new Blob([body], { type: 'text/plain' });
               const url = URL.createObjectURL(blob);
               const a = document.createElement('a');
               a.href = url;
