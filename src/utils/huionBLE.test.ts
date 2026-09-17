@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { FakeHuionTransport } from '@/test/fakeHuionTransport';
-import { connectedFake, withChecksum } from '@/test/huionFixtures';
+import { connectedFake, LIVE_PEN_DOWN_PACKET, withChecksum } from '@/test/huionFixtures';
 import { HuionNoteBLE } from '@/utils/huionBLE';
 import { CMD, computeAuthResponse } from '@/utils/huionProtocol';
 
@@ -660,5 +660,21 @@ describe('transport reopen', () => {
   it('rejects reopen before any open', async () => {
     const transport = new FakeHuionTransport();
     await expect(transport.reopen()).rejects.toThrow(/never opened/i);
+  });
+});
+
+describe('onFrame hook', () => {
+  it('fires for inbound frames and survives a throwing handler', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    let frames = 0;
+    device.onFrame = () => { frames++; throw new Error('consumer blew up'); };
+    await device.connect();
+
+    const before = frames;
+    transport.emit(LIVE_PEN_DOWN_PACKET);
+
+    expect(frames).toBeGreaterThan(before);
+    expect(device.isConnected).toBe(true); // the throw did not tear anything down
   });
 });

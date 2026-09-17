@@ -148,6 +148,8 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   onStatus: StatusCallback | null = null;
   onPages: PageCallback | null = null;
   onNextPage: (() => void) | null = null;
+  /** Fires for every inbound frame. Used by the liveness watchdog. */
+  onFrame: (() => void) | null = null;
 
   // Every consumer callback below is invoked defensively. `log()` and
   // `setStatus()` are called from all over `handleCommand`, which runs inside
@@ -808,6 +810,11 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   }
 
   private async handleNotification(data: Uint8Array) {
+    try {
+      this.onFrame?.();
+    } catch (err) {
+      this.log(`onFrame handler threw: ${err instanceof Error ? err.message : err}`);
+    }
     // Log all incoming packets (skip logging flood of live pen data during streaming)
     if (!this.streaming || data.length < 11 || data[1] !== CMD.ONLINE_ENABLE) {
       const hex = Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ');
