@@ -76,4 +76,57 @@ describe('createReconnectPolicy', () => {
 
     expect(onGiveUp).toHaveBeenCalledTimes(1);
   });
+
+  it('does not fire callbacks for a stale loop after stop and restart', async () => {
+    let releaseFirst: () => void = () => {};
+    const firstHung = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    let calls = 0;
+    const reconnect = vi.fn(async () => {
+      calls++;
+      if (calls === 1) {
+        // First attempt hangs
+        await firstHung;
+      }
+      // Second and later attempts succeed
+    });
+
+    const onSuccess = vi.fn();
+    const policy = createReconnectPolicy(
+      { reconnect, onSuccess },
+      { delaysMs: [5] },
+    );
+
+    policy.start(); // Loop A
+    await tick(20);
+    policy.stop(); // Stop loop A while it is hung in reconnect()
+    policy.start(); // Loop B
+    await tick(20);
+    releaseFirst(); // Release loop A's hung reconnect
+    await tick(50);
+
+    // Loop A should not have fired onSuccess even though its reconnect succeeded.
+    // Only loop B should fire onSuccess.
+    expect(reconnect).toHaveBeenCalledTimes(2);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(policy.isReconnecting).toBe(false);
+  });
+
+  it('continues retrying if onAttempt throws', async () => {
+    const reconnect = vi.fn(async () => { throw new Error('down'); });
+    const onAttempt = vi.fn(() => { throw new Error('boom'); });
+    const policy = createReconnectPolicy(
+      { reconnect, onAttempt },
+      { delaysMs: [5], maxAttempts: 3 },
+    );
+
+    policy.start();
+    await tick(100);
+
+    expect(reconnect).toHaveBeenCalledTimes(3);
+    expect(onAttempt).toHaveBeenCalledTimes(3);
+    expect(policy.isReconnecting).toBe(false);
+  });
 });

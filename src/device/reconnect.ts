@@ -36,33 +36,48 @@ export function createReconnectPolicy(
   const maxAttempts = opts.maxAttempts ?? Infinity;
 
   let running = false;
-  let cancelled = false;
+  let generation = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   const wait = (ms: number) => new Promise<void>((resolve) => {
     timer = setTimeout(() => { timer = null; resolve(); }, ms);
   });
 
-  async function loop() {
+  async function loop(myGen: number) {
     let attempt = 0;
-    while (!cancelled && attempt < maxAttempts) {
+    while (myGen === generation && attempt < maxAttempts) {
       const delayMs = delays[Math.min(attempt, delays.length - 1)];
       attempt++;
-      deps.onAttempt?.(attempt, delayMs);
+      try {
+        deps.onAttempt?.(attempt, delayMs);
+      } catch {
+        // Suppress callback errors so they don't stop the loop
+      }
       await wait(delayMs);
-      if (cancelled) break;
+      if (myGen !== generation) break;
       try {
         await deps.reconnect();
-        if (cancelled) break;
+        if (myGen !== generation) break;
         running = false;
-        deps.onSuccess?.();
+        try {
+          deps.onSuccess?.();
+        } catch {
+          // Suppress callback errors
+        }
         return;
       } catch {
         // Still down. Fall through to the next rung of the ladder.
       }
     }
-    running = false;
-    if (!cancelled) deps.onGiveUp?.();
+    // Only fire onGiveUp if we're still the current generation
+    if (myGen === generation) {
+      running = false;
+      try {
+        deps.onGiveUp?.();
+      } catch {
+        // Suppress callback errors
+      }
+    }
   }
 
   return {
@@ -72,11 +87,10 @@ export function createReconnectPolicy(
       // overlapping recovery passes fixed in 45b0f77.
       if (running) return;
       running = true;
-      cancelled = false;
-      void loop();
+      generation++;
+      void loop(generation);
     },
     stop() {
-      cancelled = true;
       running = false;
       if (timer) { clearTimeout(timer); timer = null; }
     },
