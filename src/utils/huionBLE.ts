@@ -217,6 +217,16 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     await this.performHandshake();
   }
 
+  /**
+   * Re-establishes the link after an unexpected drop and re-runs the
+   * handshake. Unlike `connect()` this needs no user gesture, because the
+   * transport reuses the already-permitted device.
+   */
+  async reconnect(): Promise<void> {
+    await this.transport.reopen();
+    await this.performHandshake();
+  }
+
   private handleDisconnect() {
     this.authenticated = false;
     this.streaming = false;

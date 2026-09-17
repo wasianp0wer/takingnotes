@@ -12,6 +12,13 @@ export interface HuionTransport {
   readonly deviceId: string;
   /** Opens the pipe. Resolves once bytes can flow in both directions. */
   open(): Promise<void>;
+  /**
+   * Reconnects to the device a previous `open()` selected, skipping device
+   * selection. Web Bluetooth requires a user gesture for `requestDevice()`
+   * but not for `gatt.connect()` on an already-permitted device, which is
+   * what makes silent auto-reconnect possible. Rejects if never opened.
+   */
+  reopen(): Promise<void>;
   /** Sends one frame. */
   write(data: Uint8Array): Promise<void>;
   /** Registers the inbound byte handler. Called once, before `open()`. */
@@ -92,15 +99,30 @@ export class BleHuionTransport implements HuionTransport {
 
     this.log(`[2/7] Device selected: ${this.device.name ?? 'unnamed'} (${this.device.id})`);
 
+    // Registered once, against the device (not the server), so it survives
+    // `establish()` being re-run on reopen(). Must NOT be re-registered
+    // there, or a single physical drop would fire the disconnect handler
+    // once per reconnect that has ever happened.
     this.device.addEventListener('gattserverdisconnected', () => {
       this.disconnectHandler?.();
     });
 
+    await this.establish();
+  }
+
+  async reopen(): Promise<void> {
+    if (!this.device) throw new Error('Transport was never opened; cannot reopen');
+    this.log('Reconnecting to previously selected device (no user gesture needed)');
+    await this.establish();
+  }
+
+  /** The GATT half of connecting: everything after device selection. */
+  private async establish(): Promise<void> {
     this.setStatus('Connecting GATT...');
     this.log('[3/7] Connecting GATT server...');
 
     try {
-      this.server = await this.device.gatt!.connect();
+      this.server = await this.device!.gatt!.connect();
     } catch (e: any) {
       throw new Error(`GATT connect failed: ${e?.message ?? e}`);
     }
@@ -177,7 +199,9 @@ export class BleHuionTransport implements HuionTransport {
 
   async close(): Promise<void> {
     this.device?.gatt?.disconnect();
-    this.device = null;
+    // `this.device` is deliberately NOT nulled: reopen() needs the handle, and
+    // nulling it would force a user gesture for every reconnect. The GATT
+    // objects below are per-connection and must go.
     this.server = null;
     this.writeChar = null;
     this.notifyChar = null;

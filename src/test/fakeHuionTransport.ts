@@ -28,6 +28,7 @@ export class FakeHuionTransport implements HuionTransport {
   private disconnectHandler: (() => void) | null = null;
   private responders = new Map<number, (frame: Uint8Array) => Uint8Array[]>();
   private opened = false;
+  private everOpened = false;
 
   /** Reply to command `cmd` with the frames `respond` returns. */
   on(cmd: number, respond: (frame: Uint8Array) => Uint8Array[]): void {
@@ -54,6 +55,12 @@ export class FakeHuionTransport implements HuionTransport {
   }
 
   async open(): Promise<void> {
+    this.opened = true;
+    this.everOpened = true;
+  }
+
+  async reopen(): Promise<void> {
+    if (!this.everOpened) throw new Error('Transport was never opened; cannot reopen');
     this.opened = true;
   }
 

@@ -638,3 +638,23 @@ describe('offline package recovery', () => {
     expect(transport.writeAttempts - attemptsAtDrop).toBeLessThanOrEqual(1);
   }, 20_000);
 });
+
+describe('transport reopen', () => {
+  it('re-authenticates over a reopened transport', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+    expect(device.isConnected).toBe(true);
+
+    transport.dropConnection();
+    expect(device.isConnected).toBe(false);
+
+    await device.reconnect();
+    expect(device.isConnected).toBe(true);
+  });
+
+  it('rejects reopen before any open', async () => {
+    const transport = new FakeHuionTransport();
+    await expect(transport.reopen()).rejects.toThrow(/never opened/i);
+  });
+});
