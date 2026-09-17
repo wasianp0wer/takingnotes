@@ -218,3 +218,80 @@ describe('capture lifecycle', () => {
     expect(logs.filter((l) => l.includes('Reconnect attempt'))).toEqual([]);
   });
 });
+
+describe('page count single-flight', () => {
+  it('coalesces concurrent getStoredPageCount callers into one driver call', async () => {
+    // The driver's own getStoredPageCount() is single-flight and throws on a
+    // second concurrent call - this composition now has three independent
+    // callers of it (detector poll, watchdog ping, this public method), so
+    // without coalescing this would reject instead of resolving both.
+    const count = 7;
+    const transport = pageCountFake(() => count);
+    const controller = createDeviceController(() => new HuionNoteBLE(transport));
+    await controller.connect();
+
+    const [a, b] = await Promise.all([
+      controller.getStoredPageCount(),
+      controller.getStoredPageCount(),
+    ]);
+
+    expect(a).toBe(7);
+    expect(b).toBe(7);
+    expect(transport.written.filter((frame) => frame[1] === CMD.CURRENT_PAGE)).toHaveLength(1);
+  });
+});
+
+describe('watchdog-detected drop', () => {
+  it('never reports isStreaming true again once the watchdog has detected a silent link', async () => {
+    // The link looks nominally connected (no transport-level disconnect) but
+    // stops answering CURRENT_PAGE - exactly what the liveness watchdog
+    // exists to catch, as opposed to a real drop (which the other tests in
+    // this file cover via transport.dropConnection()).
+    const transport = pageCountFake(() => 0);
+    let failPing = false;
+    const originalWrite = transport.write.bind(transport);
+    transport.write = async (data: Uint8Array): Promise<void> => {
+      if (failPing && data[1] === CMD.CURRENT_PAGE) {
+        throw new Error('simulated unresponsive link');
+      }
+      await originalWrite(data);
+    };
+
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      {
+        liveness: { idleMs: 0, checkIntervalMs: 10 },
+        // Far longer than the test, so only the watchdog's own ping (via
+        // CURRENT_PAGE) can possibly trip the failure - not the detector's
+        // unrelated background poll.
+        pageTurn: { pollIntervalMs: 60_000 },
+        reconnect: { delaysMs: [10] },
+      },
+    );
+    const states: { isConnected: boolean; isStreaming: boolean }[] = [];
+    controller.subscribeState((s) => states.push({ isConnected: s.isConnected, isStreaming: s.isStreaming }));
+
+    await controller.connect();
+    await controller.startStreaming();
+    await controller.startCapture();
+    expect(controller.getState().isStreaming).toBe(true);
+
+    // Only states from here on are relevant: the initial connect handshake
+    // legitimately passes through isConnected: false (e.g. 'Handshaking...')
+    // on its way up, which is not the drop this test is about.
+    const baseline = states.length;
+
+    failPing = true; // the link now looks connected but never answers a ping
+    // Long enough for the watchdog to detect the silence and for at least
+    // one full reconnect handshake (which includes a real 100ms sleep) to
+    // run to completion - the bug this covers only shows up once the
+    // handshake's own 'Authenticated'/'Connected' status updates land.
+    await tick(250);
+    controller.stopCapture();
+
+    const afterCapture = states.slice(baseline);
+    const dropIndex = afterCapture.findIndex((s) => s.isConnected === false);
+    expect(dropIndex).toBeGreaterThanOrEqual(0);
+    expect(afterCapture.slice(dropIndex).some((s) => s.isStreaming === true)).toBe(false);
+  });
+});

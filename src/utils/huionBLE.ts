@@ -313,6 +313,35 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     this.setStatus('Disconnected');
   }
 
+  /**
+   * Declares the link dead without attempting any further writes - for a
+   * liveness watchdog (device/liveness.ts) that has already proven a ping
+   * goes unanswered. Unlike `disconnect()`, this never calls
+   * `stopStreaming()`: that write would race the same silence that got us
+   * here, and a link this quiet cannot be trusted to accept it.
+   *
+   * Runs `handleDisconnect()` - the same local bookkeeping a real
+   * `gattserverdisconnected` event triggers - so `authenticated`/`streaming`
+   * (and therefore `isConnected`/`isStreaming`) flip to false and the
+   * 'Disconnected' status callback fires, exactly as it would for a
+   * transport-level drop. Without this, a watchdog-detected drop left those
+   * flags untouched, so a session could come back from reconnect reporting
+   * `isStreaming: true` with no pen data arriving.
+   *
+   * Then best-effort closes the transport, so a real radio's GATT resources
+   * are released before the caller's reconnect policy reopens it - a link
+   * this unresponsive is treated as a full teardown/reopen, not patched in
+   * place.
+   */
+  async reportLinkDead(): Promise<void> {
+    this.handleDisconnect();
+    try {
+      await this.transport.close();
+    } catch {
+      // Already gone - nothing left to release.
+    }
+  }
+
   async startStreaming(): Promise<void> {
     if (!this.authenticated) throw new Error('Not authenticated');
     // Configure streaming parameters (from APK decompilation):
