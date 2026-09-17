@@ -16,6 +16,17 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** connectedFake() plus a settable stored-page count on the 0x85 reply. */
+function pageCountFake(read: () => number) {
+  const transport = connectedFake();
+  transport.on(CMD.CURRENT_PAGE, () => [
+    withChecksum([0xcd, CMD.CURRENT_PAGE, 0x08, read() & 0xff, (read() >> 8) & 0xff, 0, 0]),
+  ]);
+  return transport;
+}
+
 describe('device controller', () => {
   it('fans pen points out to every subscriber', async () => {
     // Driven by a real live packet through the fake transport rather than a
@@ -64,15 +75,27 @@ describe('device controller', () => {
   });
 
   it('fans page turns out to every subscriber', async () => {
-    const transport = connectedFake();
-    const controller = createDeviceController(() => new HuionNoteBLE(transport));
+    // subscribePageTurn now delivers detector events, not the raw 0x8A
+    // notification - so this drives the whole path: the notification only
+    // hints the detector to poll sooner, and the poll interval here is set
+    // far longer than the test so only that hint can possibly find the turn.
+    let count = 0;
+    const transport = pageCountFake(() => count);
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      { pageTurn: { pollIntervalMs: 60_000 } },
+    );
     const first = vi.fn();
     const second = vi.fn();
     controller.subscribePageTurn(first);
     controller.subscribePageTurn(second);
 
     await controller.connect();
+    await controller.startCapture();
+    count = 1;
     transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
+    await tick(50);
+    controller.stopCapture();
 
     expect(first).toHaveBeenCalledTimes(1);
     expect(second).toHaveBeenCalledTimes(1);
@@ -92,14 +115,25 @@ describe('device controller', () => {
   });
 
   it('stops delivering to an unsubscribed consumer', async () => {
-    const transport = connectedFake();
-    const controller = createDeviceController(() => new HuionNoteBLE(transport));
+    // Same detector-backed path as the fan-out test above (see its comment);
+    // the count bump plus hint would deliver a page turn if `listener` were
+    // still subscribed, which is what makes this test meaningful.
+    let count = 0;
+    const transport = pageCountFake(() => count);
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      { pageTurn: { pollIntervalMs: 60_000 } },
+    );
     const listener = vi.fn();
     const unsubscribe = controller.subscribePageTurn(listener);
     await controller.connect();
+    await controller.startCapture();
 
     unsubscribe();
+    count = 1;
     transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
+    await tick(50);
+    controller.stopCapture();
 
     expect(listener).not.toHaveBeenCalled();
   });
@@ -119,5 +153,68 @@ describe('device controller', () => {
 
     expect(leaving).not.toHaveBeenCalled();
     expect(staying).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('capture lifecycle', () => {
+  it('emits page turns from the count poll with no 0x8A involved', async () => {
+    let count = 0;
+    const transport = pageCountFake(() => count);
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      { pageTurn: { pollIntervalMs: 10 } },
+    );
+    const turns: number[] = [];
+    controller.subscribePageTurn(() => turns.push(1));
+
+    await controller.connect();
+    await controller.startCapture();
+    count = 2;
+    await tick(80);
+    controller.stopCapture();
+
+    expect(turns).toHaveLength(1);
+    expect(controller.getState().storedPageCount).toBe(2);
+  });
+
+  it('re-polls on reconnect so turns during the gap are found', async () => {
+    let count = 0;
+    const transport = pageCountFake(() => count);
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      // Poll interval far longer than the test: only the reconnect re-poll
+      // can possibly find this turn, which is the point being proven.
+      { pageTurn: { pollIntervalMs: 60_000 }, reconnect: { delaysMs: [10] } },
+    );
+    const turns: number[] = [];
+    controller.subscribePageTurn(() => turns.push(1));
+
+    await controller.connect();
+    await controller.startCapture();
+    transport.dropConnection();
+    count = 3; // three page turns while the link was down
+    await tick(400);
+    controller.stopCapture();
+
+    expect(turns).toHaveLength(1);
+    expect(controller.getState().storedPageCount).toBe(3);
+  });
+
+  it('does not chase a drop that happened after stopCapture', async () => {
+    const transport = pageCountFake(() => 0);
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      { reconnect: { delaysMs: [10] } },
+    );
+    const logs: string[] = [];
+    controller.subscribeLog((line) => logs.push(line));
+
+    await controller.connect();
+    await controller.startCapture();
+    controller.stopCapture();
+    transport.dropConnection();
+    await tick(80);
+
+    expect(logs.filter((l) => l.includes('Reconnect attempt'))).toEqual([]);
   });
 });
