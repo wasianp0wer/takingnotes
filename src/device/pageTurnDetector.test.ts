@@ -141,4 +141,79 @@ describe('createPageTurnDetector', () => {
     expect(onPageTurn).not.toHaveBeenCalled();
     expect(det.pageCount).toBe(0); // baseline re-anchored
   });
+
+  it('discards a stale poll that resolves after stop() then start() (Facet A)', async () => {
+    const onPageTurn = vi.fn();
+    let resolveStale: (count: number) => void = () => {};
+    let callCount = 0;
+    const getStoredPageCount = vi.fn(() => {
+      callCount++;
+      if (callCount === 1) {
+        // The very first real call is the one we strand across the restart.
+        return new Promise<number>((resolve) => { resolveStale = resolve; });
+      }
+      return Promise.resolve(1);
+    });
+
+    const det = createPageTurnDetector(
+      { getStoredPageCount, onPageTurn },
+      { pollIntervalMs: 10_000 },
+    );
+
+    await det.start(0); // explicit baseline: doesn't consume a call
+    det.hint(); // enters the single-flight slot and hangs (call #1)
+    await tick(5);
+    det.stop();
+    await det.start(0); // new session, same explicit baseline
+
+    // Release the stranded call now that a new session is active. A jump
+    // to 99 would certainly fire onPageTurn if it were allowed to apply.
+    resolveStale(99);
+    await tick(5);
+    det.stop();
+
+    expect(onPageTurn).not.toHaveBeenCalled();
+    expect(det.pageCount).toBe(0);
+  });
+
+  it('does not let a restart baseline read overlap a stale in-flight poll (Facet B)', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let releaseStale: () => void = () => {};
+    let callCount = 0;
+    const getStoredPageCount = vi.fn(() => {
+      callCount++;
+      const thisCall = callCount;
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      return new Promise<number>((resolve) => {
+        if (thisCall === 1) {
+          releaseStale = () => { inFlight--; resolve(1); };
+        } else {
+          inFlight--;
+          resolve(2);
+        }
+      });
+    });
+
+    const det = createPageTurnDetector(
+      { getStoredPageCount, onPageTurn: () => {} },
+      { pollIntervalMs: 10_000 },
+    );
+
+    await det.start(0); // explicit baseline: doesn't consume a call
+    det.hint(); // call #1, stays in flight until releaseStale()
+    await tick(5);
+    det.stop();
+
+    const restart = det.start(); // no initialCount: attempts its own baseline read
+    await tick(5); // give the baseline read a chance to fire if unguarded
+
+    expect(maxInFlight).toBeLessThanOrEqual(1); // never two calls in flight together
+    expect(callCount).toBe(1); // the restart's read must not have fired at all
+
+    releaseStale();
+    await restart;
+    det.stop();
+  });
 });

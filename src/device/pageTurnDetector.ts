@@ -40,29 +40,53 @@ export function createPageTurnDetector(
   let known = 0;
   let polling = false;
   let running = false;
+  // Bumped by both start() and stop() - the same shape reconnect.ts uses to
+  // close its own ABA hazard. A boolean cannot tell "I was stopped" apart
+  // from "a later start reset the flag": a poll that hangs across a
+  // stop()+start() would otherwise resume into the *new* session and see
+  // `running === true` again, applying a read that belongs to a session that
+  // no longer exists. Every async continuation below re-checks its own
+  // captured generation against the live one before acting.
+  let generation = 0;
 
-  async function poll() {
-    // Single-flight. `getStoredPageCount` is itself single-flight on the
-    // driver and throws on a second concurrent call, so overlapping polls
-    // would produce spurious errors as well as extra traffic.
-    if (polling || !running) return;
+  /**
+   * The single point of contact with `deps.getStoredPageCount`, shared by
+   * `poll()` and `start()`'s baseline read so both respect the same
+   * single-flight slot. The real driver throws on a second concurrent call,
+   * so a caller that finds the slot occupied skips its read entirely rather
+   * than overlapping it - this is what closes the case where a restart's
+   * baseline read would otherwise race a still-resolving stale poll.
+   *
+   * Returns `undefined` if the slot was busy, the call failed, or this
+   * generation was superseded before the result came back - in every one of
+   * those cases the caller must take no further action.
+   */
+  async function readCount(myGen: number): Promise<number | undefined> {
+    if (polling) return undefined;
     polling = true;
     try {
       const count = await deps.getStoredPageCount();
-      if (!running) return;
-      if (count > known) {
-        const previous = known;
-        known = count;
-        deps.onPageTurn(count, previous);
-      } else if (count < known) {
-        // The pad was cleared or renumbered. Re-anchor silently: this is not
-        // a page turn, and treating it as one would invent pages.
-        known = count;
-      }
+      return myGen === generation ? count : undefined;
     } catch (err) {
-      deps.onError?.(err);
+      if (myGen === generation) deps.onError?.(err);
+      return undefined;
     } finally {
       polling = false;
+    }
+  }
+
+  async function poll(myGen: number) {
+    if (!running || myGen !== generation) return;
+    const count = await readCount(myGen);
+    if (count === undefined) return;
+    if (count > known) {
+      const previous = known;
+      known = count;
+      deps.onPageTurn(count, previous);
+    } else if (count < known) {
+      // The pad was cleared or renumbered. Re-anchor silently: this is not
+      // a page turn, and treating it as one would invent pages.
+      known = count;
     }
   }
 
@@ -70,27 +94,31 @@ export function createPageTurnDetector(
     async start(initialCount?: number) {
       if (running) return;
       running = true;
+      generation++;
+      const myGen = generation;
+
       if (initialCount !== undefined) {
         known = initialCount;
       } else {
-        try {
-          known = await deps.getStoredPageCount();
-        } catch (err) {
-          // Baseline unknown. Leave `known` at 0 and let the first successful
-          // poll anchor it; firing a turn for that first reading would
-          // invent one, so the first rise from 0 is reported only if the
-          // device really does have pages appear later.
-          deps.onError?.(err);
-        }
+        const count = await readCount(myGen);
+        if (count !== undefined) known = count;
+        // Otherwise leave `known` as-is: the single-flight slot was busy
+        // (a stale poll from a just-stopped session still resolving), the
+        // read failed, or this session was superseded while we waited. The
+        // first successful poll will anchor it.
       }
-      timer = setInterval(() => { void poll(); }, pollIntervalMs);
+
+      if (myGen === generation) {
+        timer = setInterval(() => { void poll(myGen); }, pollIntervalMs);
+      }
     },
     stop() {
       running = false;
+      generation++;
       if (timer) { clearInterval(timer); timer = null; }
     },
     hint() {
-      void poll();
+      void poll(generation);
     },
     get pageCount() { return known; },
   };
