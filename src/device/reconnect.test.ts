@@ -129,4 +129,39 @@ describe('createReconnectPolicy', () => {
     expect(onAttempt).toHaveBeenCalledTimes(3);
     expect(policy.isReconnecting).toBe(false);
   });
+
+  it('does not fire onSuccess if stop() is called while reconnect is hung', async () => {
+    let releaseHang: () => void = () => {};
+    const hung = new Promise<void>((resolve) => {
+      releaseHang = resolve;
+    });
+
+    let calls = 0;
+    const reconnect = vi.fn(async () => {
+      calls++;
+      if (calls === 1) {
+        // First attempt hangs
+        await hung;
+      }
+      // If called again, would succeed
+    });
+
+    const onSuccess = vi.fn();
+    const policy = createReconnectPolicy(
+      { reconnect, onSuccess },
+      { delaysMs: [5] },
+    );
+
+    policy.start();
+    await tick(20);
+    policy.stop(); // Stop while reconnect is hung, no subsequent start()
+    releaseHang(); // Release the hung reconnect
+    await tick(50);
+
+    // Even though reconnect() eventually succeeded, onSuccess must not fire
+    // because the loop was stopped before it could settle
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    expect(onSuccess).toHaveBeenCalledTimes(0);
+    expect(policy.isReconnecting).toBe(false);
+  });
 });

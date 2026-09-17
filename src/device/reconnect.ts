@@ -92,6 +92,7 @@ export function createReconnectPolicy(
     },
     stop() {
       running = false;
+      generation++;
       if (timer) { clearTimeout(timer); timer = null; }
     },
     get isReconnecting() { return running; },
