@@ -60,9 +60,19 @@ These were established empirically against a real Huion Note X10 using
   point-by-point, so reconciliation must choose a source *per page* rather than
   merging within a page.
 
-- **OPEN — Does the device write to memory while live-streaming?** Not yet
-  cleanly determined. Does not block Phase 1 or 1A. The reconciliation design
-  (prefer device memory, fall back to live buffer) is correct either way.
+- **C6 — Live streaming does not change when pages commit (resolved
+  2026-09-17, closes the former OPEN question).** Probe experiments A/B/C:
+  streaming with no page turn (B) leaves nothing new in device memory;
+  streaming followed by a page turn (C) commits the page. So the device does
+  write to memory while streaming, but the page turn is still the commit
+  trigger - C1 holds identically whether or not a live stream is running.
+
+  **Consequence:** the page turn is the *only* commit signal there is. It is
+  not merely a UI cue for "start a new page" - it is the event that makes a
+  page downloadable at all, so the entire incremental-download pipeline hangs
+  off detecting it. That makes reliable page-turn detection a correctness
+  requirement, not a nicety, and it means detection must not depend solely on
+  the `0x8A` notification arriving (see Phase 2 design).
 
 ## Architecture
 
