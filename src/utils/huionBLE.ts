@@ -11,6 +11,7 @@ import {
   verifyChecksum,
 } from '@/utils/huionProtocol';
 import { BleHuionTransport, type HuionTransport } from '@/utils/huionTransport';
+import { createPacedTransport } from '@/utils/pacedTransport';
 
 export interface HuionPenPoint {
   x: number;
@@ -76,10 +77,10 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   private transport: HuionTransport;
 
   constructor(transport?: HuionTransport) {
-    this.transport = transport ?? new BleHuionTransport(
+    this.transport = transport ?? createPacedTransport(new BleHuionTransport(
       (msg) => this.log(msg),
       (status) => this.setStatus(status),
-    );
+    ));
   }
 
   private challenge: [number, number, number] | null = null;

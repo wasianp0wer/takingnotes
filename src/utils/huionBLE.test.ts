@@ -570,6 +570,10 @@ describe('offline package recovery', () => {
    * re-request. N is chosen so one pass (N * 40ms) outlives
    * PACKAGE_RETRY_IDLE_MS (1000ms), which is what makes overlap possible.
    */
+  // These tests deliberately use a BARE FakeHuionTransport, not a paced one.
+  // They measure write pacing as a proxy for recovery-pass concurrency; a
+  // paced transport would throttle overlapping passes to the floor and make
+  // the test pass even with the reentrancy guard removed. Keep it unpaced.
   function pendingRecovery(expectedPackages: number) {
     const transport = connectedFake();
     transport.on(CMD.REQUEST_PAGE, () => [
