@@ -29,6 +29,7 @@ The target workflow:
 | D6 | **Use the `idb` package** (~2 KB) rather than raw IndexedDB. | Raw IndexedDB transactions auto-close across non-IDB await points — a subtle, high-frequency bug class. Reversible if it becomes a burden. |
 | D7 | **Rendered page images are stored as `ArrayBuffer` + a `renderType` MIME string, not as `Blob`.** | Established empirically in Phase 1A Task 4: `fake-indexeddb` does not structured-clone `Blob` (it returns `{type}` with the bytes and prototype lost), so a `Blob` field leaves the render path permanently untestable. Real browsers do support `Blob` in IndexedDB, but Safari has a documented history of bugs there, and the runtime cost of `ArrayBuffer` is two lines — `await blob.arrayBuffer()` on write, `new Blob([buf], {type})` on read. Phase 2's renderer and Phase 4's viewer must both use this shape. |
 | D8 | **Phase 3 must keep changing the transcription model cheap.** Four binding constraints: (a) transcription prompts live in a registry keyed by model family with a generic fallback — never inline strings; (b) `transcribePage(image) → markdown` is an interface with a single implementation, so a two-stage OCR+cleanup variant can replace it without touching the queue; (c) image resolution is a user setting, not a constant; (d) every transcript records both `model` and `promptVersion`. | Handwriting prompts do not transfer between model families — phrasing that makes one model preserve structure makes another hallucinate. D2 already makes the model a runtime choice, so the model id itself is free to change; the second-order costs are the prompt, the resolution, and the pipeline shape. Prompts get tuned far more often than models get swapped, so `promptVersion` is what makes "which transcripts are stale" answerable at all. |
+| D9 | **The live stream is the source of truth; device memory is a manual last-resort recovery path only.** Nothing in the automatic capture path depends on downloading from ROM. | C7: ROM data has fabricated timestamps, fragments strokes on any packet loss, and passes an extra lossy filter. C2: bulk download is slow and flaky. Established by a week of real use - reconstructing what was written while not streaming produced output not worth the complexity it cost. The tradeoff accepted: anything written while disconnected is lost unless the user explicitly asks to recover it, which makes link uptime (and honest reporting of gaps) a correctness requirement. |
 
 ## Findings from hardware probing
 
@@ -59,6 +60,23 @@ These were established empirically against a real Huion Note X10 using
   is `{x, y, pressure}` only. There is no key to align live and offline streams
   point-by-point, so reconciliation must choose a source *per page* rather than
   merging within a page.
+
+- **C7 — ROM data is structurally lower quality than the live stream, beyond
+  mere packet loss (established 2026-09-17 by code inspection).** Per-point
+  precision is identical - both paths decode the same 16-bit X/Y and 13-bit
+  pressure (`huionBLE.ts:1056` live, `:1089` offline). The differences are:
+  (a) **timestamps are fabricated** - `makeStoredPoint` (`:1214`) stamps
+  `Date.now()` at *decode* time, so every point in a downloaded page collapses
+  to one instant; this supersedes C5's weaker "no timestamps" claim, because a
+  wrong timestamp is worse than an absent one for any consumer that trusts it;
+  (b) **a lost package fragments strokes** rather than dropping points -
+  `decodePage` pushes `null` for a missing package and `null` terminates the
+  current stroke (`:1099`), so one dropped packet splits a stroke in two;
+  (c) offline points pass through `shouldFilterOfflinePoint`, an extra lossy
+  heuristic the live path does not apply.
+
+  **Consequence:** the live stream, not device memory, is the higher-fidelity
+  record. See D9.
 
 - **C6 — Live streaming does not change when pages commit (resolved
   2026-09-17, closes the former OPEN question).** Probe experiments A/B/C:

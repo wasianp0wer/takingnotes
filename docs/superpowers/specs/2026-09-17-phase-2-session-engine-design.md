@@ -2,168 +2,135 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-25-note-capture-app.md`
 **Roadmap:** `docs/superpowers/plans/2026-08-25-roadmap.md` (Plan 2)
-**Covers tasks:** #7, #8, #9, #10, #18
+**Covers tasks:** #7, #8, #9, #10, #18, #20, #21
 **Depends on:** Phase 1A (storage), Phase 1B (device)
 **Status:** design — not yet broken into an executable plan
+**Revised:** 2026-09-17 for D9 (streaming is the source of truth)
 
 ---
 
 ## 1. What changed since the roadmap was written
 
 The roadmap framed Phase 2 around offline capture: write on the pad, download
-at the end, reconcile. A week of real use reordered the priorities:
+at the end, reconcile. Two things from real use overturned that.
+
+**First**, the priorities reordered:
 
 > "More important is A) keeping the connection alive and B) ensuring that
 > pressing the page turn button on the pad creates a new page in the app."
 
-These are not two feature requests bolted onto the side of the session engine.
-Given finding **C6**, they *are* the session engine:
+**Second**, and more fundamentally, the downloaded data turned out not to be
+worth building on (C7, D9). The offline path fabricates timestamps, fragments
+strokes whenever a packet is lost, and applies an extra lossy filter. The live
+stream is the better record, not the fallback.
 
-- The page turn is the **only** signal that commits a page to device memory.
-  Miss it and the page is not merely mis-rendered in the UI — it is not
-  downloadable, because nothing told the device to write it.
-- The link is the only channel that signal travels over. A drop is not a
-  degraded experience; it is silent data loss for everything written after it.
+So the design inverts. **The live stream is the note. Device memory is a
+manual last-resort.** Everything below follows from that.
 
-So the design below leads with detection and resilience, and treats the
-state machine as the thing built on top of them, rather than the reverse.
+The honest cost of this inversion, stated up front: *anything written while
+disconnected is gone.* There is no longer a backfill. That converts link uptime
+from a quality-of-life concern into a data-integrity one, and it makes §9
+(telling the user about gaps) non-optional rather than a nicety.
 
 ---
 
 ## 2. Settled decisions
 
-From the spec (D1–D8) plus four locked during Phase 2 discussion:
+From the spec (D1–D9) plus those locked during Phase 2 discussion:
 
-| # | Decision |
-|---|---|
-| S1 | **Force a page turn when a session ends, with an escape hatch.** C1/C6 mean the in-progress page is not in device memory; forcing a turn is what commits it. The escape hatch covers a pad that is off, out of range, or unresponsive — fall back to the live-captured buffer for that page. |
-| S2 | **Sessions are durable, with a 1-hour inactivity timeout.** An idle session notifies the user and shuts itself down. An abandoned session recovers on next load, or completes with whatever it has. |
-| S3 | **Orphan pages are ignored.** Pages written to the pad with no session running do not appear as notes. |
-| S4 | **Clear the device only after pages are persisted.** "Persisted" (written to IndexedDB), not "rendered" — rendering is a derived artifact and can be redone from stored strokes. Combined with D3, always ask first. |
+| # | Decision | Status |
+|---|---|---|
+| S1 | ~~Force a page turn when a session ends, with an escape hatch.~~ | **Dropped.** Its purpose was committing the in-progress page to ROM. Under D9 that page is already in the live buffer, so there is nothing to force. This also removes the escape-hatch path and the untested `CMD.NEXT_PAGE` dependency. |
+| S2 | **Sessions are durable, with a 1-hour inactivity timeout.** An idle session notifies the user and shuts down; an abandoned session recovers on next load or completes with what it has. | Unchanged, and easier — §8 persists continuously, so "what it has" is already on disk. |
+| S3 | **Orphan pages are ignored.** | Unchanged, and now automatic: with no ROM sync, writing outside a session simply produces nothing. |
+| S4 | **Clear the device only after pages are persisted**, always asking first (D3). | **More conservative.** Since we no longer download ROM, clearing destroys the only copy of anything the stream missed. Clearing should be rare and never suggested by default. |
 
 ---
 
 ## 3. Constraints from hardware
 
-Carried forward from the spec, because they decide most of the design:
-
 - **C1/C6** — a page commits to ROM on page turn only, streaming or not.
-- **C2** — bulk download is ~15 s/page and flaky. Download incrementally.
+- **C2** — bulk download is ~15 s/page and flaky. *Now largely moot.*
 - **C4** — live and offline points share a normalized 0–1 coordinate space.
-- **C5** — offline points have no timestamps, so live and offline data cannot
-  be merged *within* a page. Source selection is per-page.
+- **C7** — ROM data has fabricated timestamps, fragments strokes on packet
+  loss, and is extra-filtered. This is what drives D9.
 
 ---
 
-## 4. Write pacing: a structural fix, not a local one
+## 4. Write pacing (task #20)
 
 The reentrancy bug fixed in `45b0f77` had overlapping recovery passes issuing
-~90 writes/sec against a design pace of 25/sec, which overran the controller
-and killed the link mid-transfer. That was fixed at the call site.
+~90 writes/sec against a design pace of 25/sec, overrunning the controller and
+killing the link mid-transfer. That was fixed at the call site.
 
-**Phase 2 should make the whole class impossible.** The transport gains a
-single serialized write queue with a floor on inter-write spacing. Every write
-in the driver goes through it, so no future code path — however many callers or
-timers it has — can saturate the radio.
+The transport gains a **single serialized write queue** so the class is
+structurally impossible: FIFO, one write in flight, a floor on inter-write
+spacing, a priority tier so user commands are not stuck behind bulk traffic,
+and drain-and-reject on disconnect.
 
-This matters here specifically because Phase 2 *adds* periodic writes (§5.2's
-page-count poll) to a link that already carries downloads and streaming. Adding
-concurrent writers to the exact subsystem that just failed from concurrent
-writers, without a structural guard, would be repeating the bug on purpose.
-
-Properties:
-
-- FIFO, one write in flight at a time.
-- Minimum gap between writes (start at the driver's current 40 ms).
-- Priority tier so a user-initiated command is not stuck behind a thousand
-  queued re-requests.
-- Queue drains and rejects on disconnect, so nothing writes into dead GATT.
-
-This is testable without hardware against `FakeHuionTransport`, using the
-`writtenAt` timestamps added for the reentrancy tests.
+Under D9 the link carries far less traffic, which makes this cheaper — but no
+less necessary, because §5 adds a *periodic* writer to the exact subsystem that
+just died from concurrent writers.
 
 ---
 
 ## 5. Page-turn detection (issue B)
 
-### 5.1 Why the notification alone is not enough
+### 5.1 D9 makes this more important, not less
 
-The field log recorded `page turns: claimed 4 / detected 0`. Whether the cause
-is the frame never arriving or the driver not dispatching it is being measured
-by the pending probe re-run. **The design should not depend on the answer.**
+It would be easy to read D9 as demoting anything ROM-related. It does the
+opposite here, for a reason worth being explicit about:
 
-A signal that (a) is the sole commit trigger for all page data and (b) has been
-observed failing in the field is not a signal to build a pipeline on
-unprotected, regardless of which layer turns out to be at fault.
+The **page count** is a 4-byte metadata read. Its reliability has nothing to do
+with the reliability of a 1,185-packet bulk transfer, and nothing to do with
+C7's quality problems — those concern stroke *data*, which we are no longer
+downloading. Reading a counter is not "relying on device memory for sync."
+
+And the consequence of a missed page turn got *worse* under D9. Previously a
+merged page could be repaired by downloading it from ROM. Now there is no
+repair: two pages of writing land in one live buffer permanently. The field log
+recorded `page turns: claimed 4 / detected 0`.
 
 ### 5.2 Design: poll is authoritative, notification is an accelerator
 
-`getStoredPageCount()` (Phase 1B) reads the count from ROM. That count is
-ground truth: it increments exactly when a page commits, which by C6 is exactly
-when a page turn happens.
+- **Poll** `getStoredPageCount()` on a slow interval (~5 s) while a session is
+  active, through the write queue.
+- **A count increase is the page-turn event.** Authoritative, because C6
+  guarantees the count increments exactly when a page turns.
+- **An arriving `0x8A` is a hint** that triggers an immediate poll rather than
+  waiting for the interval — the responsiveness of the notification without
+  trusting it for correctness.
+- **Deduplicate on the count**, which is the state; the notification only
+  changes when it is read.
 
-- **Poll** the stored page count on a slow interval while a session is active
-  (~5 s), through the write queue, suspended during downloads.
-- **Treat a count increase as the page-turn event.** This is the authoritative
-  path — it works whether or not `0x8A` arrives.
-- **Treat an arriving `0x8A` as a hint** that triggers an immediate poll rather
-  than waiting for the next interval. This preserves the responsiveness of the
-  notification without trusting it for correctness.
-- **Deduplicate**: the count is the state; the notification only changes *when*
-  it is read. A page turn detected by both paths is one event.
+**Tradeoff.** Up to ~5 s of lag on a page turn when the notification is lost.
+The alternative is not "faster" — it is "fast when it works, silently wrong
+when it doesn't," and the field log says it doesn't. If the probe shows `0x8A`
+reliable post-fix, lengthen the interval; keep the poll as a safety net.
 
-This subsumes task #9 (ROM-authoritative reconciliation) rather than sitting
-beside it — the same count that detects turns reconciles the page list.
-
-**Cost.** One extra frame every ~5 s, which is roughly 0.5% of the write budget
-that caused the overrun. The write queue bounds it regardless.
-
-**Tradeoff being made deliberately.** Polling detects a page turn up to 5 s
-late when the notification is lost. For the UI that is a visible lag. The
-alternative — trusting the notification — is not "faster", it is "fast when it
-works and silently wrong when it doesn't", and the field log says it doesn't.
-If the probe shows `0x8A` is reliable post-fix, the poll interval can be
-lengthened to a safety net rather than removed; removing it puts data
-correctness back on a signal we have watched fail.
+**Note:** the poll no longer needs suspending during downloads, since routine
+downloads are gone.
 
 ---
 
 ## 6. Connection resilience (issue A)
 
-### 6.1 Reconnect
+Under D9 this is the whole ballgame: uptime *is* data integrity.
 
-Web Bluetooth requires a user gesture for `requestDevice()`, but **not** for
-`gatt.connect()` on an already-permitted device. Automatic reconnect is
-therefore possible without prompting, as long as the device was paired in this
-origin.
+**Reconnect.** Web Bluetooth requires a user gesture for `requestDevice()` but
+**not** for `gatt.connect()` on an already-permitted device, so reconnect is
+automatic and silent. Backoff 1/2/4/8 s capped ~30 s, indefinitely while a
+session is active. The session stays `active` across the gap — a drop is not a
+session end.
 
-- On unexpected disconnect during an active session: reconnect with backoff
-  (1 s, 2 s, 4 s, 8 s, capped ~30 s), indefinitely while the session is active.
-- The session stays `active` across the gap. A drop is not a session end.
-- On reconnect, re-run the page-count poll immediately and reconcile: any pages
-  committed while the link was down are discovered by the count, not lost.
+**Liveness.** A GATT connection can be nominally open with nothing flowing.
+Track time since last inbound frame; if it exceeds ~15 s during an active
+session, ping with a cheap read. Failure means the link is dead regardless of
+what `gatt.connected` reports — force disconnect and enter reconnect.
 
-This last point is the payoff of §5.2. Because detection is poll-based rather
-than event-based, **a page turn that happens while disconnected is still found
-on reconnect.** An event-based design loses it permanently.
-
-### 6.2 Liveness
-
-A GATT connection can be nominally open while nothing flows. The probe already
-tracks "last inbound frame". The device controller should carry the same:
-
-- Track time since last inbound frame.
-- While a session is active and no download is in flight, if that exceeds a
-  threshold (~15 s), issue a cheap read as a ping. Failure means the link is
-  dead regardless of what `gatt.connected` claims — force a disconnect and
-  enter the reconnect path.
-
-### 6.3 Tab throttling
-
-Chrome throttles timers in hidden tabs, which would stall both the poll and the
-liveness check. Detect `visibilitychange`, and warn the user that capture is
-unreliable in a background tab. Recording an accurate `hidden` interval on the
-session is more honest than pretending the gap did not happen.
+**Tab throttling.** Chrome throttles timers in hidden tabs, stalling both poll
+and watchdog. Warn on `visibilitychange`, and record the hidden interval as a
+gap (§9) rather than pretending it did not happen.
 
 ---
 
@@ -173,94 +140,121 @@ session is more honest than pretending the gap did not happen.
    idle
      │ start
      ▼
-   active ──────── drop ────────► reconnecting ──┐
-     │  ▲                              │         │
-     │  └──────── reconnected ─────────┘         │
-     │                                  session stays active
-     │ end (user)            inactivity 1h
-     ▼                              │
-  finalizing ◄──────────────────────┘
-     │  force page turn (S1), download outstanding pages,
-     │  persist, render
+   active ──────── drop ────────► reconnecting
+     │  ▲                              │
+     │  └──────── reconnected ─────────┘
+     │                          (still active; gap recorded)
+     │ end (user)   |   inactivity 1h
+     ▼              ▼
+  finalizing
+     │  flush live buffer, render, summarize gaps
      ▼
   completed
 ```
 
-- **`active`** — capturing live points, polling page count, downloading each
-  page as it commits.
-- **`reconnecting`** — a substate of active, not a separate lifecycle. The
-  session does not end because the radio blinked.
-- **`finalizing`** — forces the page turn (S1), waits for the count to
-  increment, downloads what is outstanding, persists, renders. The escape hatch
-  fires if the pad does not respond within a timeout: fall back to the live
-  buffer for the in-progress page and complete.
-- **`completed`** — every page persisted. Only now is clearing the device
-  offered (S4 + D3).
+`finalizing` is now cheap: no forced page turn, no downloads, no reconciliation
+merge. The buffer is already on disk (§8); finalizing renders and closes.
 
-Abandoned sessions (S2) are recovered on load: a session found `active` or
-`finalizing` with no live device re-enters `finalizing` and completes with what
-it has. Nothing is silently discarded.
+Sessions found `active` or `finalizing` on load re-enter `finalizing` and
+complete with what was persisted.
 
 ---
 
-## 8. Per-page source selection (task #9)
+## 8. Live buffer durability — newly critical
 
-Per C5, no merging within a page. For each page, in order:
+**This is the largest new requirement, and it exists because D9 removed the
+safety net.** Previously the in-memory live buffer could afford to be lossy:
+ROM was the durable copy. Now the live buffer *is* the record, so holding a
+session in memory until completion means a tab crash, reload, or OOM destroys
+the entire note.
 
-1. **Downloaded ROM data** if the download succeeded — full fidelity, complete.
-2. **Live-captured buffer** if the download failed or the page never committed
-   (the final page under the S1 escape hatch).
-3. **Mark the page degraded** if neither exists, and surface it. A note that
-   admits a missing page is worth more than one that quietly renumbers.
+- Persist strokes to IndexedDB **incrementally during the session**, not at the
+  end.
+- Flush on **stroke end (pen up)** — a natural, bounded boundary — plus a
+  time-based flush so a single very long stroke cannot sit unsaved.
+- Writes must be **idempotent and ordered**, so resume after an interruption
+  neither duplicates nor reorders strokes.
+- Page boundaries come from §5, and the current page index is part of the
+  persisted session state.
 
-Record on each page which source produced it. Phase 3 transcription quality and
-any later re-download both depend on knowing.
-
----
-
-## 9. Rendering (task #10)
-
-Strokes → PNG, per D7 stored as `ArrayBuffer` + `renderType`, never `Blob`.
-Renders are derived and reproducible from stored strokes, which is exactly why
-S4 gates clearing on *persisted* rather than *rendered*: losing a render costs
-CPU, losing strokes costs the note.
-
-Resolution is a user setting, not a constant (D8c) — Phase 3's transcription
-reads these images and the useful resolution depends on the chosen model.
+Practically: the worst case for any crash should be losing the stroke in
+progress, not the session.
 
 ---
 
-## 10. Clearing the device (task #18)
+## 9. Gap accounting — newly required
 
-Gated on: session `completed`, every page either persisted or explicitly
-acknowledged as degraded. Always a confirmation dialog (D3), every time, naming
-the page count. Never automatic, never remembered.
+With no backfill, the only honest alternative to silent loss is to say where
+the holes are.
 
----
+- Record every interval the session was not receiving: disconnects, failed
+  reconnects, and hidden-tab periods.
+- Store them on the session and surface them on the note — e.g. *"2m14s
+  disconnected; writing during this period was not captured."*
+- Attach gaps to the page that was active at the time, so Phase 3
+  transcription and the Phase 4 viewer can both flag affected pages.
 
-## 11. Open questions
-
-1. **Does `0x8A` arrive at all?** Pending probe re-run. Does not block this
-   design — it decides the poll interval, not the architecture.
-2. **Does the pad accept a programmatic page turn (`CMD.NEXT_PAGE`)?**
-   S1 assumes it does. Untested against hardware. If it does not, the escape
-   hatch becomes the primary path and finalizing must prompt the user to press
-   the button physically.
-3. **Poll during an active download?** Currently specified as suspended, to
-   keep the write budget clear. If downloads prove long enough that page turns
-   are missed during them, this needs revisiting.
-4. **Reconnect while a download is mid-transfer** — resume the page or restart
-   it? Restarting is simpler and C2 says a page is ~15 s. Probably restart.
+A note that admits a hole is worth considerably more than one that quietly
+presents itself as complete.
 
 ---
 
-## 12. Exit criteria
+## 10. Manual recovery from device memory (task #9, reframed)
 
-Unchanged from the roadmap, plus the two priorities that prompted this design:
+Task #9 was "ROM-authoritative reconciliation." Under D9 that name is wrong:
+ROM is not authoritative for data, and the page *count* is authoritative only
+for detecting page turns (§5).
+
+What remains is a **manual, opt-in recovery action**: "try to recover pages
+from the pad." Recommended to keep, because `downloadPage()` already exists
+from Phase 1B, so demoting it to manual costs nothing, and it is the only
+option after a long disconnect.
+
+Constraints if kept:
+
+- Never automatic, never on the session-completion path.
+- Recovered pages are **marked degraded** in storage and in the UI, carrying
+  the C7 caveats.
+- Recovered points must not claim trustworthy timestamps — either null them or
+  flag them, rather than passing off decode-time `Date.now()` as real.
+
+Easy to drop entirely if it proves not worth the UI surface; nothing else
+depends on it.
+
+---
+
+## 11. Rendering (task #10)
+
+Strokes → PNG, stored as `ArrayBuffer` + `renderType` per D7, never `Blob`.
+Renders are derived and reproducible from stored strokes — which is exactly why
+S4 gates clearing on *persisted* rather than *rendered*.
+
+Resolution is a user setting, not a constant (D8c).
+
+---
+
+## 12. Open questions
+
+1. **Does `0x8A` arrive at all?** Pending probe re-run. Decides the poll
+   interval, not the architecture.
+2. ~~Does the pad accept a programmatic page turn?~~ **Moot** — S1 dropped.
+3. ~~Poll during an active download?~~ **Moot** — routine downloads gone.
+4. **Flush granularity in §8** — per-stroke may be too chatty for IndexedDB
+   during fast writing. May need batching with a short debounce; measure before
+   choosing.
+5. **What does the UI do during a gap?** A disconnected session still shows a
+   canvas. It must be unmistakable that strokes are not being captured, without
+   being so intrusive it disrupts a meeting.
+
+---
+
+## 13. Exit criteria
 
 - start → write → interrupt → resume → complete produces a correct multi-page
   note with rendered images;
-- a page turn produces a new page in the app **even if the `0x8A` notification
-  is never delivered**;
-- a mid-session disconnect does not end the session, does not lose pages
-  committed while disconnected, and does not require re-pairing.
+- a page turn produces a new page **even if the `0x8A` notification is never
+  delivered**;
+- a mid-session disconnect does not end the session and does not require
+  re-pairing;
+- **killing the tab mid-session loses at most the stroke in progress**;
+- **any period where capture was not running is visible on the finished note.**
