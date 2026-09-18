@@ -24,7 +24,12 @@ export interface PageTurnDetector {
  *
  * C6 makes the count ground truth: a page commits to ROM exactly on page
  * turn, so the count rises exactly on page turn. The notification is not
- * ground truth - a field run recorded four presses and zero detections.
+ * ground truth - a field run measured roughly a 20% miss rate on it in
+ * sustained use (about one press in five produced no 0x8A). That miss rate
+ * makes this poll load-bearing rather than a redundant safety net: relying
+ * on the notification alone would silently merge two pages' worth of
+ * writing about once every five turns, and D9's rejection of a ROM-backfill
+ * path means there is no correcting it after the fact.
  *
  * This is not "relying on device memory" in the sense D9 rejects: that is
  * about downloading stroke DATA, whose quality problems (C7) do not apply to

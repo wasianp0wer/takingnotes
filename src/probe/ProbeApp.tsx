@@ -474,6 +474,12 @@ export function ProbeApp() {
     addLog('<<< CAPTURE OFF');
   }, [addLog]);
 
+  // Guarded out of the "Snapshot ROM" button below while `capturing` is true:
+  // this calls the raw driver's downloadPages() directly, bypassing the
+  // controller's page-count coalescing accessor, while the detector's poll
+  // (and the watchdog's ping) are hitting the same driver instance in the
+  // background. Not proven safe against that overlap, so it stays gated
+  // rather than merely documented.
   const takeSnapshot = useCallback(async () => {
     const huion = huionRef.current;
     if (!huion) return;
@@ -769,9 +775,18 @@ export function ProbeApp() {
             onChange={(e) => setSnapshotLabel(e.target.value)}
             placeholder="e.g. B-before"
           />
-          <button style={S.btn(connected && !busy)} onClick={takeSnapshot} disabled={!connected || !!busy}>
+          <button
+            style={S.btn(connected && !capturing && !busy)}
+            onClick={takeSnapshot}
+            disabled={!connected || capturing || !!busy}
+          >
             Snapshot ROM
           </button>
+          {capturing && (
+            <span style={S.status}>
+              disabled while capturing — a full-book download would race the capture poll
+            </span>
+          )}
         </div>
         <div style={S.row}>
           <button style={S.btn(connected && !busy)} onClick={readPageCount} disabled={!connected || !!busy}>

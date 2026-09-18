@@ -208,9 +208,13 @@ export function createDeviceController(
   }
 
   device.onPen = (point) => penEmitter.emit(point);
-  // Demoted to a hint: the notification is unreliable (a field capture
-  // logged four presses and zero detections), so it only makes the detector
-  // look sooner. The detector - backed by the ROM page count - decides what
+  // Demoted to a hint: a field run measured roughly a 20% miss rate on the
+  // notification in sustained use (about 1 press in 5 produced no 0x8A), so
+  // it only makes the detector look sooner. That miss rate is exactly why
+  // the poll is load-bearing rather than a redundant safety net - relying on
+  // the notification alone would silently merge two pages' worth of writing
+  // about once every five turns, and D9 provides no ROM backfill to repair
+  // it afterward. The detector - backed by the ROM page count - decides what
   // a page turn actually is.
   device.onNextPage = () => detector.hint();
   device.onFrame = () => watchdog.noteFrame();
