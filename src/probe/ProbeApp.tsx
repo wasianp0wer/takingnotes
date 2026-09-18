@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import type { DeviceController, DeviceState } from '@/device/controller';
+import { createDeviceController } from '@/device/controller';
 import { HuionNoteBLE, type HuionPage, type HuionPenPoint } from '@/utils/huionBLE';
 
 /**
@@ -114,7 +116,30 @@ function diffSnapshots(before: Snapshot, after: Snapshot) {
 }
 
 export function ProbeApp() {
+  // The controller owns connect/streaming/capture and claims all four of the
+  // driver's single-slot callbacks (see controller.ts's own comment on this) -
+  // so once connected, this probe must talk to the device ONLY through
+  // `controllerRef`, never by re-assigning huion.onPen/onLog/onStatus/
+  // onNextPage directly, or it would silently clobber the controller's own
+  // wiring. `huionRef` survives solely because `downloadPages()` (full ROM
+  // snapshot, the whole point of experiments A/B/C below) has no controller
+  // equivalent - it is read-only and orthogonal to capture, so sharing the
+  // one instance is safe.
   const huionRef = useRef<HuionNoteBLE | null>(null);
+  const controllerRef = useRef<DeviceController | null>(null);
+  const unsubsRef = useRef<Array<() => void>>([]);
+  const prevDeviceStateRef = useRef<DeviceState | null>(null);
+  // Baseline for the "(count A -> B)" half of the PAGE TURN DETECTED marker -
+  // updated only when a turn actually fires, so it always holds the value
+  // from BEFORE this detection.
+  const pageCountRef = useRef(0);
+  // When the link went down, for "+++ RECONNECTED after Xs down".
+  const dropStartAtRef = useRef<number | null>(null);
+  // Armed only by a post-reconnect streaming restore (not a manual start), so
+  // the next pen point proves data actually resumed rather than the link
+  // merely coming back silent.
+  const awaitingFirstPenRef = useRef(false);
+  const streamRestoreAtRef = useRef<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const lastLivePointRef = useRef<HuionPenPoint | null>(null);
   const logBoxRef = useRef<HTMLDivElement | null>(null);
@@ -145,6 +170,17 @@ export function ProbeApp() {
   const lastFrameAtRef = useRef<number | null>(null);
   const connectedAtRef = useRef<number | null>(null);
   const [lastFrameAt, setLastFrameAt] = useState<number | null>(null);
+  // Capture lifecycle (startCapture/stopCapture) and the DeviceState fields
+  // that only exist once capture is running: reconnect chase in progress, and
+  // the detector's own live ROM page count.
+  const [capturing, setCapturing] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [storedPageCount, setStoredPageCount] = useState(0);
+  // Last time ANY live pen point arrived - distinct from `lastFrameAt`, which
+  // tracks control frames only (11-byte pen packets are never logged as
+  // "RX: ...", see addLog below), so this is the only signal that can tell
+  // "reconnected" apart from "reconnected and pen data actually resumed".
+  const [lastPenAt, setLastPenAt] = useState<number | null>(null);
   const [followLog, setFollowLog] = useState(true);
   // Markers are the evidence: presses, detections, drops, page-turn frames.
   // They live in their own buffer so a retry storm on the verbose RX/TX log can
@@ -175,6 +211,10 @@ export function ProbeApp() {
       // arrived and we dropped it".
       if (/^RX: cd 8a/.test(msg)) addMarker(`<<< 0x8A PAGE-TURN FRAME ARRIVED  (${msg.slice(4)})`);
     }
+    // The reconnect policy's own log line, verbatim - promoted to a marker so
+    // the attempt ladder survives a log flush too.
+    const attemptMatch = /^Reconnect attempt (\d+) in (\d+)ms$/.exec(msg);
+    if (attemptMatch) addMarker(`~~~ RECONNECT attempt ${attemptMatch[1]} in ${attemptMatch[2]}ms`);
     if (/failed|error|timed out|disconnect/i.test(msg) && !msg.startsWith('RX:') && !msg.startsWith('TX:')) {
       addMarker(`! ${msg}`);
     }
@@ -239,6 +279,15 @@ export function ProbeApp() {
     const isDown = point.status > 0;
     const startedStroke = isDown && !wasDown;
 
+    setLastPenAt(Date.now());
+    // Proves a post-reconnect streaming restore actually moved data, not just
+    // a flag - see where this is armed, in the state-transition handler below.
+    if (awaitingFirstPenRef.current) {
+      awaitingFirstPenRef.current = false;
+      const elapsedMs = streamRestoreAtRef.current ? Date.now() - streamRestoreAtRef.current : 0;
+      addMarker(`<<< PEN DATA FLOWING (first point ${elapsedMs}ms after streaming restore)`);
+    }
+
     drawLivePoint(point);
 
     setLive((prev) => {
@@ -257,49 +306,122 @@ export function ProbeApp() {
           : prev.bbox,
       };
     });
-  }, [drawLivePoint]);
+  }, [drawLivePoint, addMarker]);
 
   const connect = useCallback(async () => {
     setBusy('Connecting');
     try {
       const huion = new HuionNoteBLE();
-      huion.onLog = (msg) => { addLog(msg); console.log('[huion]', msg); };
-      huion.onStatus = (next) => {
-        setStatus(next);
-        if (/disconnect/i.test(next)) {
-          const startedAt = connectedAtRef.current;
-          const uptimeS = startedAt ? Math.round((Date.now() - startedAt) / 1000) : 0;
-          const sinceFrame = lastFrameAtRef.current
-            ? Math.round((Date.now() - lastFrameAtRef.current) / 1000)
-            : -1;
-          if (startedAt === null) return; // already recorded this drop
-          setDrops((prev) => [...prev, {
-            at: new Date().toLocaleTimeString(),
-            uptimeS,
-            note: `last frame ${sinceFrame}s before drop${document.hidden ? ', tab was HIDDEN' : ''}`,
-          }]);
-          addLog(`*** DISCONNECTED after ${uptimeS}s uptime; last inbound frame ${sinceFrame}s earlier ***`);
-          addMarker(`!!! DISCONNECTED after ${uptimeS}s uptime; last inbound frame ${sinceFrame}s earlier${document.hidden ? '; TAB HIDDEN' : ''}`);
-          setConnectedAt(null);
-          connectedAtRef.current = null;
-        }
-      };
-      huion.onPen = handlePen;
-      huion.onNextPage = () => {
-        addLog('*** PAGE TURN detected (0x8A) ***');
+      // One instance, one controller: the controller claims all four of the
+      // driver's callback slots below, so nothing in this file may assign
+      // huion.onPen/onLog/onStatus/onNextPage directly from here on.
+      const controller = createDeviceController(() => huion);
+      huionRef.current = huion;
+      controllerRef.current = controller;
+      prevDeviceStateRef.current = controller.getState();
+      pageCountRef.current = 0;
+      dropStartAtRef.current = null;
+
+      const unsubLog = controller.subscribeLog((msg) => {
+        addLog(msg);
+        console.log('[huion]', msg);
+      });
+      const unsubPen = controller.subscribePen(handlePen);
+      // A detected turn is a confirmed ROM page-count change from the poll,
+      // independent of the 0x8A notification (which still shows up
+      // separately above as "0x8A PAGE-TURN FRAME ARRIVED" whenever it
+      // arrives). Both markers fire together: DETECTED carries the
+      // before/after count that proves the poll actually moved; DISPATCHED
+      // keeps its pre-existing text so a reader comparing against an older
+      // exported log still recognises it, now sourced from the detector
+      // instead of the raw notification.
+      const unsubPageTurn = controller.subscribePageTurn(() => {
+        const after = controller.getState().storedPageCount;
+        const before = pageCountRef.current;
+        pageCountRef.current = after;
+        addLog(`*** PAGE TURN detected via poll (count ${before} -> ${after}) ***`);
+        addMarker(`>>> PAGE TURN DETECTED (count ${before} -> ${after})`);
         addMarker('>>> PAGE TURN DISPATCHED to app');
         setLive((prev) => ({ ...prev, pageTurns: prev.pageTurns + 1 }));
-      };
-      huionRef.current = huion;
+      });
+      const unsubState = controller.subscribeState((state) => {
+        const prev = prevDeviceStateRef.current ?? state;
+        prevDeviceStateRef.current = state;
 
-      await huion.connect();
-      setConnected(true);
-      setDeviceName(huion.deviceName);
+        setStatus(state.status);
+        setConnected(state.isConnected);
+        setStreaming(state.isStreaming);
+        setIsReconnecting(state.isReconnecting);
+        setStoredPageCount(state.storedPageCount);
+        if (state.deviceName) setDeviceName(state.deviceName);
+
+        // Unexpected drop or explicit disconnect - either way `isConnected`
+        // flips true->false exactly once per drop, matching the dedup this
+        // logic used to get from re-testing a status string.
+        if (prev.isConnected && !state.isConnected) {
+          const startedAt = connectedAtRef.current;
+          if (startedAt !== null) {
+            const uptimeS = Math.round((Date.now() - startedAt) / 1000);
+            const sinceFrame = lastFrameAtRef.current
+              ? Math.round((Date.now() - lastFrameAtRef.current) / 1000)
+              : -1;
+            setDrops((prevDrops) => [...prevDrops, {
+              at: new Date().toLocaleTimeString(),
+              uptimeS,
+              note: `last frame ${sinceFrame}s before drop${document.hidden ? ', tab was HIDDEN' : ''}`,
+            }]);
+            addLog(`*** DISCONNECTED after ${uptimeS}s uptime; last inbound frame ${sinceFrame}s earlier ***`);
+            addMarker(`!!! DISCONNECTED after ${uptimeS}s uptime; last inbound frame ${sinceFrame}s earlier${document.hidden ? '; TAB HIDDEN' : ''}`);
+            setConnectedAt(null);
+            connectedAtRef.current = null;
+          }
+          dropStartAtRef.current = Date.now();
+        }
+
+        // Reconnect success: isReconnecting flips true->false while the link
+        // is actually back up. By this point any streaming restore attempt
+        // inside device.reconnect() has already settled (it is awaited
+        // before reconnectPolicy's onSuccess runs), so state.isStreaming
+        // here is authoritative, not a stale read.
+        if (prev.isReconnecting && !state.isReconnecting) {
+          if (state.isConnected) {
+            const downS = dropStartAtRef.current
+              ? Math.round((Date.now() - dropStartAtRef.current) / 1000)
+              : 0;
+            addMarker(`+++ RECONNECTED after ${downS}s down`);
+            dropStartAtRef.current = null;
+            // Uptime is "time since the link was last established" - without
+            // resetting it here it would read "-" forever after the first
+            // drop, since connectedAt was cleared above and a reconnect
+            // never calls connect() again.
+            const resumedAt = Date.now();
+            setConnectedAt(resumedAt);
+            connectedAtRef.current = resumedAt;
+            if (state.isStreaming) {
+              addMarker('+++ STREAMING RESTORED after reconnect');
+              awaitingFirstPenRef.current = true;
+              streamRestoreAtRef.current = Date.now();
+            }
+          } else {
+            // isReconnecting ended without the link coming back - either the
+            // retry ladder ran out (reconnectPolicy's onGiveUp) or capture
+            // was stopped mid-chase (stopCapture's endCapture). Neither path
+            // logs anything on its own, so without this the exported
+            // timeline would just go silent with no explanation.
+            addMarker('xxx RECONNECT ENDED (still disconnected)');
+          }
+        }
+      });
+
+      unsubsRef.current = [unsubLog, unsubPen, unsubPageTurn, unsubState];
+
+      await controller.connect();
       const startedAt = Date.now();
       setConnectedAt(startedAt);
+      connectedAtRef.current = startedAt;
       lastFrameAtRef.current = startedAt;
       setLastFrameAt(startedAt);
-      addMarker(`CONNECTED to ${huion.deviceName}`);
+      addMarker(`CONNECTED to ${controller.getState().deviceName}`);
       addLog(
         `Connected. model="${huion.config.modelName}" isA4=${huion.config.isA4} ` +
         `page=${huion.config.pageWidth}x${huion.config.pageHeight} battery=${huion.config.battery}`,
@@ -314,14 +436,43 @@ export function ProbeApp() {
   const disconnect = useCallback(async () => {
     setBusy('Disconnecting');
     try {
-      await huionRef.current?.disconnect();
+      await controllerRef.current?.disconnect();
     } finally {
+      unsubsRef.current.forEach((unsub) => unsub());
+      unsubsRef.current = [];
       huionRef.current = null;
+      controllerRef.current = null;
       setConnected(false);
       setStreaming(false);
+      setIsReconnecting(false);
+      setCapturing(false);
       setBusy(null);
     }
   }, []);
+
+  const startCapture = useCallback(async () => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    setBusy('Starting capture');
+    try {
+      await controller.startCapture();
+      pageCountRef.current = controller.getState().storedPageCount;
+      setCapturing(true);
+      addLog('>>> CAPTURE ON — page-turn polling, liveness checking and auto-reconnect active');
+    } catch (error) {
+      addLog(`START CAPTURE FAILED: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBusy(null);
+    }
+  }, [addLog]);
+
+  const stopCapture = useCallback(() => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    controller.stopCapture();
+    setCapturing(false);
+    addLog('<<< CAPTURE OFF');
+  }, [addLog]);
 
   const takeSnapshot = useCallback(async () => {
     const huion = huionRef.current;
@@ -362,13 +513,17 @@ export function ProbeApp() {
   }, [addLog, snapshotLabel, truncationSeen]);
 
   // Task 4's operation, on real hardware: standalone CURRENT_PAGE (0x85)
-  // query. Read-only.
+  // query. Read-only. Goes through the controller's coalescing accessor
+  // rather than the raw driver, so a manual query issued while capture is
+  // running joins the detector/watchdog's in-flight call instead of hitting
+  // the driver's single-flight guard (huionBLE.ts throws on a second
+  // concurrent page-count call).
   const readPageCount = useCallback(async () => {
-    const huion = huionRef.current;
-    if (!huion) return;
+    const controller = controllerRef.current;
+    if (!controller) return;
     setBusy('Querying stored page count');
     try {
-      const count = await huion.getStoredPageCount();
+      const count = await controller.getStoredPageCount();
       setPageCount(count);
       addLog(`Stored page count (0x85): ${count}`);
     } catch (error) {
@@ -381,13 +536,13 @@ export function ProbeApp() {
   // Task 3's operation, on real hardware: pull exactly one stored page rather
   // than the whole book. Read-only — this probe never sends 0x8B/0x8C.
   const downloadSinglePage = useCallback(async () => {
-    const huion = huionRef.current;
-    if (!huion) return;
+    const controller = controllerRef.current;
+    if (!controller) return;
     setBusy(`Downloading page ${pageIndex} (up to ~15s)`);
     const startedAt = performance.now();
     try {
       addLog(`--- SINGLE PAGE ${pageIndex} start ---`);
-      const page = await huion.downloadPage(pageIndex);
+      const page = await controller.downloadPage(pageIndex);
       const [stat] = summarizePages([page]);
       setSinglePage(stat);
       addLog(
@@ -402,8 +557,8 @@ export function ProbeApp() {
   }, [addLog, pageIndex]);
 
   const startStreaming = useCallback(async () => {
-    const huion = huionRef.current;
-    if (!huion) return;
+    const controller = controllerRef.current;
+    if (!controller) return;
     setBusy('Starting stream');
     try {
       lastLivePointRef.current = null;
@@ -412,8 +567,7 @@ export function ProbeApp() {
       const ctx = canvas?.getContext('2d');
       if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      await huion.startStreaming();
-      setStreaming(true);
+      await controller.startStreaming();
       addLog('>>> STREAMING ON — write a distinctive mark on the pad now');
     } catch (error) {
       addLog(`START STREAM FAILED: ${error instanceof Error ? error.message : String(error)}`);
@@ -423,12 +577,11 @@ export function ProbeApp() {
   }, [addLog]);
 
   const stopStreaming = useCallback(async () => {
-    const huion = huionRef.current;
-    if (!huion) return;
+    const controller = controllerRef.current;
+    if (!controller) return;
     setBusy('Stopping stream');
     try {
-      await huion.stopStreaming();
-      setStreaming(false);
+      await controller.stopStreaming();
       addLog(`<<< STREAMING OFF — captured ${live.points} points in ${live.strokes} strokes`);
     } catch (error) {
       addLog(`STOP STREAM FAILED: ${error instanceof Error ? error.message : String(error)}`);
@@ -482,6 +635,9 @@ export function ProbeApp() {
             value={connected && lastFrameAt ? `${Math.round((now - lastFrameAt) / 1000)}s ago` : '—'}
           />
           <Stat label="drops" value={drops.length} />
+          <Stat label="reconnecting" value={isReconnecting ? 'yes' : 'no'} />
+          <Stat label="stored pages" value={storedPageCount} />
+          <Stat label="detected turns" value={live.pageTurns} />
         </div>
 
         <div style={S.warnInline}>
@@ -499,7 +655,7 @@ export function ProbeApp() {
             <div style={{ ...S.statValue, color: claimedTurns === live.pageTurns ? '#38bdf8' : '#f87171' }}>
               {live.pageTurns}
             </div>
-            <div style={S.statLabel}>detected (0x8A)</div>
+            <div style={S.statLabel}>detected (poll)</div>
           </div>
           <button
             style={{ ...S.btn(connected), marginLeft: 12 }}
@@ -516,10 +672,11 @@ export function ProbeApp() {
         </div>
         <div style={S.expDetail}>
           Click <strong>I pressed it</strong> every single time you physically press the pad&rsquo;s
-          page-turn button. A mismatch localises the fault: check the log for an
-          {' '}<code>RX: cd 8a ...</code> line next to your click. Present but no
-          {' '}<code>PAGE TURN detected</code> means the frame arrived and dispatch dropped it;
-          absent entirely means it never left the pad.
+          page-turn button, then read the four outcomes off the event timeline below: (1)
+          {' '}<code>0x8A PAGE-TURN FRAME ARRIVED</code> followed by <code>PAGE TURN DETECTED</code>
+          {' '}— working; (2) the frame arrived but no detection followed — the count never moved;
+          (3) no frame arrived but <code>PAGE TURN DETECTED</code> still fires from the poll — the
+          gap-recovery path working as designed; (4) neither ever appears — nothing registered.
         </div>
 
         {drops.length > 0 && (
@@ -546,8 +703,9 @@ export function ProbeApp() {
       <section style={S.card}>
         <h2 style={S.h2}>Event timeline ({markers.length})</h2>
         <div style={S.expDetail}>
-          Presses, dispatches, raw 0x8A frames, drops and tab changes only. Kept in a separate
-          buffer so a retry storm on the raw log can never flush it.
+          Presses, detections, dispatches, raw 0x8A frames, reconnects, streaming restores, drops
+          and tab changes only. Kept in a separate buffer so a retry storm on the raw log can
+          never flush it.
         </div>
         <div style={{ ...S.log, height: 200, marginTop: 10 }}>
           {markers.length === 0
@@ -557,10 +715,14 @@ export function ProbeApp() {
                   key={i}
                   style={{
                     ...S.logLine,
-                    color: line.includes('!!!') || line.startsWith('!') ? '#f87171'
+                    color: line.includes('!!!') || line.startsWith('!') || line.includes('RECONNECT ENDED') ? '#f87171'
                       : line.includes('0x8A PAGE-TURN FRAME') ? '#4ade80'
+                      : line.includes('PAGE TURN DETECTED') ? '#a78bfa'
                       : line.includes('I PRESSED') ? '#fbbf24'
                       : line.includes('PAGE TURN DISPATCHED') ? '#38bdf8'
+                      : line.includes('RECONNECT attempt') ? '#fb923c'
+                      : line.includes('RECONNECTED') || line.includes('STREAMING RESTORED')
+                        || line.includes('PEN DATA FLOWING') ? '#4ade80'
                       : '#a3a3a3',
                   }}
                 >
@@ -653,6 +815,27 @@ export function ProbeApp() {
             Stop streaming
           </button>
         </div>
+        <div style={S.row}>
+          <button
+            style={S.btn(connected && !capturing && !busy)}
+            onClick={startCapture}
+            disabled={!connected || capturing || !!busy}
+          >
+            Start capture
+          </button>
+          <button
+            style={S.btn(connected && capturing && !busy)}
+            onClick={stopCapture}
+            disabled={!connected || !capturing || !!busy}
+          >
+            Stop capture
+          </button>
+          <span style={S.status}>
+            {capturing
+              ? 'capturing: page-turn polling, liveness checking and auto-reconnect are active'
+              : 'capture not started'}
+          </span>
+        </div>
       </section>
 
       {/* ---- Live capture ---- */}
@@ -662,6 +845,10 @@ export function ProbeApp() {
           <Stat label="points" value={live.points} />
           <Stat label="strokes" value={live.strokes} />
           <Stat label="page turns" value={live.pageTurns} />
+          <Stat
+            label="last pen"
+            value={lastPenAt ? `${Math.round((now - lastPenAt) / 1000)}s ago` : '—'}
+          />
           <Stat
             label="bbox"
             value={
@@ -803,6 +990,7 @@ export function ProbeApp() {
                 `# Huion probe log  ${new Date().toISOString()}`,
                 `device: ${deviceName || 'n/a'}`,
                 `drops: ${drops.length}`,
+                `capture: ${capturing ? 'ON' : 'OFF'} | reconnecting: ${isReconnecting ? 'yes' : 'no'} | stored pages: ${storedPageCount}`,
                 `page turns: claimed ${claimedTurns} / detected ${live.pageTurns}`,
                 `live: ${live.points} points, ${live.strokes} strokes`,
                 `raw log lines: ${log.length} (cap 20000) | markers: ${markers.length}`,
@@ -810,7 +998,7 @@ export function ProbeApp() {
               ].join('\n');
               const body = [
                 header,
-                '## EVENT TIMELINE (presses, 0x8A frames, dispatches, drops)',
+                '## EVENT TIMELINE (presses, 0x8A frames, detections, dispatches, reconnects, drops)',
                 markers.join('\n') || '(none)',
                 '',
                 '## RAW PROTOCOL LOG',
