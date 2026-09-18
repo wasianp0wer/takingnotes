@@ -5,6 +5,7 @@ import { connectedFake, LIVE_PEN_DOWN_PACKET, withChecksum } from '@/test/huionF
 import type { HuionPenPoint } from '@/utils/huionBLE';
 import { HuionNoteBLE } from '@/utils/huionBLE';
 import { CMD } from '@/utils/huionProtocol';
+import { createPacedTransport } from '@/utils/pacedTransport';
 
 /**
  * The driver awaits `handleCommand` before it forwards a 0x8D frame to
@@ -273,6 +274,44 @@ describe('capture lifecycle', () => {
   });
 });
 
+describe('paced write queue in the composition', () => {
+  it('drives a full drop-and-reconnect cycle through the paced transport', async () => {
+    // createPacedTransport is otherwise applied only in HuionNoteBLE's
+    // `transport === undefined` branch, and every driver and controller test
+    // injects a fake explicitly - so the queue was never in the system under
+    // test. This wires it in for real: handshake, capture, streaming, a
+    // transport-level drop and the reconnect (which goes through the paced
+    // reopen(), the path that now flushes the dead session's queue) all pass
+    // through it.
+    const inner = pageCountFake(() => 0);
+    const paced = createPacedTransport(inner, { minGapMs: 30 });
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(paced),
+      { reconnect: { delaysMs: [10] }, pageTurn: { pollIntervalMs: 60_000 } },
+    );
+
+    await controller.connect();
+    await controller.startStreaming();
+    await controller.startCapture();
+    expect(controller.getState().isStreaming).toBe(true);
+
+    inner.dropConnection();
+    expect(controller.getState().isStreaming).toBe(false);
+    // Paced handshake + streaming restore: the driver's own sleeps (~500ms)
+    // plus the queue's floor on roughly a dozen frames.
+    await tick(1500);
+    controller.stopCapture();
+
+    expect(controller.getState().isConnected).toBe(true);
+    expect(controller.getState().isStreaming).toBe(true);
+
+    // Nothing ever reached the radio faster than the floor, across every
+    // caller in the composition at once.
+    const gaps = inner.writtenAt.slice(1).map((t, i) => t - inner.writtenAt[i]);
+    expect(gaps.filter((g) => g < 25)).toEqual([]);
+  }, 10_000);
+});
+
 describe('page count single-flight', () => {
   it('coalesces concurrent getStoredPageCount callers into one driver call', async () => {
     // The driver's own getStoredPageCount() is single-flight and throws on a
@@ -296,6 +335,50 @@ describe('page count single-flight', () => {
 });
 
 describe('watchdog-detected drop', () => {
+  it('does not double-diagnose an ordinary drop that lands on an in-flight ping', async () => {
+    // The driver's handleDisconnect() calls setStatus('Disconnected') BEFORE
+    // it rejects a pending page-count read. So on a perfectly ordinary
+    // transport drop the order is: status -> handleDrop() -> watchdog.stop(),
+    // and only then does the watchdog's outstanding ping reject. Without a
+    // generation guard in liveness.ts that rejection still fired onDead(),
+    // `capturing` was still true, and the controller logged "Link is silent
+    // and unresponsive" and pushed a redundant reportLinkDead() into an
+    // already-arming chase - corrupting the probe's marker timeline, which is
+    // this phase's deliverable.
+    const transport = pageCountFake(() => 0);
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      {
+        // idleMs 0: every check tick wants to ping, so one is reliably
+        // outstanding when the drop lands.
+        liveness: { idleMs: 0, checkIntervalMs: 10 },
+        pageTurn: { pollIntervalMs: 60_000 },
+        // Long enough that the chase cannot actually reconnect and muddy the
+        // log during the test.
+        reconnect: { delaysMs: [10_000] },
+      },
+    );
+    const logs: string[] = [];
+    controller.subscribeLog((line) => logs.push(line));
+
+    await controller.connect();
+    await controller.startCapture();
+
+    // The device goes quiet on CURRENT_PAGE: the write still lands, the reply
+    // never comes, so the ping pends exactly as it does in the field.
+    transport.on(CMD.CURRENT_PAGE, () => []);
+    await tick(60);
+
+    transport.dropConnection();
+    await tick(60);
+    controller.stopCapture();
+
+    expect(logs.filter((l) => l.includes('Link is silent'))).toEqual([]);
+    // The ordinary drop path still arms the chase - exactly once.
+    expect(logs.filter((l) => l.includes('Reconnect attempt'))).toHaveLength(1);
+  });
+
+
   it('clears isStreaming honestly on drop, then genuinely restores it on reconnect', async () => {
     // The link looks nominally connected (no transport-level disconnect) but
     // stops answering CURRENT_PAGE - exactly what the liveness watchdog

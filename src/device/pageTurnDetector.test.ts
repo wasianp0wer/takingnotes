@@ -97,8 +97,17 @@ describe('createPageTurnDetector', () => {
     expect(maxInFlight).toBe(1);
   });
 
-  it('survives a failing poll and keeps going', async () => {
-    let count = 1;
+  it('anchors silently on the first successful poll when the baseline read failed', async () => {
+    // This replaces a test that asserted the opposite ("expect(onPageTurn)
+    // .toHaveBeenCalled(); // recovered"), encoding the defect as intent.
+    // A failed baseline leaves `known` at its initial 0, which is
+    // indistinguishable from an empty pad; treating the first real reading as
+    // a rise from 0 fabricates a page turn the user never made. Under D9
+    // nothing re-downloads from ROM, so that split is unrepairable - a
+    // fabricated boundary is as damaging as a missed one. The contract is
+    // "start() does not fire a turn", and a failed baseline must not convert
+    // the next poll into one.
+    let count = 5;
     let fail = true;
     const onError = vi.fn();
     const onPageTurn = vi.fn();
@@ -116,13 +125,23 @@ describe('createPageTurnDetector', () => {
 
     await det.start().catch(() => {});
     await tick(40);
+    expect(onError).toHaveBeenCalled(); // the baseline read really did fail
+
+    // Link comes back. The pad already held 5 pages the whole time - no turn
+    // happened, so none may be reported.
     fail = false;
-    count = 5;
+    await tick(60);
+    expect(onPageTurn).not.toHaveBeenCalled();
+    expect(det.pageCount).toBe(5); // but the baseline is now anchored at 5
+
+    // Polling is still alive, and a genuine rise from the recovered baseline
+    // is still reported - with the right `previous`, not 0.
+    count = 6;
     await tick(60);
     det.stop();
 
-    expect(onError).toHaveBeenCalled();
-    expect(onPageTurn).toHaveBeenCalled(); // recovered
+    expect(onPageTurn).toHaveBeenCalledTimes(1);
+    expect(onPageTurn).toHaveBeenCalledWith(6, 5);
   });
 
   it('ignores a count that goes down (device cleared) without firing a turn', async () => {

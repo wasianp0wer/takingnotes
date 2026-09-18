@@ -6,11 +6,28 @@ export interface PageTurnDeps {
 }
 
 export interface PageTurnOptions {
+  /**
+   * How often to re-read the ROM page count.
+   *
+   * COUPLING, by design: in the device controller composition every inbound
+   * frame - including this poll's own `0x85` reply - feeds the liveness
+   * watchdog's `noteFrame()`. While `pollIntervalMs` stays below the
+   * watchdog's `idleMs` (5s vs 15s by default) a healthy poll keeps the
+   * watchdog permanently quiet, so the watchdog only escalates after roughly
+   * three consecutive poll failures. Raising this above `idleMs` inverts
+   * that: the watchdog stops being a backstop behind this detector and
+   * becomes the primary liveness sensor. See the note on
+   * `LivenessOptions.idleMs`.
+   */
   pollIntervalMs?: number;
 }
 
 export interface PageTurnDetector {
-  /** Anchors the baseline and begins polling. Does not fire a turn. */
+  /**
+   * Anchors the baseline and begins polling. Does not fire a turn - not even
+   * when the baseline read fails, in which case the first successful poll
+   * becomes the baseline instead, still without firing.
+   */
   start(initialCount?: number): Promise<void>;
   stop(): void;
   /** A 0x8A arrived. Poll now rather than waiting out the interval. */
@@ -43,6 +60,14 @@ export function createPageTurnDetector(
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let known = 0;
+  // Whether `known` reflects a real reading from the device. `known` starts
+  // at 0, which is indistinguishable from a genuine empty pad, so a baseline
+  // read that never succeeded must not be treated as a baseline: the first
+  // poll would see any real count as a rise from 0 and fabricate a page turn.
+  // Under D9 the live stream is the only source of truth and nothing
+  // re-downloads from ROM, so a fabricated boundary splits a page
+  // irreparably - exactly as bad as a missed one.
+  let anchored = false;
   let polling = false;
   let running = false;
   // Bumped by both start() and stop() - the same shape reconnect.ts uses to
@@ -84,6 +109,14 @@ export function createPageTurnDetector(
     if (!running || myGen !== generation) return;
     const count = await readCount(myGen);
     if (count === undefined) return;
+    if (!anchored) {
+      // start()'s baseline read never landed (transient drop, 5s timeout, or
+      // a busy single-flight slot). This poll is that baseline - adopt it
+      // silently. Firing here would invent a turn the user never made.
+      known = count;
+      anchored = true;
+      return;
+    }
     if (count > known) {
       const previous = known;
       known = count;
@@ -104,13 +137,23 @@ export function createPageTurnDetector(
 
       if (initialCount !== undefined) {
         known = initialCount;
+        anchored = true;
       } else {
         const count = await readCount(myGen);
-        if (count !== undefined) known = count;
-        // Otherwise leave `known` as-is: the single-flight slot was busy
+        if (count !== undefined) {
+          known = count;
+          anchored = true;
+        }
+        // Otherwise leave `known` unanchored: the single-flight slot was busy
         // (a stale poll from a just-stopped session still resolving), the
         // read failed, or this session was superseded while we waited. The
-        // first successful poll will anchor it.
+        // first successful poll anchors it - silently, via the `!anchored`
+        // branch in poll(). This must not be left to the `count > known`
+        // comparison: `known` is still its initial 0, so the first poll of a
+        // pad holding N pages would report a turn from 0 to N. start()
+        // cannot surface the failure to the caller either (readCount
+        // swallows into onError, so startCapture() reports success), which
+        // is why the recovery has to be correct here rather than upstream.
       }
 
       if (myGen === generation) {

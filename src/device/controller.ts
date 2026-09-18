@@ -136,7 +136,15 @@ export function createDeviceController(
         // watchdog-detected drop left the driver's authenticated/streaming
         // flags untouched, so a session could come back from reconnect
         // reporting isStreaming: true with no pen data arriving.
-        void device.reportLinkDead();
+        //
+        // Not awaited - onDead() is a synchronous callback - so attach a
+        // catch: reportLinkDead() cannot reject today (it swallows its own
+        // close() error, and handleDisconnect() is synchronous with every
+        // consumer callback guarded), but the first `await` added inside
+        // handleDisconnect() would turn this into an unhandled rejection.
+        void device.reportLinkDead().catch((err: unknown) => {
+          logEmitter.emit(`Reporting the link dead failed: ${String(err)}`);
+        });
       },
     },
     opts.liveness,
