@@ -722,6 +722,83 @@ describe('transport reopen', () => {
     expect(device.isConnected).toBe(true);
     expect(device.isStreaming).toBe(false);
   });
+
+  it('stays stopped after reconnect if streaming was explicitly stopped during the outage', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+    await device.startStreaming();
+    expect(device.isStreaming).toBe(true);
+
+    transport.dropConnection(); // arms the resume-on-reconnect intent
+    expect(device.isStreaming).toBe(false);
+
+    // Explicit stop while the link is down - the write necessarily fails,
+    // but the user's intent (don't resume streaming) must still register.
+    await expect(device.stopStreaming()).rejects.toThrow();
+
+    await device.reconnect();
+
+    expect(device.isConnected).toBe(true);
+    expect(device.isStreaming).toBe(false);
+    // Only the original startStreaming() call ever wrote the enable
+    // sequence - a resurrection bug would add two more frames here.
+    expect(transport.written.filter((f) => f[1] === CMD.ONLINE_ENABLE)).toHaveLength(2);
+  });
+
+  it('does not leak a stale resume intent from an earlier session into a fresh connect() that never streams', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+    await device.startStreaming();
+    // Drop without ever calling reconnect() for it - simulates the chase
+    // being abandoned (e.g. stopCapture()) before it ever succeeded, which
+    // leaves the intent set with nothing left to consume it.
+    transport.dropConnection();
+    expect(device.isStreaming).toBe(false);
+
+    // A brand new session on the same instance - never streams this time.
+    await device.connect();
+    expect(device.isStreaming).toBe(false);
+
+    transport.dropConnection();
+    await device.reconnect();
+
+    expect(device.isConnected).toBe(true);
+    expect(device.isStreaming).toBe(false);
+    // Only the very first startStreaming() (before the first drop) ever
+    // wrote the enable sequence - the stale intent from that abandoned
+    // session must not resurrect it in this one.
+    expect(transport.written.filter((f) => f[1] === CMD.ONLINE_ENABLE)).toHaveLength(2);
+  });
+
+  it('leaves auto-restore armed for the next drop after a failed restore attempt', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+    await device.startStreaming();
+
+    let failRestoreWrites = true; // the first restore attempt will fail
+    const originalWrite = transport.write.bind(transport);
+    transport.write = async (data: Uint8Array): Promise<void> => {
+      if (failRestoreWrites && data[1] === CMD.SET_PACKET_DISTANCE) {
+        throw new Error('simulated failed streaming restore');
+      }
+      await originalWrite(data);
+    };
+
+    transport.dropConnection();
+    await device.reconnect(); // handshake succeeds; the restore write fails and is swallowed
+    expect(device.isConnected).toBe(true);
+    expect(device.isStreaming).toBe(false);
+
+    failRestoreWrites = false; // the link is reliable now
+    transport.dropConnection();
+    await device.reconnect(); // a genuinely new drop - restore must be tried again
+
+    expect(device.isConnected).toBe(true);
+    expect(device.isStreaming).toBe(true);
+  });
 });
 
 describe('onFrame hook', () => {

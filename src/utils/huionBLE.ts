@@ -96,14 +96,32 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
    *
    * Set only by `handleDisconnect()`, and only when `streaming` was true at
    * the moment of the drop - so a session that was never streaming can
-   * never be tricked into starting it after a reconnect. Consumed (and
-   * cleared) by `reconnect()` the instant it acts on it, whether or not the
-   * restore write itself succeeds, so a resume is attempted at most once
-   * per drop; a later drop while genuinely streaming sets it again
-   * independently. `disconnect()` also clears it explicitly, since an
-   * app-initiated disconnect ends the session outright and nothing will
-   * call `reconnect()` afterward - leaving it set would just be stale state
-   * for a future reader (or future code path) to trip over.
+   * never be tricked into starting it after a reconnect.
+   *
+   * Cleared in exactly four places, matching the four ways a streaming
+   * session can end or a fresh one can begin:
+   *   - `reconnect()`, but ONLY after `startStreaming()` actually succeeds.
+   *     A failed restore write leaves this true on purpose, so the next
+   *     successful reconnect (from a later, unrelated drop or otherwise)
+   *     gets another chance instead of silently giving up on streaming for
+   *     the rest of the session - that silent give-up is exactly the
+   *     symptom this whole task exists to remove. This does not reopen the
+   *     retry-storm risk `resumeStreamingOnReconnect` itself guards
+   *     against: a restore is only ever attempted once per successful
+   *     `reconnect()` call, and how often `reconnect()` itself succeeds is
+   *     already bounded by reconnectPolicy's own backoff ladder.
+   *   - `stopStreaming()`, unconditionally and before its write is even
+   *     attempted - an explicit stop is the user's intent regardless of
+   *     whether the notify-the-device write can reach a link that may
+   *     already be down.
+   *   - `disconnect()`, since an app-initiated disconnect ends the session
+   *     outright and nothing will call `reconnect()` afterward.
+   *   - `connect()`, defensively, for an instance reused across sessions
+   *     (e.g. an aborted reconnect chase that was abandoned via
+   *     `stopCapture()` before it ever succeeded) - without this, a stale
+   *     `true` left over from a previous session could survive into a new
+   *     one that never streams, and get acted on by that new session's
+   *     first drop.
    */
   private resumeStreamingOnReconnect = false;
 
@@ -231,6 +249,13 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   }
 
   async connect(): Promise<void> {
+    // Defensive: see the field comment on `resumeStreamingOnReconnect`. A
+    // fresh `connect()` on an instance that carries a stale intent from an
+    // earlier, abandoned reconnect chase (e.g. `stopCapture()` called
+    // before a pending reconnect ever succeeded) must start this new
+    // session clean, not silently primed to start streaming on its first
+    // drop.
+    this.resumeStreamingOnReconnect = false;
     this.transport.onNotify((bytes) => {
       this.handleNotification(bytes)
         .catch((err) => this.log(`Notification handler error: ${err?.message ?? err}`));
@@ -249,13 +274,13 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     await this.transport.reopen();
     await this.performHandshake();
     if (this.resumeStreamingOnReconnect) {
-      // One-shot: cleared before attempting, so a failed restore below
-      // doesn't retry on every later reconnect for a drop that already got
-      // its one chance. A *new* drop while genuinely streaming sets this
-      // again independently, via handleDisconnect().
-      this.resumeStreamingOnReconnect = false;
       try {
         await this.startStreaming();
+        // Cleared only on success - see the field comment. A failed
+        // restore leaves this true so the *next* successful reconnect gets
+        // another chance, rather than this drop's failure permanently
+        // disarming auto-restore for the rest of the session.
+        this.resumeStreamingOnReconnect = false;
       } catch (err) {
         // The link just came back from an unreliable state, so a failed
         // restore write here must not fail the reconnect as a whole - the
@@ -410,6 +435,13 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   }
 
   async stopStreaming(): Promise<void> {
+    // Cleared unconditionally, before the write is even attempted - see the
+    // field comment on `resumeStreamingOnReconnect`. An explicit stop is the
+    // user's intent regardless of whether this write can reach a link that
+    // may already be down (e.g. called during an active reconnect chase);
+    // letting the write's outcome gate this would leave a stop issued
+    // during an outage powerless to cancel the pending auto-restore.
+    this.resumeStreamingOnReconnect = false;
     await this.write(makeFrame(CMD.ONLINE_ENABLE, 0, 0, 0, 0));
     this.streaming = false;
     this.setStatus('Connected');
