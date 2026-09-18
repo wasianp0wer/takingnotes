@@ -1066,7 +1066,7 @@ inbound frame 0s before dying. Silence plus a failed cheap read is."
   createPageTurnDetector(deps: PageTurnDeps, opts?: PageTurnOptions): PageTurnDetector
   ```
 
-**Why polling is authoritative (do not "simplify" this to the notification):** finding C6 says a page commits to ROM exactly on page turn, so the ROM page count increments exactly on page turn — it is ground truth. The `0x8A` notification is not: the field log recorded `page turns: claimed 4 / detected 0`. Reading a 4-byte counter is unrelated to the bulk-transfer quality problems in C7; this is not "relying on device memory for data." A missed page turn merges two pages of writing in the live buffer with no way to repair it, because under D9 we do not re-download pages.
+**Why polling is authoritative (do not "simplify" this to the notification):** finding C6 says a page commits to ROM exactly on page turn, so the ROM page count increments exactly on page turn — it is ground truth. The `0x8A` notification is not: it misses roughly 1 press in 5 in sustained use. (An earlier revision of this plan cited `page turns: claimed 4 / detected 0` from a field log and treated the notification as wholly broken; that was a misreading of the log, corrected 2026-09-17. A 20% miss rate still makes the poll load-bearing rather than redundant.) Reading a 4-byte counter is unrelated to the bulk-transfer quality problems in C7; this is not "relying on device memory for data." A missed page turn merges two pages of writing in the live buffer with no way to repair it, because under D9 we do not re-download pages.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1255,7 +1255,7 @@ export interface PageTurnDetector {
  *
  * C6 makes the count ground truth: a page commits to ROM exactly on page
  * turn, so the count rises exactly on page turn. The notification is not
- * ground truth - a field run recorded four presses and zero detections.
+ * ground truth - it misses roughly one press in five.
  *
  * This is not "relying on device memory" in the sense D9 rejects: that is
  * about downloading stroke DATA, whose quality problems (C7) do not apply to

@@ -88,8 +88,18 @@ downloading. Reading a counter is not "relying on device memory for sync."
 
 And the consequence of a missed page turn got *worse* under D9. Previously a
 merged page could be repaired by downloading it from ROM. Now there is no
-repair: two pages of writing land in one live buffer permanently. The field log
-recorded `page turns: claimed 4 / detected 0`.
+repair: two pages of writing land in one live buffer permanently.
+
+**Corrected 2026-09-17.** An earlier draft cited the field log as `page turns:
+claimed 4 / detected 0` and inferred the notification was wholly unreliable.
+That was a misreading — the owner reports the presses largely did register, and
+the apparent misses were mostly an artifact of how that log was captured. The
+real figure, from sustained use, is a miss rate of **about 1 in 5**.
+
+That number does not weaken the case for polling; it *is* the case for polling.
+At a 20% miss rate, relying on the notification alone merges two pages of
+writing on one turn in five, and per the paragraph above there is nothing to
+repair it with. The notification is a good fast path and a poor authority.
 
 ### 5.2 Design: poll is authoritative, notification is an accelerator
 
@@ -103,10 +113,15 @@ recorded `page turns: claimed 4 / detected 0`.
 - **Deduplicate on the count**, which is the state; the notification only
   changes when it is read.
 
-**Tradeoff.** Up to ~5 s of lag on a page turn when the notification is lost.
-The alternative is not "faster" — it is "fast when it works, silently wrong
-when it doesn't," and the field log says it doesn't. If the probe shows `0x8A`
-reliable post-fix, lengthen the interval; keep the poll as a safety net.
+**Tradeoff.** Up to ~5 s of lag on the roughly 1 turn in 5 whose notification is
+lost; the other four are detected immediately via the hint. The alternative is
+not "faster" — it is "fast four times out of five, silently wrong the fifth
+time."
+
+**Do not lengthen the poll interval to save traffic.** An earlier draft of this
+document suggested exactly that, should `0x8A` prove reliable. At a 1-in-5 miss
+rate the interval is not slack — it is the detection latency for a fifth of all
+page turns.
 
 **Note:** the poll no longer needs suspending during downloads, since routine
 downloads are gone.
@@ -235,8 +250,9 @@ Resolution is a user setting, not a constant (D8c).
 
 ## 12. Open questions
 
-1. **Does `0x8A` arrive at all?** Pending probe re-run. Decides the poll
-   interval, not the architecture.
+1. ~~Does `0x8A` arrive at all?~~ **Answered:** yes, roughly 4 times in 5; the
+   poll covers the remainder. A probe run would refine the figure but no longer
+   gates anything.
 2. ~~Does the pad accept a programmatic page turn?~~ **Moot** — S1 dropped.
 3. ~~Poll during an active download?~~ **Moot** — routine downloads gone.
 4. **Flush granularity in §8** — per-stroke may be too chatty for IndexedDB
