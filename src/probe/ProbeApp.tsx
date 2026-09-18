@@ -308,8 +308,47 @@ export function ProbeApp() {
     });
   }, [drawLivePoint, addMarker]);
 
+  // Releases whatever controller this page currently holds. Every path that
+  // is about to overwrite `controllerRef` MUST go through this first.
+  //
+  // An orphaned controller is not merely leaked: it keeps `capturing` true,
+  // an unbounded reconnect chase (maxAttempts defaults to Infinity), a 5s
+  // page-count poll and a liveness watchdog, none of them reachable by any
+  // control on the page for the rest of its lifetime, and all of them still
+  // writing into these same log/marker closures. Worse, it can genuinely
+  // re-acquire the hardware - BleHuionTransport.close() deliberately keeps
+  // `this.device` so a gesture-free reopen() works - leaving two
+  // HuionNoteBLE instances holding GATT to one device with two independent
+  // paced write queues, each pacing to 25/sec in ignorance of the other.
+  // That is precisely the write storm the queue exists to prevent, and the
+  // one case it structurally cannot.
+  const releaseController = useCallback(() => {
+    const controller = controllerRef.current;
+    unsubsRef.current.forEach((unsub) => unsub());
+    unsubsRef.current = [];
+    // stopCapture() before dropping the reference: it is what actually stops
+    // the detector, the watchdog and any in-flight reconnect chase.
+    controller?.stopCapture();
+    controllerRef.current = null;
+    huionRef.current = null;
+    prevDeviceStateRef.current = null;
+    setCapturing(false);
+    setIsReconnecting(false);
+  }, []);
+
   const connect = useCallback(async () => {
     setBusy('Connecting');
+    // Belt and braces behind the disabled-on-isReconnecting Connect button:
+    // no path may reach here and overwrite a live controller.
+    const previous = controllerRef.current;
+    releaseController();
+    if (previous) {
+      // releaseController() has already stopped its timers and detached its
+      // subscriptions (so nothing below is logged twice), but only
+      // disconnect() releases the old instance's GATT handle - without it two
+      // HuionNoteBLE instances could still hold the radio at once.
+      await previous.disconnect().catch(() => { /* already gone */ });
+    }
     try {
       const huion = new HuionNoteBLE();
       // One instance, one controller: the controller claims all four of the
@@ -431,24 +470,23 @@ export function ProbeApp() {
     } finally {
       setBusy(null);
     }
-  }, [addLog, addMarker, handlePen]);
+  }, [addLog, addMarker, handlePen, releaseController]);
 
   const disconnect = useCallback(async () => {
     setBusy('Disconnecting');
     try {
+      // Enabled during a reconnect chase too (see the button below), so this
+      // is also the abort control for a chase the user no longer wants.
+      // controller.disconnect() runs endCapture() before touching the
+      // driver, which stops the chase.
       await controllerRef.current?.disconnect();
     } finally {
-      unsubsRef.current.forEach((unsub) => unsub());
-      unsubsRef.current = [];
-      huionRef.current = null;
-      controllerRef.current = null;
+      releaseController();
       setConnected(false);
       setStreaming(false);
-      setIsReconnecting(false);
-      setCapturing(false);
       setBusy(null);
     }
-  }, []);
+  }, [releaseController]);
 
   const startCapture = useCallback(async () => {
     const controller = controllerRef.current;
@@ -616,10 +654,26 @@ export function ProbeApp() {
       {/* ---- Connection ---- */}
       <section style={S.card}>
         <div style={S.row}>
-          <button style={S.btn(!connected && !busy)} onClick={connect} disabled={connected || !!busy}>
+          {/* Also disabled mid-chase: `isConnected` is false and `busy` is
+              null throughout a reconnect chase, so without this the button
+              is live and a click builds a SECOND driver + controller over
+              the top of the one still chasing - see releaseController(). */}
+          <button
+            style={S.btn(!connected && !isReconnecting && !busy)}
+            onClick={connect}
+            disabled={connected || isReconnecting || !!busy}
+          >
             Connect
           </button>
-          <button style={S.btn(connected && !busy)} onClick={disconnect} disabled={!connected || !!busy}>
+          {/* Enabled mid-chase as well, so a chase the user wants to abandon
+              has a control that ends it. Previously Disconnect and Stop
+              capture were both disabled during a chase, which left Connect
+              as the only enabled control - the one that orphans. */}
+          <button
+            style={S.btn((connected || isReconnecting) && !busy)}
+            onClick={disconnect}
+            disabled={(!connected && !isReconnecting) || !!busy}
+          >
             Disconnect
           </button>
           <span style={S.status}>
@@ -838,10 +892,13 @@ export function ProbeApp() {
           >
             Start capture
           </button>
+          {/* Not gated on `connected`: during a reconnect chase the link is
+              down but the capture machinery (chase, poll, watchdog) is very
+              much running, and this is the control that stops it. */}
           <button
-            style={S.btn(connected && capturing && !busy)}
+            style={S.btn((capturing || isReconnecting) && !busy)}
             onClick={stopCapture}
-            disabled={!connected || !capturing || !!busy}
+            disabled={(!capturing && !isReconnecting) || !!busy}
           >
             Stop capture
           </button>
