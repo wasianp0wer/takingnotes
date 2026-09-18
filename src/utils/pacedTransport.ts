@@ -7,6 +7,8 @@ export interface PacedTransportOptions {
 
 interface QueueEntry {
   data: Uint8Array;
+  /** The link generation this write was issued against. See `epoch` below. */
+  epoch: number;
   resolve: () => void;
   reject: (err: Error) => void;
 }
@@ -35,6 +37,15 @@ export function createPacedTransport(
   let draining = false;
   let closed = false;
   let lastWriteEndedAt = 0;
+  // Bumped by reopen(). A transport-level drop does NOT call close(), so
+  // nothing rejects work already queued when the link dies; without this the
+  // reopened link inherits it and replays commands from a session that has
+  // ended. `closed` alone cannot express that - reopen() has to clear it -
+  // and it cannot reach the entry drain() has already shifted and is
+  // currently waiting out the pacing gap for. Stamping each entry with the
+  // generation it was issued against covers both. Same lesson as the
+  // generation counters in reconnect.ts, pageTurnDetector.ts and liveness.ts.
+  let epoch = 0;
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -48,11 +59,21 @@ export function createPacedTransport(
           entry.reject(new Error('Transport closed before write was sent'));
           continue;
         }
+        if (entry.epoch !== epoch) {
+          entry.reject(new Error('Transport reopened before write was sent'));
+          continue;
+        }
         const wait = minGapMs - (Date.now() - lastWriteEndedAt);
         if (wait > 0) await sleep(wait);
-        // Re-check: close() can land while we were waiting out the gap.
+        // Re-check: close() or a drop-and-reopen can land while we were
+        // waiting out the gap, and this entry is already out of the queue so
+        // reopen()'s flush below cannot see it.
         if (closed) {
           entry.reject(new Error('Transport closed before write was sent'));
+          continue;
+        }
+        if (entry.epoch !== epoch) {
+          entry.reject(new Error('Transport reopened before write was sent'));
           continue;
         }
         try {
@@ -77,17 +98,29 @@ export function createPacedTransport(
     onNotify(handler) { inner.onNotify(handler); },
     onDisconnect(handler) { inner.onDisconnect(handler); },
     async open() {
+      // Same retirement as reopen(): close() flushes the queue but cannot
+      // reach the entry drain() has already shifted and is waiting out the
+      // pacing gap for, and that entry's only other guard is `closed` -
+      // which open() is about to clear.
+      epoch++;
       closed = false;
       await inner.open();
     },
     async reopen() {
+      // Retire the old generation and flush before clearing `closed`: a
+      // resumed session must not inherit the dead one's pending work.
+      epoch++;
+      while (queue.length > 0) {
+        queue.shift()!.reject(new Error('Transport reopened before write was sent'));
+      }
       closed = false;
       await inner.reopen();
     },
     write(data) {
       if (closed) return Promise.reject(new Error('Transport closed'));
+      const myEpoch = epoch;
       return new Promise<void>((resolve, reject) => {
-        queue.push({ data, resolve, reject });
+        queue.push({ data, epoch: myEpoch, resolve, reject });
         void drain();
       });
     },

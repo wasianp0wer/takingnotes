@@ -52,4 +52,28 @@ describe('FakeHuionTransport reply ordering', () => {
     const transport = new FakeHuionTransport();
     await expect(transport.write(new Uint8Array([0xcd]))).rejects.toThrow('write before open');
   });
+
+  it('fires the disconnect handler on close(), like the real radio', async () => {
+    // BleHuionTransport.close() calls gatt.disconnect(), which fires the
+    // once-registered `gattserverdisconnected` listener. A fake that closed
+    // silently hid every close-triggered path (driver disconnect(),
+    // reportLinkDead()) from the entire suite.
+    const transport = new FakeHuionTransport();
+    let disconnects = 0;
+    transport.onDisconnect(() => { disconnects += 1; });
+    await transport.open();
+
+    await transport.close();
+    expect(disconnects).toBe(1);
+
+    // Nothing left to disconnect: a second close(), or a close() after the
+    // link already dropped, must not fire again.
+    await transport.close();
+    expect(disconnects).toBe(1);
+
+    await transport.reopen();
+    transport.dropConnection();
+    await transport.close();
+    expect(disconnects).toBe(2);
+  });
 });

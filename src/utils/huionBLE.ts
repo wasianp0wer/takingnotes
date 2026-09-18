@@ -367,7 +367,18 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   }
 
   async disconnect(): Promise<void> {
-    if (this.streaming) await this.stopStreaming();
+    if (this.streaming) {
+      try {
+        await this.stopStreaming();
+      } catch (err) {
+        // A courtesy write on the way out must not abort the teardown. The
+        // `finally` in stopStreaming() has already cleared `streaming` and
+        // `resumeStreamingOnReconnect`; letting the rejection propagate from
+        // here would skip transport.close() below and strand GATT open with
+        // `authenticated` still true.
+        this.log(`Stop-streaming write failed during disconnect: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     this.clearPageRetryTimer();
     await this.transport.close();
     // `gattserverdisconnected` does NOT fire for a disconnect we initiated
@@ -442,10 +453,21 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     // letting the write's outcome gate this would leave a stop issued
     // during an outage powerless to cancel the pending auto-restore.
     this.resumeStreamingOnReconnect = false;
-    await this.write(makeFrame(CMD.ONLINE_ENABLE, 0, 0, 0, 0));
-    this.streaming = false;
-    this.setStatus('Connected');
-    this.log('Live streaming stopped');
+    try {
+      await this.write(makeFrame(CMD.ONLINE_ENABLE, 0, 0, 0, 0));
+    } finally {
+      // `streaming` must fall even if the write throws on a still-live link.
+      // Leaving it true means a later handleDisconnect() re-arms
+      // `resumeStreamingOnReconnect`, and the next reconnect then re-issues
+      // the whole 0x8d enable sequence to the device *after the user
+      // explicitly stopped* - a stale flag escalated into an unwanted device
+      // command. It also unsticks disconnect(), which awaits stopStreaming()
+      // before transport.close(): a rejecting write there used to propagate
+      // out past the close and the flag resets.
+      this.streaming = false;
+      this.setStatus('Connected');
+      this.log('Live streaming stopped');
+    }
   }
 
   async downloadPages(): Promise<HuionPage[]> {

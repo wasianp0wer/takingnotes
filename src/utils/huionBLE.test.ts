@@ -746,6 +746,64 @@ describe('transport reopen', () => {
     expect(transport.written.filter((f) => f[1] === CMD.ONLINE_ENABLE)).toHaveLength(2);
   });
 
+  it('does not resurrect streaming when the stop write fails on a still-live link', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+    await device.startStreaming();
+    expect(device.isStreaming).toBe(true);
+
+    // The link is up - the frame just does not make it. Without the
+    // `finally`, `streaming` stayed true, so the drop below re-armed
+    // resumeStreamingOnReconnect and the reconnect re-issued the enable
+    // sequence to the device AFTER an explicit user stop.
+    const originalWrite = transport.write.bind(transport);
+    transport.write = async (data: Uint8Array): Promise<void> => {
+      if (data[1] === CMD.ONLINE_ENABLE && data[3] === 0) {
+        throw new Error('simulated failed stop-streaming write');
+      }
+      await originalWrite(data);
+    };
+
+    await expect(device.stopStreaming()).rejects.toThrow(/simulated failed stop/);
+    expect(device.isStreaming).toBe(false);
+
+    transport.write = originalWrite;
+    transport.dropConnection();
+    await device.reconnect();
+
+    expect(device.isConnected).toBe(true);
+    expect(device.isStreaming).toBe(false);
+    // Only the original startStreaming()'s two frames were ever accepted;
+    // the failed stop never reached `written`, and no restore was issued.
+    expect(transport.written.filter((f) => f[1] === CMD.ONLINE_ENABLE)).toHaveLength(2);
+  });
+
+  it('completes disconnect() even when the stop-streaming write rejects', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+    await device.startStreaming();
+
+    const originalWrite = transport.write.bind(transport);
+    transport.write = async (data: Uint8Array): Promise<void> => {
+      if (data[1] === CMD.ONLINE_ENABLE && data[3] === 0) {
+        throw new Error('simulated failed stop-streaming write');
+      }
+      await originalWrite(data);
+    };
+    const closeSpy = vi.spyOn(transport, 'close');
+
+    // A courtesy write on the way out must not abort the teardown: letting
+    // it propagate skipped transport.close() and left GATT open with
+    // `authenticated` still true.
+    await expect(device.disconnect()).resolves.toBeUndefined();
+
+    expect(closeSpy).toHaveBeenCalled();
+    expect(device.isConnected).toBe(false);
+    expect(device.isStreaming).toBe(false);
+  });
+
   it('does not leak a stale resume intent from an earlier session into a fresh connect() that never streams', async () => {
     const transport = connectedFake();
     const device = new HuionNoteBLE(transport);

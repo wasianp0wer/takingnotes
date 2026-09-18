@@ -81,6 +81,14 @@ export class FakeHuionTransport implements HuionTransport {
   }
 
   async close(): Promise<void> {
+    const wasOpen = this.opened;
     this.opened = false;
+    // Real hardware fires `gattserverdisconnected` when the link goes away,
+    // including when we tear it down ourselves while GATT was up. A fake
+    // that stays silent hid every close-triggered path on this branch from
+    // the test suite. Only fire if the link was actually up: a second
+    // close(), or a close() after a drop, has nothing left to disconnect -
+    // which is also what the real transport's one-shot handler does.
+    if (wasOpen) this.disconnectHandler?.();
   }
 }

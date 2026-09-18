@@ -75,4 +75,27 @@ describe('createPacedTransport', () => {
     expect(paced.deviceId).toBe(inner.deviceId);
     expect(seen).toHaveLength(1);
   });
+
+  it('does not replay writes queued before a drop onto the reopened link', async () => {
+    // A transport-level drop never calls close(), so nothing rejects what is
+    // already queued. Before this, reopen()'s `closed = false` handed those
+    // stale entries straight to the fresh link.
+    const inner = new FakeHuionTransport();
+    const paced = createPacedTransport(inner, { minGapMs: 40 });
+    await paced.open();
+
+    const pending = [1, 2, 3, 4].map((n) =>
+      paced.write(new Uint8Array([0xcd, n])).then(() => 'sent' as const, () => 'dropped' as const),
+    );
+    // Let only the first entry get out, then lose the link mid-queue.
+    await new Promise((r) => setTimeout(r, 10));
+    inner.dropConnection();
+
+    await paced.reopen();
+    const outcomes = await Promise.all(pending);
+
+    expect(outcomes.slice(1)).toEqual(['dropped', 'dropped', 'dropped']);
+    // Nothing from the dead session reached the reopened link.
+    expect(inner.written.map((f) => f[1])).toEqual([1]);
+  });
 });
