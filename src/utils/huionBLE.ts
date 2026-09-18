@@ -86,6 +86,26 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   private challenge: [number, number, number] | null = null;
   private authenticated = false;
   private streaming = false;
+  /**
+   * Intent, not reality: whether a reconnect should restore streaming once
+   * the handshake completes. `streaming` (and its `isStreaming` getter)
+   * always reflects whether the device has actually been told to stream -
+   * this field exists only because `handleDisconnect()` clears `streaming`
+   * to false on every drop, which would otherwise erase the fact that
+   * streaming was active a moment before.
+   *
+   * Set only by `handleDisconnect()`, and only when `streaming` was true at
+   * the moment of the drop - so a session that was never streaming can
+   * never be tricked into starting it after a reconnect. Consumed (and
+   * cleared) by `reconnect()` the instant it acts on it, whether or not the
+   * restore write itself succeeds, so a resume is attempted at most once
+   * per drop; a later drop while genuinely streaming sets it again
+   * independently. `disconnect()` also clears it explicitly, since an
+   * app-initiated disconnect ends the session outright and nothing will
+   * call `reconnect()` afterward - leaving it set would just be stale state
+   * for a future reader (or future code path) to trip over.
+   */
+  private resumeStreamingOnReconnect = false;
 
   config: HuionDeviceConfig = {
     maxX: 32767, maxY: 32767, maxPressure: 8191,
@@ -228,9 +248,31 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   async reconnect(): Promise<void> {
     await this.transport.reopen();
     await this.performHandshake();
+    if (this.resumeStreamingOnReconnect) {
+      // One-shot: cleared before attempting, so a failed restore below
+      // doesn't retry on every later reconnect for a drop that already got
+      // its one chance. A *new* drop while genuinely streaming sets this
+      // again independently, via handleDisconnect().
+      this.resumeStreamingOnReconnect = false;
+      try {
+        await this.startStreaming();
+      } catch (err) {
+        // The link just came back from an unreliable state, so a failed
+        // restore write here must not fail the reconnect as a whole - the
+        // link being back at all is the more important fact. It also must
+        // not claim streaming resumed when it didn't: startStreaming() only
+        // flips `streaming` true after its writes succeed, so simply not
+        // rethrowing is enough to keep isStreaming honest.
+        this.log(`Failed to resume streaming after reconnect: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   private handleDisconnect() {
+    // Captured before `streaming` is cleared below - see the field comment
+    // on `resumeStreamingOnReconnect` for why this can't just read
+    // `streaming` again later.
+    if (this.streaming) this.resumeStreamingOnReconnect = true;
     this.authenticated = false;
     this.streaming = false;
     this.setStatus('Disconnected');
@@ -310,6 +352,9 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     this.failInFlightDownload(new Error('Disconnected'));
     this.authenticated = false;
     this.streaming = false;
+    // An app-initiated disconnect ends the session outright - see the field
+    // comment on `resumeStreamingOnReconnect`.
+    this.resumeStreamingOnReconnect = false;
     this.setStatus('Disconnected');
   }
 

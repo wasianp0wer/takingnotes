@@ -217,6 +217,60 @@ describe('capture lifecycle', () => {
 
     expect(logs.filter((l) => l.includes('Reconnect attempt'))).toEqual([]);
   });
+
+  it('restores streaming end-to-end after a transport-level drop and reconnect', async () => {
+    // Task 8: the reconnect machinery restoring the link is not enough - a
+    // session that was streaming before the drop must be streaming again
+    // after, with no separate user gesture. Goes through the whole stack
+    // (reconnectPolicy -> device.reconnect()), not just the driver directly.
+    // pageCountFake (not connectedFake) because startCapture() polls
+    // CURRENT_PAGE - connectedFake has no responder for it and the poll
+    // would hang to its own 5s timeout.
+    const transport = pageCountFake(() => 0);
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      { reconnect: { delaysMs: [10] } },
+    );
+
+    await controller.connect();
+    await controller.startStreaming();
+    await controller.startCapture();
+    expect(controller.getState().isStreaming).toBe(true);
+
+    transport.dropConnection();
+    expect(controller.getState().isStreaming).toBe(false);
+    // Handshake (~100ms, one real sleep) + streaming restore (~400ms, three
+    // real sleeps) + margin for scheduling overhead.
+    await tick(700);
+    controller.stopCapture();
+
+    expect(controller.getState().isConnected).toBe(true);
+    expect(controller.getState().isStreaming).toBe(true);
+  });
+
+  it('does not start streaming after a reconnect if it was not active before the drop', async () => {
+    const transport = pageCountFake(() => 0);
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      { reconnect: { delaysMs: [10] } },
+    );
+
+    await controller.connect();
+    await controller.startCapture();
+    expect(controller.getState().isStreaming).toBe(false);
+
+    transport.dropConnection();
+    // Long enough to cover a full (mistaken) restore attempt too - handshake
+    // (~100ms) + streaming setup sleeps (~400ms) - so an implementation that
+    // wrongly restores unconditionally would be caught here, not hidden by
+    // an assertion that ran before its sleeps finished.
+    await tick(700);
+    controller.stopCapture();
+
+    expect(controller.getState().isConnected).toBe(true);
+    expect(controller.getState().isStreaming).toBe(false);
+    expect(transport.written.some((f) => f[1] === CMD.ONLINE_ENABLE)).toBe(false);
+  });
 });
 
 describe('page count single-flight', () => {
@@ -242,7 +296,7 @@ describe('page count single-flight', () => {
 });
 
 describe('watchdog-detected drop', () => {
-  it('never reports isStreaming true again once the watchdog has detected a silent link', async () => {
+  it('clears isStreaming honestly on drop, then genuinely restores it on reconnect', async () => {
     // The link looks nominally connected (no transport-level disconnect) but
     // stops answering CURRENT_PAGE - exactly what the liveness watchdog
     // exists to catch, as opposed to a real drop (which the other tests in
@@ -282,16 +336,35 @@ describe('watchdog-detected drop', () => {
     const baseline = states.length;
 
     failPing = true; // the link now looks connected but never answers a ping
-    // Long enough for the watchdog to detect the silence and for at least
-    // one full reconnect handshake (which includes a real 100ms sleep) to
-    // run to completion - the bug this covers only shows up once the
-    // handshake's own 'Authenticated'/'Connected' status updates land.
-    await tick(250);
+    // Long enough for the watchdog to detect the silence, for at least one
+    // full reconnect handshake (which includes a real 100ms sleep) to run to
+    // completion, AND (Task 8) for the streaming-restore sequence that
+    // follows a successful reconnect (~400ms of its own sleeps) to finish.
+    // Because `failPing` never resets, the watchdog keeps re-killing the
+    // link after each restore, so this window may catch more than one
+    // drop/restore cycle - the assertions below only rely on "restore
+    // happened at least once", not on where the window happens to end, so
+    // that oscillation doesn't make the test flaky.
+    await tick(900);
     controller.stopCapture();
 
     const afterCapture = states.slice(baseline);
     const dropIndex = afterCapture.findIndex((s) => s.isConnected === false);
     expect(dropIndex).toBeGreaterThanOrEqual(0);
-    expect(afterCapture.slice(dropIndex).some((s) => s.isStreaming === true)).toBe(false);
+    // Right at the drop, isStreaming must already be false - not stale from
+    // before the watchdog killed the link. This is the original bug this
+    // test covered: a watchdog-detected drop that left `streaming` (and
+    // therefore `isStreaming`) untouched, so reconnecting could report
+    // streaming as still active with no pen data arriving.
+    expect(afterCapture[dropIndex].isStreaming).toBe(false);
+    // Task 8: streaming was active before the drop, so a successful
+    // reconnect restores it - genuinely, by re-issuing the enable sequence,
+    // not by leaving a stale flag. Proven two ways: the state eventually
+    // reports isStreaming true again, and the enable frames were actually
+    // written a second time (a stale-flag bug would flip the state without
+    // ever writing anything new).
+    expect(afterCapture.slice(dropIndex).some((s) => s.isStreaming === true)).toBe(true);
+    const enableFrames = transport.written.filter((f) => f[1] === CMD.ONLINE_ENABLE);
+    expect(enableFrames.length).toBeGreaterThanOrEqual(4);
   });
 });

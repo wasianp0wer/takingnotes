@@ -661,6 +661,67 @@ describe('transport reopen', () => {
     const transport = new FakeHuionTransport();
     await expect(transport.reopen()).rejects.toThrow(/never opened/i);
   });
+
+  it('resumes streaming after a successful reconnect if it was active before the drop', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+    await device.startStreaming();
+    expect(device.isStreaming).toBe(true);
+
+    transport.dropConnection();
+    expect(device.isStreaming).toBe(false); // cleared on the way down, per handleDisconnect
+
+    await device.reconnect();
+
+    expect(device.isConnected).toBe(true);
+    expect(device.isStreaming).toBe(true);
+    // Two full enable sequences (2 frames each): one from the original
+    // startStreaming(), one from the reconnect's restore. A stale flag that
+    // never actually re-issued the sequence would only show the first two.
+    expect(transport.written.filter((f) => f[1] === CMD.ONLINE_ENABLE)).toHaveLength(4);
+  });
+
+  it('does not start streaming after reconnect if it was not active before the drop', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+    expect(device.isStreaming).toBe(false);
+
+    transport.dropConnection();
+    await device.reconnect();
+
+    expect(device.isConnected).toBe(true);
+    expect(device.isStreaming).toBe(false);
+    expect(transport.written.some((f) => f[1] === CMD.ONLINE_ENABLE)).toBe(false);
+  });
+
+  it('leaves isStreaming false when the post-reconnect streaming restore write fails', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+    await device.startStreaming();
+    expect(device.isStreaming).toBe(true);
+
+    let failRestoreWrites = false;
+    const originalWrite = transport.write.bind(transport);
+    transport.write = async (data: Uint8Array): Promise<void> => {
+      if (failRestoreWrites && data[1] === CMD.SET_PACKET_DISTANCE) {
+        throw new Error('simulated failed streaming restore');
+      }
+      await originalWrite(data);
+    };
+
+    transport.dropConnection();
+    failRestoreWrites = true;
+
+    // The reconnect itself must not fail just because the follow-up restore
+    // write did - the link coming back at all is the more important fact.
+    await expect(device.reconnect()).resolves.toBeUndefined();
+
+    expect(device.isConnected).toBe(true);
+    expect(device.isStreaming).toBe(false);
+  });
 });
 
 describe('onFrame hook', () => {
