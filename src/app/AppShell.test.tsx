@@ -86,7 +86,10 @@ describe('AppShell', () => {
     });
 
     expect(tab('Triage').getAttribute('data-state')).toBe('active');
-    expect(container.textContent).toContain('Triage arrives with F3');
+    // One assertion per landmark, so a failure names the missing one.
+    expect(container.querySelector('section[aria-label="Tasks"]')).not.toBeNull();
+    expect(container.querySelector('section[aria-label="Calendar"]')).not.toBeNull();
+    expect(container.querySelector('section[aria-label="Scratchpad"]')).not.toBeNull();
   });
 
   it('runs the legacy notebook migration once for the whole app', () => {
