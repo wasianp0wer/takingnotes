@@ -15,8 +15,7 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          'vendor-dnd': ['@dnd-kit/core', '@dnd-kit/sortable', '@dnd-kit/utilities'],
-          'vendor-ui': ['@radix-ui/react-dialog', '@radix-ui/react-scroll-area', '@radix-ui/react-slider', '@radix-ui/react-select', '@radix-ui/react-tooltip', '@radix-ui/react-separator', 'react-colorful'],
+          'vendor-ui': ['@radix-ui/react-dialog', '@radix-ui/react-scroll-area', '@radix-ui/react-slider', '@radix-ui/react-select', '@radix-ui/react-tooltip', '@radix-ui/react-separator'],
         },
       },
     },
