@@ -333,6 +333,153 @@ describe('createTranscriptionQueue', () => {
     logged.mockRestore();
   });
 
+  it('keeps the stored markdown when a retry fails', async () => {
+    // The text of a done page is the user's only copy. A retry that fails -
+    // Ollama not running is the usual reason anyone presses Retry - must not
+    // destroy it.
+    const pageId = await seedPage({
+      transcript: transcript('done', { markdown: 'Newton on motion' }),
+    });
+    transcribePage.mockRejectedValueOnce(new Error('fetch failed'));
+
+    const queue = createQueue();
+    await queue.retry(pageId);
+    await queue.idle();
+
+    const page = await getPage(pageId);
+    expect(page?.transcript?.status).toBe('failed');
+    expect(page?.transcript?.error).toBe('fetch failed');
+    expect(page?.transcript?.markdown).toBe('Newton on motion');
+  });
+
+  it('keeps the stored markdown while a retry is pending and running', async () => {
+    const rendering = deferred();
+    const renderGate = deferred();
+    render.mockImplementation(async () => {
+      rendering.resolve();
+      await renderGate.promise;
+      return { blob: RENDER_BLOB, width: 772, height: 1024 };
+    });
+    const modelCalled = deferred();
+    const gate = deferred();
+    transcribePage.mockImplementation(async () => {
+      modelCalled.resolve();
+      await gate.promise;
+      return { ...RESULT };
+    });
+
+    const pageId = await seedPage({
+      transcript: transcript('done', { markdown: 'Newton on motion' }),
+    });
+    const queue = createQueue();
+    await queue.retry(pageId);
+
+    await rendering.promise;
+    expect(await statusOf(pageId)).toBe('pending');
+    expect((await getPage(pageId))?.transcript?.markdown).toBe('Newton on motion');
+
+    renderGate.resolve();
+    await modelCalled.promise;
+    expect(await statusOf(pageId)).toBe('running');
+    expect((await getPage(pageId))?.transcript?.markdown).toBe('Newton on motion');
+
+    gate.resolve();
+    await queue.idle();
+  });
+
+  it('replaces the stored markdown when a retry succeeds', async () => {
+    const pageId = await seedPage({
+      transcript: transcript('done', { markdown: 'Newton on motion' }),
+    });
+    const queue = createQueue();
+    await queue.retry(pageId);
+    await queue.idle();
+
+    const page = await getPage(pageId);
+    expect(page?.transcript?.markdown).toBe('text');
+    expect(page?.transcript?.status).toBe('done');
+    expect(page?.transcript?.error).toBeNull();
+  });
+
+  it('resolves true for the call that queued the page and false for the duplicate', async () => {
+    const pageId = await seedPage();
+    const queue = createQueue();
+
+    const results = await Promise.all([queue.enqueue(pageId), queue.enqueue(pageId)]);
+
+    expect(results).toEqual([true, false]);
+    await queue.idle();
+  });
+
+  it('resolves false for a page whose job is already in flight', async () => {
+    const modelCalled = deferred();
+    const gate = deferred();
+    transcribePage.mockImplementation(async () => {
+      modelCalled.resolve();
+      await gate.promise;
+      return { ...RESULT };
+    });
+
+    const pageId = await seedPage();
+    const queue = createQueue();
+    expect(await queue.enqueue(pageId)).toBe(true);
+    await modelCalled.promise;
+
+    expect(await queue.retry(pageId)).toBe(false);
+
+    gate.resolve();
+    await queue.idle();
+    expect(transcribePage).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves false after stop()', async () => {
+    const pageId = await seedPage();
+    const queue = createQueue();
+    queue.stop();
+
+    expect(await queue.enqueue(pageId)).toBe(false);
+
+    await queue.idle();
+    expect(transcribePage).not.toHaveBeenCalled();
+    expect((await getPage(pageId))?.transcript).toBeNull();
+  });
+
+  it('never lets a slow pending mark land on top of the status of its own job', async () => {
+    // The race: the second page is queued while `drain` is busy, so its job can
+    // start - and finish - before its `pending` write lands. That write must
+    // never be the last one standing.
+    const firstRunning = deferred();
+    const firstGate = deferred();
+    transcribePage.mockImplementationOnce(async () => {
+      firstRunning.resolve();
+      await firstGate.promise;
+      return { ...RESULT };
+    });
+
+    const first = await seedPage({ pageIndex: 0 });
+    const second = await seedPage({ pageIndex: 1 });
+    const queue = createQueue();
+
+    await queue.enqueue(first);
+    await firstRunning.promise;
+
+    // Only the next call - the second page's pending mark - is held up.
+    const slowSettings = deferred<TranscriptionSettingsSnapshot>();
+    getSettings.mockImplementationOnce(() => slowSettings.promise);
+    const queuedSecond = queue.enqueue(second);
+
+    firstGate.resolve();
+    // Long enough for a queue that does not wait for the pending mark to run
+    // the second job to completion first, so the late pending write would be
+    // the final stored status.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    slowSettings.resolve({ ...SETTINGS });
+
+    expect(await queuedSecond).toBe(true);
+    await queue.idle();
+    expect(await statusOf(second)).toBe('done');
+  });
+
   it('stops taking new pages after stop()', async () => {
     const pageId = await seedPage({ finalizedAt: null });
     const queue = createQueue();

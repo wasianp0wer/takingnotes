@@ -35,10 +35,18 @@ export interface TranscriptionQueueDeps {
 export interface TranscriptionQueue {
   /** Subscribes to finalized pages, then resumes whatever storage left unfinished. Idempotent. */
   start(): Promise<void>;
-  /** Resolves once the page is marked `pending` (so a reload resumes it). Dedupes. */
-  enqueue(pageId: string): Promise<void>;
-  /** Re-runs a page whatever its current status - the manual path for failed and legacy pages. */
-  retry(pageId: string): Promise<void>;
+  /**
+   * Queues a page and resolves once it is marked `pending` (so a reload resumes
+   * it). Resolves `true` when this call queued the page, `false` when it was
+   * already queued or running, or the queue is stopped.
+   */
+  enqueue(pageId: string): Promise<boolean>;
+  /**
+   * Re-runs a page whatever its current status - the manual path for failed and
+   * legacy pages. Resolves like `enqueue`: `false` when the page is already
+   * queued or running, so a caller can tell a no-op retry from a real one.
+   */
+  retry(pageId: string): Promise<boolean>;
   /** Fires with a page id after every transcript status change. */
   subscribe(fn: (pageId: string) => void): () => void;
   /** Resolves when nothing is queued or running. */
@@ -61,7 +69,17 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
   const now = deps.now ?? Date.now;
   const changes = createEmitter<string>();
 
-  const queued: string[] = [];
+  /**
+   * A queued page plus a promise that settles once its `pending` mark has been
+   * written (or failed to be). The job awaits it, so a slow pending write can
+   * never land on top of the `running`/`done` write of the job it belongs to.
+   */
+  interface QueueEntry {
+    id: string;
+    ready: Promise<void>;
+  }
+
+  const queued: QueueEntry[] = [];
   let running: string | null = null;
   let draining = false;
   let started = false;
@@ -82,16 +100,25 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     for (const waiter of waiters) waiter();
   }
 
-  function writeTranscript(
+  async function writeTranscript(
     pageId: string,
     status: TranscriptStatus,
     fields: { model: string; promptVersion: string; markdown?: string; error?: string | null },
   ): Promise<unknown> {
+    // Only a `done` write replaces the text; every other status keeps whatever
+    // markdown is already stored. On a retry that text is the user's only copy
+    // of the transcript, and the most likely reason anyone presses Retry is
+    // that Ollama is not running - so a re-run that fails must leave the old
+    // text in place rather than turn a retry into a data loss. A `done` write
+    // may legitimately store `''` (a blank page). The queue is serial, so this
+    // read cannot race a write of its own.
+    const markdown =
+      status === 'done'
+        ? (fields.markdown ?? '')
+        : ((await getPage(pageId))?.transcript?.markdown ?? '');
+
     const record: TranscriptRecord = {
-      // Only a `done` transcript carries text. A page going back to
-      // pending/running (a retry) must not keep showing the stale markdown of
-      // the run it is replacing.
-      markdown: status === 'done' ? (fields.markdown ?? '') : '',
+      markdown,
       model: fields.model,
       promptVersion: fields.promptVersion,
       status,
@@ -172,10 +199,15 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     draining = true;
     try {
       while (!stopped && queued.length > 0) {
-        const pageId = queued.shift() as string;
-        running = pageId;
+        const entry = queued.shift();
+        if (!entry) break;
+        running = entry.id;
         try {
-          await runJob(pageId);
+          // The entry's `pending` mark must be on disk before the job writes
+          // `running`/`done`, or a slow pending write lands afterwards and
+          // leaves a finished page looking queued. `ready` never rejects.
+          await entry.ready;
+          await runJob(entry.id);
         } finally {
           running = null;
         }
@@ -186,14 +218,13 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     }
   }
 
-  async function enqueue(pageId: string): Promise<void> {
-    if (stopped) return;
-    if (running === pageId || queued.includes(pageId)) return;
-    // Queued before the first await, so a second enqueue of the same page
-    // (the engine's event racing the startup scan) is deduped rather than run
-    // twice.
-    queued.push(pageId);
-
+  /**
+   * Writes the `pending` mark of a queued page. Never rejects: the mark is what
+   * makes a queued page survive a reload, so losing it is worth a log, but the
+   * job still runs and will record its own failure if the cause persists - and
+   * `drain` waits on this promise, so a rejection would stall the queue.
+   */
+  async function markPending(pageId: string): Promise<void> {
     try {
       const settings = await deps.getSettings();
       await writeTranscript(pageId, 'pending', {
@@ -202,13 +233,27 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       });
       changes.emit(pageId);
     } catch (error) {
-      // The pending mark is what makes a queued page survive a reload; losing
-      // it is worth a log, but the job still runs and will record its own
-      // failure if the cause persists.
       console.error('[transcription] could not mark page pending', pageId, error);
     }
+  }
 
+  /**
+   * Not `async`: the dedupe check and the push must both happen synchronously,
+   * or two concurrent enqueues of the same page (the engine's event racing the
+   * startup scan) would each see an empty queue and both queue it.
+   */
+  function enqueue(pageId: string): Promise<boolean> {
+    if (stopped) return Promise.resolve(false);
+    if (running === pageId || queued.some((entry) => entry.id === pageId)) {
+      return Promise.resolve(false);
+    }
+
+    const entry: QueueEntry = { id: pageId, ready: markPending(pageId) };
+    queued.push(entry);
     void drain();
+    // Resolves once the page is marked `pending`, so a caller knows the page
+    // will be picked up again after a reload.
+    return entry.ready.then(() => true);
   }
 
   async function start(): Promise<void> {
