@@ -332,6 +332,84 @@ describe('createRecorder', () => {
     expect(recorder.getState().error).toBeNull();
   });
 
+  it('stop() while starting (deferred getUserMedia) aborts before recording begins', async () => {
+    const track = new FakeTrack();
+    const pendingStream = fakeStream([track]);
+    let resolveGetUserMedia!: (stream: MediaStream) => void;
+    const getUserMedia = vi.fn(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolveGetUserMedia = resolve;
+        }),
+    );
+    const { recorder, save } = makeHarness({ getUserMedia });
+
+    const startPromise = recorder.start({ sessionId: null, noteId: null });
+    expect(recorder.getState().status).toBe('starting');
+
+    const stopResult = await recorder.stop();
+    expect(stopResult).toBeNull();
+    // getUserMedia has not resolved yet - still starting.
+    expect(recorder.getState().status).toBe('starting');
+
+    resolveGetUserMedia(pendingStream);
+    await startPromise;
+
+    expect(recorder.getState().status).toBe('idle');
+    expect(recorder.getState().error).toBeNull();
+    expect(track.stopped).toBe(true);
+    expect(FakeMediaRecorder.instances).toHaveLength(0);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('ignores a second start while starting (getUserMedia called once)', async () => {
+    let resolveGetUserMedia!: (stream: MediaStream) => void;
+    const getUserMedia = vi.fn(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolveGetUserMedia = resolve;
+        }),
+    );
+    const { recorder } = makeHarness({ getUserMedia });
+
+    const first = recorder.start({ sessionId: null, noteId: null });
+    await recorder.start({ sessionId: 'other', noteId: null });
+
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+
+    resolveGetUserMedia(fakeStream());
+    await first;
+  });
+
+  it('reports unsupported when there is no getUserMedia', async () => {
+    const { recorder } = makeHarness({ getUserMedia: undefined });
+
+    await recorder.start({ sessionId: null, noteId: null });
+
+    expect(recorder.getState().status).toBe('idle');
+    expect(recorder.getState().error).toBe('Recording is not supported in this browser');
+  });
+
+  it('reports a mediaRecorder.start() failure, stopping tracks and returning to idle', async () => {
+    class ThrowingMediaRecorder extends FakeMediaRecorder {
+      start(): void {
+        throw new Error('boom');
+      }
+    }
+    const track = new FakeTrack();
+    const { recorder, save } = makeHarness(
+      { MediaRecorder: ThrowingMediaRecorder as unknown as RecorderDeps['MediaRecorder'] },
+      fakeStream([track]),
+    );
+
+    await recorder.start({ sessionId: null, noteId: null });
+
+    expect(recorder.getState().status).toBe('idle');
+    expect(recorder.getState().error).toBe('Could not start recording: boom');
+    expect(track.stopped).toBe(true);
+    expect(save).not.toHaveBeenCalled();
+  });
+
   it('getState() returns the same object reference until something changes', async () => {
     const { recorder, tick } = makeHarness();
 

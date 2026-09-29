@@ -108,6 +108,10 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
   let chosenType: string | undefined;
   let tickHandle: unknown = null;
   let stopWaiters: Array<(result: RecordingRecord | null) => void> = [];
+  // Set by stop() when it lands during 'starting' - the only await point in
+  // start() is the getUserMedia call below, so this is the only window where
+  // a stop request can otherwise be silently dropped, leaving the mic live.
+  let stopRequested = false;
 
   // Resolved fresh in start() (defaults are lazy - not evaluated until a
   // recording actually begins - so definite assignment here, not a default
@@ -198,6 +202,7 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
 
   async function start(link: RecorderLink): Promise<void> {
     if (state.status !== 'idle') return;
+    stopRequested = false;
     setState({ error: null, status: 'starting' });
 
     const getUserMedia =
@@ -214,6 +219,17 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
       nextStream = await getUserMedia({ audio: true });
     } catch (error) {
       setState({ status: 'idle', error: micErrorMessage(error) });
+      return;
+    }
+
+    // A stop() that arrived while getUserMedia was pending (the only await
+    // point in this function) must not be silently dropped: without this
+    // check the mic would stay live and recording would start anyway once
+    // permission came through, even though the caller already asked to stop.
+    if (stopRequested) {
+      stopRequested = false;
+      nextStream.getTracks().forEach((track) => track.stop());
+      setState({ status: 'idle', error: null });
       return;
     }
 
@@ -248,11 +264,17 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
       if (nextRecorder.state === 'recording') nextRecorder.stop();
     };
 
+    const timesliceMs = deps.timesliceMs ?? 1000;
+    try {
+      nextRecorder.start(timesliceMs);
+    } catch (error) {
+      nextStream.getTracks().forEach((track) => track.stop());
+      setState({ status: 'idle', error: `Could not start recording: ${messageOf(error)}` });
+      return;
+    }
+
     stream = nextStream;
     mediaRecorder = nextRecorder;
-
-    const timesliceMs = deps.timesliceMs ?? 1000;
-    nextRecorder.start(timesliceMs);
 
     const startedAt = nowFn();
     const capturedLink: RecorderLink = { sessionId: link.sessionId, noteId: link.noteId };
@@ -265,6 +287,14 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
   }
 
   async function stop(): Promise<RecordingRecord | null> {
+    if (state.status === 'starting') {
+      // start() is still awaiting getUserMedia - the only await point before
+      // 'recording' is set. Record the request; start() checks it as soon as
+      // getUserMedia resolves and aborts (tracks stopped, back to idle, no
+      // MediaRecorder ever constructed) instead of silently proceeding.
+      stopRequested = true;
+      return null;
+    }
     if (state.status !== 'recording') return null;
     setState({ status: 'stopping' });
     return new Promise<RecordingRecord | null>((resolve) => {
