@@ -23,6 +23,10 @@ function isDown(point: HuionPenPoint): boolean {
 export function createStrokeSegmenter(opts?: { maxGapMs?: number }): StrokeSegmenter {
   const maxGapMs = opts?.maxGapMs ?? DEFAULT_MAX_GAP_MS;
   let open: PageStroke | null = null;
+  // Last accepted (down) point's `t`. Tracked separately from `open` because
+  // `StrokePoint.t` is optional on the type, so reading it back off the
+  // stroke's own points would require a non-null assertion or a fallback.
+  let lastT = 0;
 
   function closeOpen(): PageStroke {
     const stroke = open as PageStroke;
@@ -43,18 +47,20 @@ export function createStrokeSegmenter(opts?: { maxGapMs?: number }): StrokeSegme
 
       if (!open) {
         open = { points: [stored], startedAt: t, endedAt: t };
+        lastT = t;
         return { closed: null, changed: true };
       }
 
-      const lastPoint = open.points[open.points.length - 1];
-      if (t - lastPoint.t > maxGapMs) {
+      if (t - lastT > maxGapMs) {
         const closed = closeOpen();
         open = { points: [stored], startedAt: t, endedAt: t };
+        lastT = t;
         return { closed, changed: true };
       }
 
       open.points.push(stored);
       open.endedAt = t;
+      lastT = t;
       return { closed: null, changed: true };
     },
 
