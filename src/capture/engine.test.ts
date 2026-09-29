@@ -1,8 +1,34 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createCaptureEngine } from '@/capture/engine';
+import { createCaptureEngine, type LiveCaptureEngine } from '@/capture/engine';
 import type { CaptureState } from '@/capture/types';
-import { createFakeDeviceController } from '@/test/fakeDeviceController';
+import { createNote, getNote, listNotes } from '@/storage/notes';
+import { createPage, getPage, listPages } from '@/storage/pages';
+import { createSession, getSession, listSessions } from '@/storage/sessions';
+import { createFakeDeviceController, type FakeDeviceController } from '@/test/fakeDeviceController';
+import { resetDatabase } from '@/test/resetDb';
+
+/**
+ * How many of the next `createSession` calls fail, so a test can make the first
+ * write of `startNote` fail. A countdown rather than a flag: the write happens
+ * on the engine's op chain, well after the call that armed it, so a test cannot
+ * disarm it by hand without racing the op it is trying to break.
+ */
+const hooks = vi.hoisted(() => ({ failSessionWrites: 0 }));
+
+vi.mock('@/storage/sessions', async () => {
+  const actual = await vi.importActual<typeof import('@/storage/sessions')>('@/storage/sessions');
+  return {
+    ...actual,
+    createSession: (input: Parameters<typeof actual.createSession>[0]) => {
+      if (hooks.failSessionWrites > 0) {
+        hooks.failSessionWrites -= 1;
+        return Promise.reject(new Error('session write failed'));
+      }
+      return actual.createSession(input);
+    },
+  };
+});
 
 const IDLE: CaptureState = {
   activeSessionId: null,
@@ -11,108 +37,423 @@ const IDLE: CaptureState = {
   pageIndex: -1,
 };
 
-function engine() {
-  return createCaptureEngine({ controller: createFakeDeviceController() });
+/** Draws one complete stroke: `pts` down points followed by a pen-up. */
+function stroke(fake: FakeDeviceController, pts: Array<[number, number]>) {
+  for (const [x, y] of pts) fake.emitPen({ x, y, status: 1, pressure: 0.5 });
+  fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
 }
 
-describe('capture engine (Phase 0 placeholder)', () => {
-  it('starts idle', () => {
-    expect(engine().getState()).toEqual(IDLE);
+/** Lets already-scheduled microtasks and timers run. */
+function tick(ms = 10) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+let fake: FakeDeviceController;
+let engine: LiveCaptureEngine;
+
+beforeEach(async () => {
+  hooks.failSessionWrites = 0;
+  await resetDatabase();
+  fake = createFakeDeviceController();
+  engine = createCaptureEngine({ controller: fake });
+});
+
+afterEach(() => {
+  engine.dispose();
+});
+
+describe('capture engine', () => {
+  it('starts idle and does not touch the pen until start() (StrictMode guard)', async () => {
+    expect(engine.getState()).toEqual(IDLE);
+
+    // main.tsx builds the engine in a useState initializer, which StrictMode
+    // invokes twice and throws one result away. The discarded twin must not be
+    // listening to the pen.
+    stroke(fake, [[0.1, 0.1]]);
+    await tick();
+
+    expect(engine.getState()).toEqual(IDLE);
+    expect(await listNotes()).toEqual([]);
+
+    await expect(engine.start()).resolves.toBeUndefined();
+    expect(engine.getState()).toEqual(IDLE);
   });
 
-  it('makes a session, note and first page active on startNote', async () => {
-    const capture = engine();
-    const noteId = await capture.startNote();
+  it('creates a session, note and first page on startNote', async () => {
+    await engine.start();
+    const seen = vi.fn();
+    engine.subscribe(seen);
 
-    const state = capture.getState();
-    expect(state.activeNoteId).toBe(noteId);
-    expect(state.activeSessionId).toBeTruthy();
-    expect(state.activePageId).toBeTruthy();
-    expect(state.pageIndex).toBe(0);
+    const noteId = await engine.startNote({ title: 'Bio' });
+
+    const notes = await listNotes();
+    expect(notes).toHaveLength(1);
+    const note = notes[0];
+    expect(note.id).toBe(noteId);
+    expect(note).toMatchObject({
+      title: 'Bio',
+      status: 'active',
+      deviceType: 'huion',
+      pageWidth: 1409,
+      pageHeight: 1869,
+      legacy: false,
+    });
+    expect(note.sessionId).toBeTruthy();
+
+    const session = await getSession(note.sessionId!);
+    expect(session).toMatchObject({ title: 'Bio', status: 'active', endedAt: null });
+
+    const pages = await listPages(noteId);
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toMatchObject({ pageIndex: 0, source: 'live', finalizedAt: null });
+
+    expect(engine.getState()).toEqual({
+      activeSessionId: session!.id,
+      activeNoteId: noteId,
+      activePageId: pages[0].id,
+      pageIndex: 0,
+    });
+    expect(seen).toHaveBeenCalledWith(engine.getState());
   });
 
-  it('starts a fresh note over an active one', async () => {
-    const capture = engine();
-    const first = await capture.startNote();
-    await capture.newPage('manual');
-    const second = await capture.startNote();
+  it('auto-starts a note on pen input and keeps the strokes written meanwhile', async () => {
+    await engine.start();
 
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+      [0.3, 0.3],
+    ]);
+
+    await vi.waitFor(() => expect(engine.getState().activeNoteId).not.toBeNull());
+    await engine.flush();
+
+    const notes = await listNotes();
+    expect(notes).toHaveLength(1);
+    const pages = await listPages(notes[0].id);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].strokes).toHaveLength(1);
+    expect(pages[0].pointCount).toBe(3);
+
+    const only = pages[0].strokes[0];
+    expect(only.points).toHaveLength(3);
+    expect(only.startedAt).toBeTypeOf('number');
+    expect(only.endedAt).toBeTypeOf('number');
+    for (const point of only.points) expect(point.t).toBeTypeOf('number');
+  });
+
+  it('persists a stroke on pen-up', async () => {
+    await engine.startNote();
+    const pageId = engine.getState().activePageId!;
+
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+      [0.3, 0.3],
+    ]);
+    await engine.flush();
+
+    const page = await getPage(pageId);
+    expect(page!.strokes).toHaveLength(1);
+    expect(page!.pointCount).toBe(3);
+  });
+
+  it('flushes the open stroke periodically', async () => {
+    // Real timers: fake ones would also fake the timers fake-indexeddb runs on.
+    engine.dispose();
+    // A long gap limit too: with the default 500 ms, a slow test machine could
+    // satisfy the assertion through a gap split (which closes the stroke and so
+    // flushes on its own) rather than through the interval under test.
+    engine = createCaptureEngine({ controller: fake, flushIntervalMs: 20, maxGapMs: 60_000 });
+    await engine.start();
+
+    fake.emitPen({ x: 0.1, y: 0.1 });
+    await vi.waitFor(() => expect(engine.getState().activePageId).not.toBeNull());
+    const pageId = engine.getState().activePageId!;
+
+    // No pen-up: only the interval can get this second point onto disk.
+    fake.emitPen({ x: 0.2, y: 0.2 });
+    await vi.waitFor(async () => {
+      expect((await getPage(pageId))!.pointCount).toBe(2);
+    });
+  });
+
+  it('timestamps points with the injected clock', async () => {
+    engine.dispose();
+    engine = createCaptureEngine({ controller: fake, now: () => 5000 });
+    await engine.startNote();
+    const pageId = engine.getState().activePageId!;
+
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await engine.flush();
+
+    const page = await getPage(pageId);
+    expect(page!.strokes[0].points.map((p) => p.t)).toEqual([5000, 5000]);
+    expect(page!.strokes[0]).toMatchObject({ startedAt: 5000, endedAt: 5000 });
+  });
+
+  it('finalizes the old page and opens the next one on newPage', async () => {
+    const noteId = await engine.startNote();
+    const first = engine.getState().activePageId!;
+    const finalized: string[] = [];
+    engine.subscribePageFinalized((id) => finalized.push(id));
+
+    const second = await engine.newPage('manual');
+
+    expect(second).toBeTruthy();
     expect(second).not.toBe(first);
-    expect(capture.getState().activeNoteId).toBe(second);
-    // Back to the first page of the new note, not carried over from the old one.
-    expect(capture.getState().pageIndex).toBe(0);
-  });
 
-  it('advances the page index and the active page on newPage', async () => {
-    const capture = engine();
-    await capture.startNote();
-    const firstPage = capture.getState().activePageId;
-
-    const secondPage = await capture.newPage('device-turn');
-
-    expect(secondPage).toBeTruthy();
-    expect(secondPage).not.toBe(firstPage);
-    expect(capture.getState()).toMatchObject({ activePageId: secondPage, pageIndex: 1 });
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => p.pageIndex)).toEqual([0, 1]);
+    expect(pages[0].finalizedAt).toBeTypeOf('number');
+    expect(pages[1]).toMatchObject({
+      id: second,
+      pageIndex: 1,
+      devicePageNum: null,
+      finalizedAt: null,
+    });
+    expect(finalized).toEqual([first]);
+    expect(engine.getState()).toMatchObject({ activePageId: second, pageIndex: 1 });
   });
 
   it('ignores a page turn with no active note (A7)', async () => {
-    const capture = engine();
-    expect(await capture.newPage('device-turn')).toBeNull();
-    expect(capture.getState()).toEqual(IDLE);
+    await engine.start();
+
+    expect(await engine.newPage('device-turn')).toBeNull();
+
+    expect(await listNotes()).toEqual([]);
+    expect(await listSessions()).toEqual([]);
+    expect(engine.getState()).toEqual(IDLE);
   });
 
-  it('returns to idle on endNote and is a no-op when already idle', async () => {
-    const capture = engine();
-    await capture.startNote();
-    await capture.endNote();
-    expect(capture.getState()).toEqual(IDLE);
+  it('splits a stroke in progress across the page turn', async () => {
+    const noteId = await engine.startNote();
 
-    await expect(capture.endNote()).resolves.toBeUndefined();
-    expect(capture.getState()).toEqual(IDLE);
+    fake.emitPen({ x: 0.1, y: 0.1 });
+    fake.emitPen({ x: 0.2, y: 0.2 });
+    const turning = engine.newPage('device-turn');
+    fake.emitPen({ x: 0.3, y: 0.3 });
+    fake.emitPen({ x: 0.4, y: 0.4 });
+    fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+
+    const second = await turning;
+    await engine.flush();
+
+    const pages = await listPages(noteId);
+    expect(pages).toHaveLength(2);
+    expect(pages[0].strokes).toHaveLength(1);
+    expect(pages[0].strokes[0].points).toHaveLength(2);
+    expect(pages[1].id).toBe(second);
+    expect(pages[1].strokes).toHaveLength(1);
+    expect(pages[1].strokes[0].points).toHaveLength(2);
   });
 
-  it('notifies state subscribers with a fresh object and stops on unsubscribe', async () => {
-    const capture = engine();
-    const seen = vi.fn();
-    const unsubscribe = capture.subscribe(seen);
+  it('stamps the device page number when connected', async () => {
+    fake.setDeviceState({ isConnected: true, deviceName: 'Fake Huion Note', storedPageCount: 4 });
 
-    await capture.startNote();
-    expect(seen).toHaveBeenCalledTimes(1);
-    expect(seen.mock.calls[0][0]).toBe(capture.getState());
+    const noteId = await engine.startNote();
+    expect((await listPages(noteId))[0].devicePageNum).toBe(5);
+    const note = await getNote(noteId);
+    expect(note).toMatchObject({
+      pageBaseline: 4,
+      deviceId: 'Fake Huion Note',
+      deviceName: 'Fake Huion Note',
+    });
 
-    unsubscribe();
-    await capture.newPage('manual');
-    expect(seen).toHaveBeenCalledTimes(1);
+    fake.setDeviceState({ storedPageCount: 5 });
+    await engine.newPage('device-turn');
+    expect((await listPages(noteId))[1].devicePageNum).toBe(6);
+
+    fake.setDeviceState({ isConnected: false });
+    await engine.newPage('device-turn');
+    expect((await listPages(noteId))[2].devicePageNum).toBeNull();
   });
 
-  it('reports the finalized page id when a page is closed', async () => {
-    const capture = engine();
+  it('serializes concurrent page turns and the note end', async () => {
+    const noteId = await engine.startNote();
     const finalized: string[] = [];
-    capture.subscribePageFinalized((pageId) => finalized.push(pageId));
+    engine.subscribePageFinalized((id) => finalized.push(id));
 
-    await capture.startNote();
-    const firstPage = capture.getState().activePageId!;
-    await capture.newPage('manual');
-    const secondPage = capture.getState().activePageId!;
-    await capture.endNote();
+    const [a, b] = await Promise.all([
+      engine.newPage('manual'),
+      engine.newPage('manual'),
+      engine.endNote(),
+    ]);
 
-    expect(finalized).toEqual([firstPage, secondPage]);
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => p.pageIndex)).toEqual([0, 1, 2]);
+    expect([pages[1].id, pages[2].id]).toEqual([a, b]);
+    for (const page of pages) expect(page.finalizedAt).toBeTypeOf('number');
+    expect(finalized).toEqual(pages.map((p) => p.id));
+
+    const note = await getNote(noteId);
+    expect(note!.status).toBe('complete');
+    expect(note!.endedAt).toBeTypeOf('number');
+    const session = await getSession(note!.sessionId!);
+    expect(session).toMatchObject({ status: 'ended' });
+    expect(session!.endedAt).toBeTypeOf('number');
+    expect(engine.getState()).toEqual(IDLE);
   });
 
-  it('has no live strokes yet - the placeholder does not handle the pen', () => {
-    const capture = engine();
-    expect(capture.getLiveStrokes()).toEqual([]);
-    expect(capture.subscribeInk(vi.fn())).toBeTypeOf('function');
+  it('is a no-op on endNote when idle and closes the old note on startNote', async () => {
+    await engine.start();
+
+    await expect(engine.endNote()).resolves.toBeUndefined();
+    expect(await listNotes()).toEqual([]);
+    expect(await listSessions()).toEqual([]);
+
+    const first = await engine.startNote({ title: 'One' });
+    const firstPage = engine.getState().activePageId!;
+    const second = await engine.startNote({ title: 'Two' });
+
+    expect(second).not.toBe(first);
+    const firstNote = await getNote(first);
+    expect(firstNote!.status).toBe('complete');
+    expect((await getPage(firstPage))!.finalizedAt).toBeTypeOf('number');
+    expect((await getSession(firstNote!.sessionId!))!.status).toBe('ended');
+
+    expect((await getNote(second))!.status).toBe('active');
+    expect(engine.getState()).toMatchObject({ activeNoteId: second, pageIndex: 0 });
   });
 
-  it('stops notifying after dispose', async () => {
-    const capture = engine();
-    const seen = vi.fn();
-    capture.subscribe(seen);
+  it('recovers notes left active by a crash', async () => {
+    const session = await createSession({ title: 'Crashed' });
+    const note = await createNote({
+      title: 'Crashed',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'active',
+      sessionId: session.id,
+    });
+    const page = await createPage({
+      noteId: note.id,
+      pageIndex: 0,
+      devicePageNum: null,
+      source: 'live',
+      capturedAt: 900,
+      strokes: [{ points: [{ x: 0.1, y: 0.1, pressure: 0.5, t: 1000 }], startedAt: 900, endedAt: 1000 }],
+      finalizedAt: null,
+    });
 
-    capture.dispose();
-    await capture.startNote();
+    // A note that ended properly must come through recovery untouched.
+    const doneSession = await createSession({ title: 'Done', status: 'ended', endedAt: 2000 });
+    const doneNote = await createNote({
+      title: 'Done',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'complete',
+      endedAt: 2000,
+      sessionId: doneSession.id,
+    });
+    const donePage = await createPage({
+      noteId: doneNote.id,
+      pageIndex: 0,
+      devicePageNum: null,
+      source: 'live',
+      strokes: [],
+      finalizedAt: 1500,
+    });
 
-    expect(seen).not.toHaveBeenCalled();
+    const finalized: string[] = [];
+    engine.subscribePageFinalized((id) => finalized.push(id));
+    await engine.start();
+
+    expect(await getNote(note.id)).toMatchObject({ status: 'interrupted', endedAt: 1000 });
+    expect(await getSession(session.id)).toMatchObject({ status: 'ended', endedAt: 1000 });
+    expect((await getPage(page.id))!.finalizedAt).toBeTypeOf('number');
+    expect(finalized).toEqual([page.id]);
+
+    expect(await getNote(doneNote.id)).toMatchObject({ status: 'complete', endedAt: 2000 });
+    expect(await getSession(doneSession.id)).toMatchObject({ status: 'ended', endedAt: 2000 });
+    expect((await getPage(donePage.id))!.finalizedAt).toBe(1500);
+  });
+
+  it('exposes live ink and notifies per point', async () => {
+    await engine.startNote();
+    const inkChanged = vi.fn();
+    engine.subscribeInk(inkChanged);
+
+    fake.emitPen({ x: 0.1, y: 0.1 });
+    fake.emitPen({ x: 0.2, y: 0.2 });
+
+    expect(inkChanged).toHaveBeenCalledTimes(2);
+    const live = engine.getLiveStrokes();
+    expect(live).toHaveLength(1);
+    expect(live[0].points).toHaveLength(2);
+    // Cached between changes: consumers render off the identity.
+    expect(engine.getLiveStrokes()).toBe(live);
+
+    fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+    expect(inkChanged).toHaveBeenCalledTimes(3);
+    const closed = engine.getLiveStrokes();
+    expect(closed).not.toBe(live);
+    expect(closed).toHaveLength(1);
+    expect(closed[0].points).toHaveLength(2);
+  });
+
+  it('survives a failed auto-start and lets the next call try again', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await engine.start();
+    hooks.failSessionWrites = 1;
+
+    stroke(fake, [[0.1, 0.1]]);
+    await tick();
+
+    // Logged by the op chain, not thrown into the void: an auto-start nobody
+    // awaited must not become an unhandled rejection.
+    expect(logged).toHaveBeenCalled();
+    expect(engine.getState()).toEqual(IDLE);
+    expect(await listNotes()).toEqual([]);
+
+    const noteId = await engine.startNote({ title: 'Retry' });
+    expect(engine.getState().activeNoteId).toBe(noteId);
+    logged.mockRestore();
+  });
+
+  it('does not let a failed startNote disown the note that queued behind it', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await engine.start();
+
+    hooks.failSessionWrites = 1;
+    const doomed = engine.startNote({ title: 'One' });
+    // Queued behind the doomed one, and it claims "a note is open" for itself.
+    const second = engine.startNote({ title: 'Two' });
+
+    await expect(doomed).rejects.toThrow('session write failed');
+    const noteId = await second;
+    expect(engine.getState().activeNoteId).toBe(noteId);
+
+    // The failure must not have cleared `noteOpen`: this stroke belongs to the
+    // note that succeeded, and must not auto-start a third one.
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await engine.flush();
+
+    const notes = await listNotes();
+    expect(notes.map((n) => n.id)).toEqual([noteId]);
+    const pages = await listPages(noteId);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].strokes).toHaveLength(1);
+    expect(pages[0].pointCount).toBe(2);
+    logged.mockRestore();
+  });
+
+  it('stops listening to the pen on dispose', async () => {
+    await engine.start();
+    engine.dispose();
+
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await tick();
+
+    expect(await listNotes()).toEqual([]);
+    expect(engine.getState()).toEqual(IDLE);
   });
 });
