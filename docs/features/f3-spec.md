@@ -192,7 +192,71 @@ Made without asking; each can be revisited.
   does not re-sync if `now` ticks past a month boundary while the panel stays
   open; the `Today` button recovers it. Today's ring still lands on the right
   day because it is computed from the live `now`.
-- F3-14 A failed event write closes the dialog anyway: `useTriageData`
-  swallows mutation rejections and surfaces them through its `error`, which
-  `TriageView` renders as a `role="alert"` banner above the three panels.
-  The dialog itself has no per-save error state beyond validation.
+- F3-14 No form on this tab loses the user's typing when a write fails. The
+  scratchpad's promote, the add-task form and the event dialog all opt into
+  `useTriageData`'s `{ rethrow: true }`, so a failed write keeps the text,
+  keeps the dialog open, and reports the failure in place. `TriageView`'s
+  `role="alert"` banner still shows `data.error` as well, so a failed save is
+  reported on both surfaces — deliberate, since the banner is the only signal
+  for mutations that have no form (Done, Dismiss, the inline edits).
+- F3-15 A failed scratchpad autosave is reported where the "Saved
+  automatically." hint sits, and the text stays in the box and is retried; the
+  copy tells the user to take their own copy, because the retry can fail too.
+- F3-16 The sync's look-ahead window ends at **start of day** of
+  today + `lookaheadDays` (F3-1, as briefed), while the agenda covers today
+  through today + 7 **inclusive**. A deadline at, say, 10:00 on day 7 is
+  therefore visible in the agenda with its Deadline badge but generates no
+  task until the next day's window opens. Kept deliberately rather than
+  widened, because F3-1's bound was briefed and two boundary tests pin it.
+  If it should be aligned, the change is
+  `windowEnd = endOfLocalDay(addLocalDays(windowStart, lookahead))` plus those
+  two tests and this assumption. The same bound makes a stored
+  `lookaheadDays: 0` mean "only a deadline at exactly 00:00 today", which no
+  UI can currently set (F3-8).
+- F3-17 `syncTasksFromCalendar` reads a task's status and later writes it, so
+  a task the user marks done inside that window can be recorded `dismissed`
+  instead. Accepted **only while F3-7 holds**: done and dismissed tasks are
+  both simply hidden, so the user sees no difference and no text is lost. This
+  expires the moment a completed-tasks view, an undo, or any reporting on
+  `completedAt` arrives — at which point `runSync` must re-read the record and
+  skip the dismiss unless it is still `open`.
+
+## Notes for the merger
+
+F3 merges last, after F1, F2 and F4.
+
+1. **Highest risk: `src/components/ui/select.tsx` and `src/components/ui/label.tsx`
+   become F3-only once F1 lands.** Outside `src/triage/**`, `ui/select` is
+   imported only by `src/components/ExportDialog.tsx` and `ui/label` only by
+   `ExportDialog.tsx`, `CanvasSettingsPanel.tsx` and `ToolSettingsPanel.tsx` —
+   all studio files F1 deletes. If F1 also prunes "now-unused" UI primitives or
+   drops `@radix-ui/react-select` / `@radix-ui/react-label` from
+   `package.json`, F3's `EventDialog` and `TaskList` stop compiling. Verify
+   both files and both dependencies survive before calling the merge green.
+2. **`src/app/AppShell.test.tsx` is the one file F3 shares.** F3 changed a
+   single assertion in the `switches tabs` test (the Phase-0 placeholder string
+   it matched is what F3 was asked to remove) to three per-landmark
+   `section[aria-label]` checks. Expect a trivial conflict; keep F3's version.
+   That test now mounts the real `TriageView`, so it drives IndexedDB in a file
+   with no `resetDatabase` in `beforeEach` — safe under Vitest's per-file
+   isolation, but if it starts failing after the merge look at `src/storage`,
+   not at the assertion.
+3. **`src/triage/testing.ts`** is F3's private `createRoot` + `act` harness and
+   **`src/triage/estimate.ts`** its shared estimate parser. F1/F2/F4 very
+   likely wrote near-identical test harnesses; consolidating into `src/test/`
+   is worth doing after the merge, not as part of it.
+4. **F3 assumes nothing about `src/app/**` beyond the mount point.**
+   `TriageView` keeps its export, imports nothing from `src/app`, and F3-8
+   deliberately ships no `triage.lookaheadDays` settings UI so that
+   `SettingsDialog.tsx` stays untouched.
+5. **`src/triage/dates.dst.test.ts` sets `process.env.TZ` process-wide** in
+   `beforeAll` and restores it in `afterAll` (verified portable under
+   `TZ=UTC`). Safe under per-file isolation; it is the test that would flake if
+   in-worker parallelism across files is ever enabled.
+6. **`TaskList`, `EventDialog` and `Scratchpad` depend on their caller opting
+   into `{ rethrow: true }`.** `TriageView` does, and two integration tests pin
+   that wiring, but the prop types cannot enforce it: a second view that mounts
+   one of these components and passes a bare `data.addTask` / `data.saveEvent`
+   would compile and silently go back to losing the user's typing on a failed
+   write. Each prop says so in its doc comment — keep it that way if another
+   caller ever appears.

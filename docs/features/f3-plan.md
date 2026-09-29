@@ -1097,3 +1097,30 @@ Keep the doc comment at the top of `TriageView.tsx` describing what it now does.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run the full suite** — `npx vitest run` (all pass: 241 existing + new), `npx tsc -p tsconfig.app.json --noEmit`, `npx eslint src/triage`, `npm run build`.
 - [ ] **Step 5: Commit** — `feat(triage): scratchpad with promote-to-task and the assembled Triage view`, with a body summarizing F3 (what shipped, test count, assumptions in `docs/features/f3-spec.md`).
+
+---
+
+## Status: complete
+
+All eight tasks implemented, each reviewed, plus a whole-branch review and one
+fix wave. Branch `notes/f3-triage`, 18 commits from `1472d99`:
+
+| Task | Commits |
+|------|---------|
+| 1 dates | `97158e2` |
+| 2 priority | `e00f905` |
+| 3 sync | `a66a295` |
+| 4 UI helpers | `fe63377`, `1c9bd6c` |
+| 5 hooks | `f2c3a4f`, `63c7d62` |
+| 6 task list | `3b02da7` |
+| 7 calendar | `ce8de08` |
+| 8 scratchpad + TriageView | `72fd48d`, `902a9a8` |
+| shared-file exception | `8589214` (one assertion in `src/app/AppShell.test.tsx`) |
+| final fix wave | `ec67659`, `8b37152`, `3150599`, `42b99ce` |
+| docs | `c582ebe`, `0c3c197`, plus this commit |
+
+441 tests in 43 files pass; `tsc` and `npm run build` clean; `eslint src/triage`
+shows only the pre-existing `react-hooks/set-state-in-effect` warning.
+Decisions taken during execution, including the ones that deviate from this
+plan, are recorded as assumptions F3-1 … F3-17 in `docs/features/f3-spec.md`,
+which also carries the notes for the merger.
