@@ -21,6 +21,15 @@ main.tsx
 - No router, no global store. State lives in IndexedDB plus small
   subscribe/getState objects exposed through React context and read with
   `useSyncExternalStore` (the pattern `TabletProvider` already uses).
+- `main.tsx` holds a small `CaptureRoot` inside `TabletProvider`: it reads
+  `useHuionDevice()` and builds the one engine with
+  `createCaptureEngine({ controller })` in a `useState` initializer. The engine
+  is never disposed - StrictMode's double mount would tear down the engine the
+  app keeps using.
+- `AppShell` reads `useHuionDevice()` once and passes `{ controller, state }`
+  into `DeviceStatus` as props, so the header can be tested against
+  `createFakeDeviceController()` with no provider. Connecting runs
+  `controller.connect()` then `controller.startStreaming()`.
 - Pure logic lives in plain `.ts` modules with unit tests; React components are
   thin.
 - Existing layers are reused unchanged: `src/utils/huion*` (driver, protocol,
@@ -197,18 +206,36 @@ Phase 0 ships CRUD for the new stores so no feature edits another's storage
 code. Same style as `notes.ts`/`pages.ts` (async functions over
 `openNotesDb()`, `updateX(id, patch)` as a single-transaction read-modify-write).
 
-- `sessions.ts`: `createSession`, `getSession`, `updateSession`, `listSessions`.
+- `sessions.ts`: `createSession`, `getSession`, `updateSession`, `listSessions`
+  (newest first, like `listNotes`).
 - `recordings.ts`: `createRecording(input, audio: Blob)` (record + bytes in one
-  transaction), `getRecording`, `updateRecording`, `listRecordings`,
-  `listRecordingsBySession`, `getRecordingAudio(id): Promise<Blob | null>`,
+  transaction; `byteLength` and `mimeType` are derived from the Blob),
+  `getRecording`, `updateRecording`, `listRecordings` (newest first),
+  `listRecordingsBySession` (oldest first),
+  `getRecordingAudio(id): Promise<Blob | null>`,
   `setRecordingTranscript(id, transcript)`, `deleteRecording` (record + bytes).
 - `events.ts`: `createEvent`, `getEvent`, `updateEvent`, `deleteEvent`,
-  `listEvents`, `listEventsBetween(fromMs, toMs)`.
-- `tasks.ts`: `createTask`, `getTask`, `updateTask`, `deleteTask`, `listTasks`,
-  `listTasksByStatus(status)`, `getTasksByEvent(eventId)`.
+  `listEvents` (earliest first), `listEventsBetween(fromMs, toMs)` (both bounds
+  inclusive).
+- `tasks.ts`: `createTask`, `getTask`, `updateTask`, `deleteTask`, `listTasks`
+  (unordered - the priority score is computed at render time),
+  `listTasksByStatus(status)`, `getTasksByEvent(eventId)` (every status, so the
+  sync never re-creates a done or dismissed task).
 - `pages.ts` gains `setPageStrokes(id, strokes)` (replaces strokes, recomputes
-  `pointCount`; idempotent) and `finalizePage(id, at)`.
-- `notes.ts` gains `listNotesBySession(sessionId)`.
+  `pointCount`; idempotent), `finalizePage(id, at)` and `isPageFinalized(page)`.
+- `notes.ts` gains `listNotesBySession(sessionId)` (oldest first).
+
+Conventions the Phase 0 code settled, which features rely on:
+
+- `updateEvent` and `updateTask` set `updatedAt` themselves (a caller may still
+  pin it in the patch); `completedAt` stays the triage layer's decision.
+- `finalizePage` leaves an already-finalized page untouched, so startup
+  recovery cannot re-date a page that was closed properly. `isPageFinalized` is
+  the single reading of the absent-means-finalized default.
+- `createPage` takes an optional `finalizedAt` (the legacy migration stamps
+  imported ROM pages as finalized); `createNote` takes an optional `sessionId`.
+- An `eventId`/`sessionId` of `null` is absent from its index, which is what
+  keeps manual tasks and session-less notes out of those lookups.
 
 ### 2.5 Settings keys (`settings` store)
 
@@ -222,7 +249,13 @@ code. Same style as `notes.ts`/`pages.ts` (async functions over
 | `triage.scratchpad` | string | `''` | F3 |
 
 Defaults live in `src/storage/settingKeys.ts` (Phase 0) as one exported
-const object, so there is a single source.
+const object, so there is a single source. It exports the `SettingValues`
+interface (key → type), `SettingKey`, `SETTING_DEFAULTS`,
+`MIN_RENDER_LONG_EDGE` and the typed accessors `getSettingValue(key)` /
+`setSettingValue(key, value)` over the untyped `settings` repository. A stored
+value whose type does not match the default reads as absent, and
+`transcription.renderLongEdge` is raised to its floor on read, whatever wrote
+it.
 
 ## 3. Module contracts
 
@@ -365,5 +398,10 @@ feature replaces its own placeholders' bodies and keeps their export names.
   use fakes: `src/test/fakeHuionTransport.ts`, a fake `DeviceController`
   (Phase 0 adds `src/test/fakeDeviceController.ts`), a mocked `fetch` for
   Ollama, and fake `AudioTranscriber` / MediaRecorder.
+- There is no `@testing-library/react`. Component tests render with
+  `createRoot` from `react-dom/client` inside `act` from `react`, after setting
+  `globalThis.IS_REACT_ACT_ENVIRONMENT = true`, and assert on
+  `container.textContent` / `querySelector`. See
+  `src/app/DeviceStatus.test.tsx`.
 - happy-dom has no real canvas; rasterization is tested at the geometry level
   (scaling, aspect ratio, stroke widths) against a recorded 2D-context mock.
