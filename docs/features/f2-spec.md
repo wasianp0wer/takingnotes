@@ -257,3 +257,21 @@ Tests never download models: the Worker and pipeline are faked at
   and refuses to save until that read has landed — otherwise blurring an
   empty field before the load arrived would persist the default over a
   stored model.
+- F2-A16 The transcription queue arms a stall watchdog per job so a worker
+  the browser killed without firing an `error` event (an out-of-memory kill,
+  which F2-A11 admits happens on long recordings) cannot wedge the strictly
+  serial queue forever. Each job gets an `AbortController` whose signal is
+  passed to the transcriber, plus an inactivity timer, reset on every
+  progress report, that aborts the job when it expires; the recording then
+  lands `failed` with a message saying the transcription stalled, and the
+  loop continues. The window is `stallTimeoutMs`, 15 minutes by default and
+  injectable. transformers.js reports nothing between the start of the
+  transcribe pass and its result, so for that pass the window is a total
+  compute budget rather than a silence budget: a recording that genuinely
+  needs more than 15 minutes of compute — a long one on the WASM fallback —
+  is therefore marked `failed` even though it was still working. The user
+  sees a Retry (F2-A13), so this is degradation rather than data loss, and
+  the proper fix is a heartbeat posted from the worker during the pipeline
+  call, which is deferred. Model downloads are unaffected, because
+  transformers.js reports download progress continuously and each report
+  re-arms the timer.
