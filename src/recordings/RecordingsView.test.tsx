@@ -4,9 +4,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { TranscriptionQueue, TranscriptionQueueState } from '@/audio/transcriptionQueue';
 import { RecordingsView } from '@/recordings/RecordingsView';
-import { createRecording, setRecordingTranscript } from '@/storage/recordings';
+import { createRecording, listRecordings, setRecordingTranscript } from '@/storage/recordings';
 import type { RecordingRecord } from '@/storage/types';
 import { resetDatabase } from '@/test/resetDb';
+
+// Wraps (rather than replaces) `listRecordings` so every test still reads the
+// real store by default; only the reload-ordering test below overrides its
+// next calls to control resolution order.
+vi.mock('@/storage/recordings', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/storage/recordings')>();
+  return {
+    ...actual,
+    listRecordings: vi.fn(actual.listRecordings),
+  };
+});
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
@@ -304,6 +315,58 @@ describe('RecordingsView', () => {
     await flushAll();
 
     expect(container.textContent).toContain('done text');
+    expect(container.textContent).not.toContain('Not transcribed');
+  });
+
+  it('applies the newest reload even if an older one resolves later', async () => {
+    const recording = await seed({ title: 'Race' });
+    const queue = createFakeQueue();
+
+    // Only the next two calls (the mount load, then the reload triggered by
+    // `fireChange` below) are deferred; any later call falls back to the
+    // real `listRecordings` via the module mock's default implementation.
+    const resolvers: ((list: RecordingRecord[]) => void)[] = [];
+    const deferred = () =>
+      new Promise<RecordingRecord[]>((resolve) => {
+        resolvers.push(resolve);
+      });
+    vi.mocked(listRecordings).mockImplementationOnce(deferred).mockImplementationOnce(deferred);
+
+    render(queue);
+    await flushAll();
+    // The mount effect started the first (soon-to-be-stale) load.
+    expect(resolvers).toHaveLength(1);
+
+    act(() => queue.fireChange(recording.id));
+    await flushAll();
+    // `subscribeChanges` started a second, newer load while the first was
+    // still in flight.
+    expect(resolvers).toHaveLength(2);
+
+    const staleSnapshot: RecordingRecord[] = [{ ...recording, transcript: null }];
+    const freshSnapshot: RecordingRecord[] = [
+      {
+        ...recording,
+        transcript: {
+          text: 'fresh text',
+          segments: [],
+          model: 'Xenova/whisper-base.en',
+          language: 'en',
+          status: 'done',
+          error: null,
+          updatedAt: Date.now(),
+        },
+      },
+    ];
+
+    // Resolve the newer (second) call first, then the older (first, stale)
+    // call - the stale snapshot must not win.
+    resolvers[1](freshSnapshot);
+    await flushAll();
+    resolvers[0](staleSnapshot);
+    await flushAll();
+
+    expect(container.textContent).toContain('fresh text');
     expect(container.textContent).not.toContain('Not transcribed');
   });
 

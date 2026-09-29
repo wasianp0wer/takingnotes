@@ -30,8 +30,6 @@ export function RecordingDetail({
   useEffect(() => {
     let cancelled = false;
     let createdUrl: string | null = null;
-    setAudioUrl(null);
-    setAudioMissing(false);
 
     void getRecordingAudio(recording.id).then((blob) => {
       // The recording changed or the view unmounted before this resolved: no

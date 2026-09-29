@@ -23,12 +23,21 @@ export function AudioSettings() {
   const [value, setValue] = useState('');
   const [saved, setSaved] = useState(false);
   const mountedRef = useRef(true);
+  // Whether the initial `getSettingValue` read has landed yet. The DB's
+  // first open runs migrations and is not instant, so a blur can easily
+  // happen before it does.
+  const loadedRef = useRef(false);
+  // Whether the user has started editing. A load that lands after that must
+  // not clobber their in-progress edit.
+  const dirtyRef = useRef(false);
   const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
     void getSettingValue('whisper.model').then((stored) => {
-      if (mountedRef.current) setValue(stored);
+      if (!mountedRef.current) return;
+      loadedRef.current = true;
+      if (!dirtyRef.current) setValue(stored);
     });
     return () => {
       mountedRef.current = false;
@@ -37,6 +46,10 @@ export function AudioSettings() {
   }, []);
 
   function commit() {
+    // Nothing has been read from storage yet: saving now would persist the
+    // input's current (possibly still-default/empty) value over whatever
+    // model is actually stored, once the pending load lands.
+    if (!loadedRef.current) return;
     const trimmed = value.trim();
     const next = trimmed || SETTING_DEFAULTS['whisper.model'];
     setValue(next);
@@ -59,7 +72,10 @@ export function AudioSettings() {
           id="whisper-model"
           list="whisper-models"
           value={value}
-          onChange={(event) => setValue(event.target.value)}
+          onChange={(event) => {
+            dirtyRef.current = true;
+            setValue(event.target.value);
+          }}
           onBlur={commit}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {

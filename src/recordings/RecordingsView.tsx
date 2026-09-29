@@ -37,7 +37,15 @@ export function RecordingsView(props?: { queue?: TranscriptionQueue }) {
   const [queue] = useState<TranscriptionQueue>(() => props?.queue ?? getAudioRuntime().queue);
   const [recordings, setRecordings] = useState<RecordingRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const mountedRef = useRef(true);
+  // Bumped at the start of every `load()` call; a resolution is only applied
+  // if it is still the most recently *started* one. `subscribeChanges` fires
+  // once per persisted status write (pending -> running -> done in quick
+  // succession), so two reads can be in flight as separate IndexedDB
+  // transactions - without this, an older snapshot resolving after a newer
+  // one would silently win and strand the UI on stale status text. Bumping
+  // it again on unmount (in the effect's cleanup) also makes this subsume a
+  // plain "still mounted" guard, so there is no separate mounted ref.
+  const seqRef = useRef(0);
 
   // Subscribes the view to the queue's live state (active/queued ids,
   // progress) so it re-renders in step with `RecordingDetail`, not only when
@@ -45,8 +53,9 @@ export function RecordingsView(props?: { queue?: TranscriptionQueue }) {
   useSyncExternalStore(queue.subscribe, queue.getState);
 
   const load = useCallback(async () => {
+    const seq = ++seqRef.current;
     const list = await listRecordings();
-    if (!mountedRef.current) return;
+    if (seq !== seqRef.current) return;
     setRecordings(list);
     setSelectedId((current) =>
       current && list.some((r) => r.id === current) ? current : (list[0]?.id ?? null),
@@ -54,13 +63,14 @@ export function RecordingsView(props?: { queue?: TranscriptionQueue }) {
   }, []);
 
   useEffect(() => {
-    mountedRef.current = true;
     void load();
     const unsubscribe = queue.subscribeChanges(() => {
       void load();
     });
     return () => {
-      mountedRef.current = false;
+      // Invalidates any load still in flight from this mount so it cannot
+      // apply a stale snapshot after unmount.
+      seqRef.current += 1;
       unsubscribe();
     };
   }, [queue, load]);
@@ -113,7 +123,12 @@ export function RecordingsView(props?: { queue?: TranscriptionQueue }) {
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-4">
         {selected && (
-          <RecordingDetail recording={selected} queue={queue} onDelete={handleDelete} />
+          <RecordingDetail
+            key={selected.id}
+            recording={selected}
+            queue={queue}
+            onDelete={handleDelete}
+          />
         )}
       </div>
     </div>
