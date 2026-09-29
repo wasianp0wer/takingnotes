@@ -130,9 +130,13 @@ stroke. `pageId` is null until the page record exists (the auto-start window).
   - **Timeout**: an `AbortController` aborts after `timeoutMs`; the caller's
     `signal` also aborts. A timeout rejects with `Transcription timed out after Ns`.
   - **Degenerate output** (`isDegenerateOutput(text, doneReason)`): rejected
-    with `DegenerateOutputError` when (a) ≥ 8 non-empty lines with unique-line
+    with `DegenerateOutputError` when (a) ≥ 20 non-empty lines with unique-line
     ratio < 0.3, or (b) `done_reason === 'length'` and ≥ 4 lines with unique
-    ratio < 0.5, or (c) ≥ 60 whitespace tokens with unique-token ratio < 0.1.
+    ratio < 0.5, or (c) ≥ 200 whitespace tokens with unique-token ratio < 0.1.
+    A real degenerate run always hits the `num_predict` cap, so (b) is the
+    primary guard; (a) and (c) are loose on purpose so that a legitimately
+    repetitive page (a checklist of identical `- [ ]` lines, a table with
+    repeating rows) is not thrown away.
   - Output cleanup: trims, and strips a single wrapping ```` ```markdown ```` fence.
   - HTTP errors reject with Ollama's `error` text when present.
   - `listOllamaModels(baseUrl, fetch?)`: `GET /api/tags` → sorted `name`s.

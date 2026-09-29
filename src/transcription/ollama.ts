@@ -45,6 +45,10 @@ const abortError = (): Error => {
   return err;
 };
 
+/** A network failure (fetch rejects with TypeError) names the host that is down. */
+const unreachableError = (base: string, message: string): Error =>
+  new Error(`Could not reach Ollama at ${base}: ${message}`);
+
 async function blobToBase64(blob: Blob): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   let binary = '';
@@ -64,6 +68,11 @@ function cleanOutput(text: string): string {
 /**
  * Repetition guard (spec §3, harness finding F2): a high character count is a
  * failure signal for handwriting transcription, not a success signal.
+ *
+ * A real degenerate run always hits the `num_predict` cap, so rule (b) is the
+ * primary guard. Rules (a) and (c) are deliberately loose so that legitimately
+ * repetitive pages - a checklist of identical `- [ ]` lines, a table with
+ * repeating rows - are not thrown away.
  */
 export function isDegenerateOutput(text: string, doneReason?: string): boolean {
   const lines = text
@@ -72,11 +81,11 @@ export function isDegenerateOutput(text: string, doneReason?: string): boolean {
     .filter((line) => line.length > 0);
   if (lines.length > 0) {
     const uniqueLines = new Set(lines).size / lines.length;
-    if (lines.length >= 8 && uniqueLines < 0.3) return true;
+    if (lines.length >= 20 && uniqueLines < 0.3) return true;
     if (doneReason === 'length' && lines.length >= 4 && uniqueLines < 0.5) return true;
   }
   const tokens = text.split(/\s+/).filter((token) => token.length > 0);
-  if (tokens.length >= 60 && new Set(tokens).size / tokens.length < 0.1) return true;
+  if (tokens.length >= 200 && new Set(tokens).size / tokens.length < 0.1) return true;
   return false;
 }
 
@@ -127,9 +136,7 @@ export function createOllamaTranscriber(opts: OllamaTranscriberOptions): PageTra
       } catch (err) {
         if (signal?.aborted) throw abortError();
         if (timedOut) throw new Error(`Transcription timed out after ${timeoutMs / 1000}s`);
-        if (err instanceof TypeError) {
-          throw new Error(`Could not reach Ollama at ${base}: ${err.message}`);
-        }
+        if (err instanceof TypeError) throw unreachableError(base, err.message);
         throw err;
       }
       if (!res.ok) {
@@ -177,7 +184,14 @@ export async function listOllamaModels(
   baseUrl: string,
   fetchImpl: FetchLike = defaultFetch,
 ): Promise<string[]> {
-  const res = await fetchImpl(`${trimBase(baseUrl)}/api/tags`);
+  const base = trimBase(baseUrl);
+  let res: Response;
+  try {
+    res = await fetchImpl(`${base}/api/tags`);
+  } catch (err) {
+    if (err instanceof TypeError) throw unreachableError(base, err.message);
+    throw err;
+  }
   if (!res.ok) throw new Error(`Ollama ${res.status}`);
   const data = (await res.json()) as { models?: Array<{ name?: string }> };
   return (data.models ?? [])

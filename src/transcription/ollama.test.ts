@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createOllamaTranscriber,
@@ -57,6 +58,18 @@ describe('createOllamaTranscriber', () => {
     expect(body.think).toBe(false);
     expect(body.options).toEqual({ num_predict: 2000, temperature: 0 });
     expect((body.images as string[])[0]).toBe(btoa('png-bytes'));
+  });
+
+  it('base64-encodes a blob larger than one chunk without corrupting bytes', async () => {
+    const bytes = new Uint8Array(70_000);
+    for (let i = 0; i < bytes.length; i += 1) bytes[i] = i % 256;
+    const fetch = vi.fn<FetchLike>(async () => generateOk());
+    const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch });
+
+    await t.transcribePage(new Blob([bytes], { type: 'image/png' }), { model: MODEL });
+
+    const images = bodyOf(fetch.mock.calls[0]).images as string[];
+    expect(images[0]).toBe(Buffer.from(bytes).toString('base64'));
   });
 
   it('honours a numPredict override', async () => {
@@ -208,8 +221,22 @@ describe('isDegenerateOutput', () => {
   });
 
   it('flags a low unique-token ratio on a single line', () => {
-    const tokens = Array.from({ length: 100 }, () => '[illegible]').join(' ');
+    const tokens = Array.from({ length: 250 }, () => '[illegible]').join(' ');
     expect(isDegenerateOutput(tokens, 'stop')).toBe(true);
+  });
+
+  it('accepts a checklist of identical lines that stopped normally', () => {
+    const checklist = Array.from({ length: 8 }, () => '- [ ] ').join('\n');
+    expect(isDegenerateOutput(checklist, 'stop')).toBe(false);
+  });
+
+  it('accepts a hand-drawn table whose rows repeat', () => {
+    const table = [
+      '| day | done |',
+      '| --- | --- |',
+      ...Array.from({ length: 10 }, () => '| Mon | yes |'),
+    ].join('\n');
+    expect(isDegenerateOutput(table, 'stop')).toBe(false);
   });
 
   it('accepts a normal page', () => {
@@ -237,5 +264,14 @@ describe('listOllamaModels', () => {
   it('rejects on an HTTP error', async () => {
     const fetch = vi.fn<FetchLike>(async () => new Response('nope', { status: 500 }));
     await expect(listOllamaModels('http://h:1', fetch)).rejects.toThrow('Ollama 500');
+  });
+
+  it('names the base URL when Ollama is unreachable', async () => {
+    const fetch = vi.fn<FetchLike>(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    await expect(listOllamaModels('http://h:1/', fetch)).rejects.toThrow(
+      'Could not reach Ollama at http://h:1: Failed to fetch',
+    );
   });
 });
