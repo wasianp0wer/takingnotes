@@ -76,10 +76,6 @@ function copyStroke(stroke: PageStroke): PageStroke {
   return { ...stroke, points: [...stroke.points] };
 }
 
-function isDown(point: HuionPenPoint): boolean {
-  return point.status > 0 && point.pressure > 0;
-}
-
 /**
  * The live capture engine: it turns the controller's pen stream into Session,
  * Note and Page records (docs/features/f1-spec.md §2.2).
@@ -127,6 +123,14 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
    * before any await, so those calls queue behind the creation instead.
    */
   let noteOpen = false;
+  /**
+   * Bumped by every `startNote` call. A failed creation rolls `noteOpen` back
+   * only while it is still the newest opener: without this, a `startNote` that
+   * fails *after* a second one has queued behind it would clear the flag the
+   * second one set, and the next pen-down would auto-start a third note on top
+   * of the one that succeeded.
+   */
+  let openerSeq = 0;
 
   let buffer: Buffer = freshBuffer();
   /** Cache behind `getLiveStrokes`, invalidated whenever the ink changes. */
@@ -311,7 +315,6 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
 
   function handlePen(point: HuionPenPoint) {
     if (disposed) return;
-    const down = isDown(point);
     const result = segmenter.push(point, now());
 
     if (result.closed) {
@@ -320,9 +323,13 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
       void flushBuffer(buffer);
     }
 
-    // Writing is never dropped: the points already sit in `buffer`, and the
-    // note this starts adopts that same buffer as its page 0.
-    if (down && !noteOpen) void startNote();
+    // An open stroke after the push means a down point just arrived. Asking the
+    // segmenter rather than re-deciding what "down" means keeps one definition
+    // of it (segmenter.ts), so the two can never drift apart.
+    //
+    // Writing is never dropped: the points already sit in `buffer`, and the note
+    // this starts adopts that same buffer as its page 0.
+    if (segmenter.current() !== null && !noteOpen) void startNote();
 
     if (result.changed) emitInk();
   }
@@ -345,6 +352,7 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     void start();
     if (noteOpen) void closeNote();
     noteOpen = true;
+    const opener = ++openerSeq;
     const b = buffer;
 
     return enqueue(async () => {
@@ -391,8 +399,10 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
         return note.id;
       } catch (error) {
         // No note is open after all, so the next pen point tries again rather
-        // than accumulating into a buffer that will never have a page.
-        noteOpen = false;
+        // than accumulating into a buffer that will never have a page - unless a
+        // later `startNote` has already claimed the flag, whose own op has not
+        // run yet (or has already succeeded).
+        if (openerSeq === opener) noteOpen = false;
         throw error;
       }
     });
@@ -463,9 +473,14 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
       void start();
       await flushBuffer(buffer);
       // Everything already queued - a pen-up flush, an in-flight startNote -
-      // may still be in the air. The tail never rejects (see `enqueue`), so
-      // awaiting it makes `flush()` a real "it is all on disk" point.
-      await chain;
+      // may still be in the air, and an op can enqueue another (a page creation
+      // schedules a flush of its own). Drain to a fixed point, so `flush()` is a
+      // real "it is all on disk" moment. The tail never rejects (see `enqueue`).
+      let tail: Promise<unknown>;
+      do {
+        tail = chain;
+        await tail;
+      } while (tail !== chain);
     },
 
     getLiveStrokes() {

@@ -8,17 +8,25 @@ import { createSession, getSession, listSessions } from '@/storage/sessions';
 import { createFakeDeviceController, type FakeDeviceController } from '@/test/fakeDeviceController';
 import { resetDatabase } from '@/test/resetDb';
 
-/** Flipped by one test to make the first write of `startNote` fail. */
-const hooks = vi.hoisted(() => ({ failSession: false }));
+/**
+ * How many of the next `createSession` calls fail, so a test can make the first
+ * write of `startNote` fail. A countdown rather than a flag: the write happens
+ * on the engine's op chain, well after the call that armed it, so a test cannot
+ * disarm it by hand without racing the op it is trying to break.
+ */
+const hooks = vi.hoisted(() => ({ failSessionWrites: 0 }));
 
 vi.mock('@/storage/sessions', async () => {
   const actual = await vi.importActual<typeof import('@/storage/sessions')>('@/storage/sessions');
   return {
     ...actual,
-    createSession: (input: Parameters<typeof actual.createSession>[0]) =>
-      hooks.failSession
-        ? Promise.reject(new Error('session write failed'))
-        : actual.createSession(input),
+    createSession: (input: Parameters<typeof actual.createSession>[0]) => {
+      if (hooks.failSessionWrites > 0) {
+        hooks.failSessionWrites -= 1;
+        return Promise.reject(new Error('session write failed'));
+      }
+      return actual.createSession(input);
+    },
   };
 });
 
@@ -44,7 +52,7 @@ let fake: FakeDeviceController;
 let engine: LiveCaptureEngine;
 
 beforeEach(async () => {
-  hooks.failSession = false;
+  hooks.failSessionWrites = 0;
   await resetDatabase();
   fake = createFakeDeviceController();
   engine = createCaptureEngine({ controller: fake });
@@ -153,7 +161,10 @@ describe('capture engine', () => {
   it('flushes the open stroke periodically', async () => {
     // Real timers: fake ones would also fake the timers fake-indexeddb runs on.
     engine.dispose();
-    engine = createCaptureEngine({ controller: fake, flushIntervalMs: 20 });
+    // A long gap limit too: with the default 500 ms, a slow test machine could
+    // satisfy the assertion through a gap split (which closes the stroke and so
+    // flushes on its own) rather than through the interval under test.
+    engine = createCaptureEngine({ controller: fake, flushIntervalMs: 20, maxGapMs: 60_000 });
     await engine.start();
 
     fake.emitPen({ x: 0.1, y: 0.1 });
@@ -386,7 +397,7 @@ describe('capture engine', () => {
   it('survives a failed auto-start and lets the next call try again', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     await engine.start();
-    hooks.failSession = true;
+    hooks.failSessionWrites = 1;
 
     stroke(fake, [[0.1, 0.1]]);
     await tick();
@@ -397,9 +408,38 @@ describe('capture engine', () => {
     expect(engine.getState()).toEqual(IDLE);
     expect(await listNotes()).toEqual([]);
 
-    hooks.failSession = false;
     const noteId = await engine.startNote({ title: 'Retry' });
     expect(engine.getState().activeNoteId).toBe(noteId);
+    logged.mockRestore();
+  });
+
+  it('does not let a failed startNote disown the note that queued behind it', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await engine.start();
+
+    hooks.failSessionWrites = 1;
+    const doomed = engine.startNote({ title: 'One' });
+    // Queued behind the doomed one, and it claims "a note is open" for itself.
+    const second = engine.startNote({ title: 'Two' });
+
+    await expect(doomed).rejects.toThrow('session write failed');
+    const noteId = await second;
+    expect(engine.getState().activeNoteId).toBe(noteId);
+
+    // The failure must not have cleared `noteOpen`: this stroke belongs to the
+    // note that succeeded, and must not auto-start a third one.
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await engine.flush();
+
+    const notes = await listNotes();
+    expect(notes.map((n) => n.id)).toEqual([noteId]);
+    const pages = await listPages(noteId);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].strokes).toHaveLength(1);
+    expect(pages[0].pointCount).toBe(2);
     logged.mockRestore();
   });
 
