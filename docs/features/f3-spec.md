@@ -183,3 +183,16 @@ Made without asking; each can be revisited.
   day, matching all-day events.
 - F3-11 Event time without an end: `endsAt` stays null; F3 does not edit event
   duration.
+- F3-12 One line outside F3's owned paths had to change:
+  `src/app/AppShell.test.tsx`'s "switches tabs" test asserted the retired
+  placeholder string "Triage arrives with F3". It now asserts that the three
+  `section[aria-label]` landmarks of the real view render. No non-test file
+  outside `src/triage/**` was touched.
+- F3-13 `CalendarPanel` seeds its visible month from `now` once at mount and
+  does not re-sync if `now` ticks past a month boundary while the panel stays
+  open; the `Today` button recovers it. Today's ring still lands on the right
+  day because it is computed from the live `now`.
+- F3-14 A failed event write closes the dialog anyway: `useTriageData`
+  swallows mutation rejections and surfaces them through its `error`, which
+  `TriageView` renders as a `role="alert"` banner above the three panels.
+  The dialog itself has no per-save error state beyond validation.
