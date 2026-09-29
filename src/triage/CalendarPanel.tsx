@@ -108,7 +108,14 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
             const dateStr = toDateInputValue(day);
             const outside = new Date(day).getMonth() !== visible.month;
             const isToday = isSameLocalDay(day, now);
-            const dayEvents = events.filter((e) => isSameLocalDay(e.startsAt, day)).slice(0, MAX_DOTS);
+            const dayEvents = events
+              .filter((e) => isSameLocalDay(e.startsAt, day))
+              // Deadlines first (a stable sort, so the rest keep their
+              // `startsAt` order) so the cap below can never drop the one dot
+              // that matters most: past the agenda's 8 days the red dot is the
+              // only signal a deadline is there at all.
+              .sort((a, b) => Number(b.kind === 'deadline') - Number(a.kind === 'deadline'))
+              .slice(0, MAX_DOTS);
 
             return (
               <button

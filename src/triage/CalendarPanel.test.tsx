@@ -59,6 +59,28 @@ describe('CalendarPanel', () => {
     m.unmount();
   });
 
+  it('caps the dots on a busy day without ever dropping the deadline dot', () => {
+    // As `listEvents` returns them: ascending by startsAt, deadline last.
+    const busyDay = [
+      event({ id: 'b1', title: 'Class', startsAt: at(2026, 8, 30, 8) }),
+      event({ id: 'b2', title: 'Lab', startsAt: at(2026, 8, 30, 9) }),
+      event({ id: 'b3', title: 'Coffee', startsAt: at(2026, 8, 30, 10) }),
+      event({ id: 'b4', title: 'Thesis chapter due', kind: 'deadline', startsAt: at(2026, 8, 30, 18) }),
+    ];
+    const m = mount(
+      <CalendarPanel events={busyDay} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />,
+    );
+
+    const cell = m.container.querySelector('[data-day="2026-09-30"]')!;
+    // Four events, and the cell still shows at most MAX_DOTS (3) dots...
+    expect(cell.querySelectorAll('[data-dot]')).toHaveLength(3);
+    // ...but the one that must never be the one dropped is the deadline's:
+    // past the agenda's 8 days it is the only signal the user gets.
+    expect(cell.querySelectorAll('[data-dot="deadline"]')).toHaveLength(1);
+
+    m.unmount();
+  });
+
   it('agenda shows Tomorrow, the day-7 event, and excludes the day-8 event; all-day sorts before timed', () => {
     const m = mount(<CalendarPanel events={EVENTS} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
 
