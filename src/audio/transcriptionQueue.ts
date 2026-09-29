@@ -67,6 +67,14 @@ function sameState(a: TranscriptionQueueState, b: TranscriptionQueueState): bool
 export function createTranscriptionQueue(deps: TranscriptionQueueDeps): TranscriptionQueue {
   const now = deps.now ?? Date.now;
   const queued: string[] = [];
+  /**
+   * Ids accepted by `enqueue` whose `pending` write has not landed yet. They are
+   * deliberately not in `queued`: the drain loop must not be able to start a job
+   * whose `pending` write is still in flight, or that write would land after the
+   * job's own `running` and strand the recording. They still count as work for
+   * `whenIdle` and they still deduplicate a second `enqueue` of the same id.
+   */
+  const reserved = new Set<string>();
   const listeners = new Set<() => void>();
   const changeListeners = new Set<(recordingId: string) => void>();
   const idleWaiters: (() => void)[] = [];
@@ -96,8 +104,12 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     for (const fn of [...listeners]) safely(fn);
   }
 
+  function isIdle(): boolean {
+    return !draining && activeId === null && queued.length === 0 && reserved.size === 0;
+  }
+
   function notifyIdle(): void {
-    if (draining || activeId !== null || queued.length > 0) return;
+    if (!isIdle()) return;
     const waiters = idleWaiters.splice(0);
     for (const fn of waiters) fn();
   }
@@ -223,10 +235,21 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
   }
 
   async function enqueue(id: string): Promise<void> {
-    if (activeId === id || queued.includes(id)) return;
+    if (activeId === id || reserved.has(id) || queued.includes(id)) return;
+    reserved.add(id);
+    try {
+      await write(id, blank(await deps.getModel(), 'pending'));
+    } catch (error) {
+      // `getModel` is a settings read and can reject. Give the reservation back so
+      // the id is not stranded: a later retry must still be able to queue it, and
+      // an idle waiter must not hang on work that will never run.
+      reserved.delete(id);
+      notifyIdle();
+      throw error;
+    }
+    reserved.delete(id);
     queued.push(id);
     emit();
-    await write(id, blank(await deps.getModel(), 'pending'));
     pump();
   }
 
@@ -259,7 +282,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       };
     },
     whenIdle() {
-      if (!draining && activeId === null && queued.length === 0) return Promise.resolve();
+      if (isIdle()) return Promise.resolve();
       return new Promise<void>((resolve) => {
         idleWaiters.push(resolve);
       });

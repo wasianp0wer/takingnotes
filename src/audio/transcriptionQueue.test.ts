@@ -340,6 +340,110 @@ describe('transcription queue', () => {
     logged.mockRestore();
   });
 
+  it('does not strand a recording when the pending write cannot read the model', async () => {
+    const id = await makeRecording(1);
+    let calls = 0;
+    const { queue, transcribe } = makeQueue({
+      getModel: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('settings read failed');
+        return MODEL;
+      },
+    });
+
+    await expect(queue.enqueue(id)).rejects.toThrow('settings read failed');
+
+    expect(queue.getState().queuedIds).toEqual([]);
+    expect((await getRecording(id))!.transcript).toBeNull();
+    expect(transcribe).not.toHaveBeenCalled();
+    await expect(queue.whenIdle()).resolves.toBeUndefined();
+
+    // The failed enqueue left nothing behind, so the id can still be queued.
+    await queue.retry(id);
+    await queue.whenIdle();
+
+    expect(await statusOf(id)).toBe('done');
+  });
+
+  it('releases idle waiters when an enqueue fails before it is queued', async () => {
+    const id = await makeRecording(1);
+    const gate = deferred();
+    const { queue } = makeQueue({
+      getModel: async () => {
+        await gate.promise;
+        throw new Error('settings read failed');
+      },
+    });
+
+    const failing = queue.enqueue(id);
+    let settled = false;
+    const idle = queue.whenIdle().then(() => {
+      settled = true;
+    });
+
+    // The enqueue is accepted but not yet persisted: that is not idle.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    gate.resolve();
+    await expect(failing).rejects.toThrow('settings read failed');
+    await idle;
+
+    expect(settled).toBe(true);
+  });
+
+  it('never lets a slow pending write overwrite the status of a job already under way', async () => {
+    const first = await makeRecording(1);
+    const second = await makeRecording(2);
+    const firstStarted = deferred();
+    const releaseFirst = deferred();
+    const slowModel = deferred();
+    let modelCalls = 0;
+    let transcribeCalls = 0;
+    const { queue } = makeQueue({
+      getModel: async () => {
+        modelCalls += 1;
+        // Call 3 is the pending write for `second`, enqueued while `first` is active.
+        if (modelCalls === 3) await slowModel.promise;
+        return MODEL;
+      },
+      transcribe: async (pcm, opts) => {
+        transcribeCalls += 1;
+        if (transcribeCalls === 1) {
+          firstStarted.resolve();
+          await releaseFirst.promise;
+        }
+        return defaultTranscribe(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(first);
+    await firstStarted.promise;
+
+    // Enqueued, but its pending write is parked on `getModel`.
+    const enqueueSecond = queue.enqueue(second);
+
+    // Wait for the loop to go quiet after `first`; with the pending write published
+    // to the loop too early, `second` would run here and be overwritten below.
+    const drained = deferred();
+    const stop = queue.subscribe(() => {
+      const current = queue.getState();
+      if (current.activeId === null && current.queuedIds.length === 0) drained.resolve();
+    });
+    releaseFirst.resolve();
+    await drained.promise;
+    stop();
+
+    slowModel.resolve();
+    await enqueueSecond;
+    await queue.whenIdle();
+
+    expect(await statusOf(first)).toBe('done');
+    expect(await statusOf(second)).toBe('done');
+    expect(transcribeCalls).toBe(2);
+  });
+
   it('runs one transcription at a time and keeps the rest queued', async () => {
     const first = await makeRecording(1);
     const second = await makeRecording(2);
