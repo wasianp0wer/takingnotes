@@ -21,7 +21,7 @@
 - Every transcript stores `model` and `promptVersion`. Status flow pending → running → done/failed.
 - `NotesView` must keep rendering `<PageTurnControls />` in its page toolbar; keep export names `NotesView`, `TranscriptionSettings`.
 - Tests: Vitest beside sources (`*.test.ts(x)`); component tests use `createRoot` + `act` with `globalThis.IS_REACT_ACT_ENVIRONMENT = true` (pattern: `src/app/DeviceStatus.test.tsx`); no `@testing-library`. Storage tests call `resetDatabase()` from `src/test/resetDb.ts` in `beforeEach`.
-- TDD: failing test first, then code. Commit per task; every commit message ends with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+- TDD: failing test first, then code. Commit per task; every commit message ends with a `Co-Authored-By:` trailer for the model that wrote it. Tasks 1-8 were written as `Claude Fable 5.1`; the attribution changed partway through, so Task 10 and the final docs commit use `Claude Opus 5 <noreply@anthropic.com>`. Earlier commits are left as they are.
 - Path alias `@/` → `src/`. Code style: 2-space indent, single quotes, semicolons (match `src/capture/*`).
 - Commands: `npx vitest run <paths>`, `npm run build`, `npx eslint <paths>`.
 
@@ -43,13 +43,13 @@
 
 **Interfaces:** Produces nothing new. Must keep `src/utils/huion*`, `src/utils/wacomBLE.ts`, `src/utils/tabletUSB.ts`, `src/utils/packetHeuristics.ts`, `src/utils/pacedTransport.ts`, `src/types/memory.ts`, `src/types/*.d.ts`, `src/lib/utils.ts`, `src/components/ui/**`.
 
-- [ ] **Step 1: Map importers.** For every candidate file run e.g. `grep -rn "components/CanvasEngine\|/App'" src --include='*.ts' --include='*.tsx'` and confirm every importer is itself being deleted. Also check `index.html`, `probe.html`, `vite.config.ts`, `scripts/` for references to `src/App.tsx`. Record the list in the report.
-- [ ] **Step 2: Delete the files** (`git rm`). For `src/types/index.ts`: remove only exports no remaining file imports (grep each exported name across `src/`); delete the file if nothing remains.
-- [ ] **Step 3: Dependencies.** For each of `@dnd-kit/core @dnd-kit/sortable @dnd-kit/utilities react-colorful @ffmpeg/ffmpeg @ffmpeg/util`, and then every other `dependencies` entry, grep `src/` (and config files) for an importer. `npm uninstall` those with none. Keep anything used by `components/ui/**`, `lib/`, `index.css`/tailwind config.
-- [ ] **Step 4: package.json description** → `"Local-first handwritten note-taking for the Huion X10: live ink capture, on-device transcription, audio notes and triage."`
-- [ ] **Step 5: vite.config.ts** — remove the `vendor-dnd` chunk; remove from `vendor-ui` any package that is no longer installed (e.g. `react-colorful`). Leave everything else unchanged.
-- [ ] **Step 6: Verify.** `npx tsc -b --noEmit` (or `npm run build`) succeeds; `npx vitest run` all pass (baseline 241 tests, 26 files); `npx eslint vite.config.ts src/types` clean.
-- [ ] **Step 7: Commit** `chore: remove the drawing studio and its dependencies` (+ Co-Authored-By line).
+- [x] **Step 1: Map importers.** For every candidate file run e.g. `grep -rn "components/CanvasEngine\|/App'" src --include='*.ts' --include='*.tsx'` and confirm every importer is itself being deleted. Also check `index.html`, `probe.html`, `vite.config.ts`, `scripts/` for references to `src/App.tsx`. Record the list in the report.
+- [x] **Step 2: Delete the files** (`git rm`). For `src/types/index.ts`: remove only exports no remaining file imports (grep each exported name across `src/`); delete the file if nothing remains.
+- [x] **Step 3: Dependencies.** For each of `@dnd-kit/core @dnd-kit/sortable @dnd-kit/utilities react-colorful @ffmpeg/ffmpeg @ffmpeg/util`, and then every other `dependencies` entry, grep `src/` (and config files) for an importer. `npm uninstall` those with none. Keep anything used by `components/ui/**`, `lib/`, `index.css`/tailwind config.
+- [x] **Step 4: package.json description** → `"Local-first handwritten note-taking for the Huion X10: live ink capture, on-device transcription, audio notes and triage."`
+- [x] **Step 5: vite.config.ts** — remove the `vendor-dnd` chunk; remove from `vendor-ui` any package that is no longer installed (e.g. `react-colorful`). Leave everything else unchanged.
+- [x] **Step 6: Verify.** `npx tsc -b --noEmit` (or `npm run build`) succeeds; `npx vitest run` all pass (baseline 241 tests, 26 files); `npx eslint vite.config.ts src/types` clean.
+- [x] **Step 7: Commit** `chore: remove the drawing studio and its dependencies` (+ Co-Authored-By line).
 
 ### Task 2: Stroke segmenter
 
@@ -72,7 +72,7 @@ export function createStrokeSegmenter(opts?: { maxGapMs?: number }): StrokeSegme
 
 Rules (spec §2.1): down = `status > 0 && pressure > 0`. Down + no open stroke → open `{ points: [p], startedAt: t, endedAt: t }` (`changed: true`). Down + open → if `t - lastPoint.t > maxGapMs` close the open one (returned as `closed`) and open a new stroke with this point; else append and set `endedAt = t`. Up + open → close, return it as `closed`, `changed: true`. Up + idle → `{ closed: null, changed: false }`. Stored point is `{ x, y, pressure, t }` (drop `status`/`timestamp`).
 
-- [ ] **Step 1: Write failing tests** covering: (a) three down points then up → one closed stroke with 3 points, each with `t`, `startedAt` = first t, `endedAt` = last t; (b) hover points only → never `changed`, `current()` null; (c) `status 1, pressure 0` is treated as up; (d) gap: down at t=0, t=10, then t=700 → second push returns `closed` with 2 points and `current()` has 1 point; custom `maxGapMs: 50` respected; (e) `end()` mid-stroke returns the stroke and `current()` becomes null; `end()` when idle returns null; (f) up after `end()` is ignored.
+- [x] **Step 1: Write failing tests** covering: (a) three down points then up → one closed stroke with 3 points, each with `t`, `startedAt` = first t, `endedAt` = last t; (b) hover points only → never `changed`, `current()` null; (c) `status 1, pressure 0` is treated as up; (d) gap: down at t=0, t=10, then t=700 → second push returns `closed` with 2 points and `current()` has 1 point; custom `maxGapMs: 50` respected; (e) `end()` mid-stroke returns the stroke and `current()` becomes null; `end()` when idle returns null; (f) up after `end()` is ignored.
 
 ```ts
 import { describe, expect, it } from 'vitest';
@@ -102,10 +102,10 @@ it('builds one stroke from down points closed by pen-up', () => {
   expect(seg.current()).toBeNull();
 });
 ```
-- [ ] **Step 2: Run** `npx vitest run src/capture/segmenter.test.ts` → FAIL (module missing).
-- [ ] **Step 3: Implement** `src/capture/segmenter.ts` per the rules above (~50 lines, no dependencies beyond types).
-- [ ] **Step 4: Run** the test file → PASS; `npx eslint src/capture/segmenter.ts src/capture/segmenter.test.ts` clean.
-- [ ] **Step 5: Commit** `feat(capture): segment the pen stream into timestamped strokes`.
+- [x] **Step 2: Run** `npx vitest run src/capture/segmenter.test.ts` → FAIL (module missing).
+- [x] **Step 3: Implement** `src/capture/segmenter.ts` per the rules above (~50 lines, no dependencies beyond types).
+- [x] **Step 4: Run** the test file → PASS; `npx eslint src/capture/segmenter.ts src/capture/segmenter.test.ts` clean.
+- [x] **Step 5: Commit** `feat(capture): segment the pen stream into timestamped strokes`.
 
 ### Task 3: Capture engine
 
@@ -153,7 +153,7 @@ Design (binding detail in spec §2.2):
 - **getLiveStrokes()**: returns a cached array `[...buffer.strokes, openStroke?]`, rebuilt only when ink changed (so repeated calls between changes return the same reference).
 - **dispose()**: `disposed = true`, unsubscribe pen, `clearInterval`, stop emitting (`if (!disposed)` guards).
 
-- [ ] **Step 1: Write failing tests** in `src/capture/engine.test.ts` (replace the placeholder suite; keep `resetDatabase()` in `beforeEach`, `engine.dispose()` in `afterEach`). Helper:
+- [x] **Step 1: Write failing tests** in `src/capture/engine.test.ts` (replace the placeholder suite; keep `resetDatabase()` in `beforeEach`, `engine.dispose()` in `afterEach`). Helper:
 
 ```ts
 function stroke(fake: FakeDeviceController, pts: Array<[number, number]>) {
@@ -180,10 +180,10 @@ Tests (each a separate `it`; every test calls `await engine.start()` before emit
 14. live ink: during a stroke `getLiveStrokes()` includes the open stroke; `subscribeInk` listener called per point; same reference returned when nothing changed.
 15. `dispose()` stops listening: pen input after dispose creates no note.
 
-- [ ] **Step 2: Run** `npx vitest run src/capture/engine.test.ts` → FAIL (placeholder engine persists nothing).
-- [ ] **Step 3: Implement** `src/capture/engine.ts` per the design. Keep the file-level doc comment explaining the buffer model and the op chain.
-- [ ] **Step 4: Run** `npx vitest run src/capture` and `npx vitest run src/app` → PASS (CaptureContext/AppShell tests still pass). `npx eslint src/capture/engine.ts src/capture/engine.test.ts` clean.
-- [ ] **Step 5: Commit** `feat(capture): live capture engine with incremental persistence and recovery`.
+- [x] **Step 2: Run** `npx vitest run src/capture/engine.test.ts` → FAIL (placeholder engine persists nothing).
+- [x] **Step 3: Implement** `src/capture/engine.ts` per the design. Keep the file-level doc comment explaining the buffer model and the op chain.
+- [x] **Step 4: Run** `npx vitest run src/capture` and `npx vitest run src/app` → PASS (CaptureContext/AppShell tests still pass). `npx eslint src/capture/engine.ts src/capture/engine.test.ts` clean.
+- [x] **Step 5: Commit** `feat(capture): live capture engine with incremental persistence and recovery`.
 
 ### Task 4: Prompt registry and Ollama transcriber
 
@@ -220,7 +220,7 @@ Details:
 - `isDegenerateOutput` thresholds (spec §3): lines = non-empty trimmed lines; tokens = whitespace split. (a) `lines.length >= 8 && unique/lines < 0.3`; (b) `doneReason === 'length' && lines.length >= 4 && unique/lines < 0.5`; (c) `tokens.length >= 60 && uniqueTokens/tokens < 0.1`.
 - `listOllamaModels`: GET `{base}/api/tags`; non-ok → throw `Ollama ${status}`; returns `models.map(m => m.name).sort()` (empty array when `models` missing).
 
-- [ ] **Step 1: Write failing tests.** `prompts.test.ts`: `modelFamily('gemma4:12b') === 'gemma'`, `'gemma3:4b'` → gemma, `'library/gemma4:latest'` → gemma, `'qwen2.5vl:7b'` → `qwen-vl`, `'llava:13b'` → llava, `'mistral:7b'` → generic; `getPromptFor('gemma4:12b').promptVersion === 'gemma-v1'`; unknown → `generic-v1`; every family's prompt contains `[illegible]` and `Markdown`.
+- [x] **Step 1: Write failing tests.** `prompts.test.ts`: `modelFamily('gemma4:12b') === 'gemma'`, `'gemma3:4b'` → gemma, `'library/gemma4:latest'` → gemma, `'qwen2.5vl:7b'` → `qwen-vl`, `'llava:13b'` → llava, `'mistral:7b'` → generic; `getPromptFor('gemma4:12b').promptVersion === 'gemma-v1'`; unknown → `generic-v1`; every family's prompt contains `[illegible]` and `Markdown`.
   `ollama.test.ts` with `const fetch = vi.fn<FetchLike>()` returning `new Response(JSON.stringify({ response: '# Title\n- a', done_reason: 'stop' }), { status: 200 })`:
   1. request shape: URL `http://h:1/api/generate` for `baseUrl: 'http://h:1/'`; body has `stream:false`, `think:false`, `options.num_predict === 2000`, `images[0] === btoa('png-bytes')` for `new Blob(['png-bytes'], { type: 'image/png' })`, `model`, and `prompt === getPromptFor(model).prompt`.
   2. returns `{ markdown: '# Title\n- a', model, promptVersion: 'gemma-v1' }`.
@@ -231,10 +231,10 @@ Details:
   7. external signal abort → rejects (name `AbortError`).
   8. degenerate: 30 lines of `[illegible]` → rejects `DegenerateOutputError`; `isDegenerateOutput('a\nb\na\nb\na', 'length')` true; normal 5 distinct lines with `'length'` → false; 100 tokens of `[illegible]` on one line → true.
   9. `listOllamaModels` returns sorted names from `{ models: [{ name: 'b' }, { name: 'a' }] }`; rejects on 500.
-- [ ] **Step 2: Run** `npx vitest run src/transcription` → FAIL.
-- [ ] **Step 3: Implement** the four source files.
-- [ ] **Step 4: Run** → PASS; `npx eslint src/transcription` clean.
-- [ ] **Step 5: Commit** `feat(transcription): Ollama page transcriber with prompt registry and output guards`.
+- [x] **Step 2: Run** `npx vitest run src/transcription` → FAIL.
+- [x] **Step 3: Implement** the four source files.
+- [x] **Step 4: Run** → PASS; `npx eslint src/transcription` clean.
+- [x] **Step 5: Commit** `feat(transcription): Ollama page transcriber with prompt registry and output guards`.
 
 ### Task 5: Page rasterizer
 
@@ -266,15 +266,15 @@ export function renderPage(strokes: readonly PageStroke[], dims: PageDims, longE
 - `drawStrokes`: `fillStyle '#ffffff'`, `fillRect(0,0,w,h)`; `strokeStyle`/`fillStyle '#000000'`, `lineCap/lineJoin 'round'`; long edge = `max(w,h)`; for each stroke: 1 point → `beginPath(); arc(x*w, y*h, strokeWidth(p)/2, 0, 2π); fill()`; else for each consecutive pair: `beginPath(); lineWidth = strokeWidth(avg pressure); moveTo; lineTo; stroke()`.
 - `renderPage`: size = `rasterGeometry`; canvas from factory; `drawStrokes`; `blob = await canvas.toBlob()` (PNG); default factory: `OffscreenCanvas` → `convertToBlob({ type: 'image/png' })`, else `document.createElement('canvas')` + `toBlob(cb, 'image/png')` (reject when null).
 
-- [ ] **Step 1: Write failing tests** with a recording mock ctx (a plain object whose methods push `[name, ...args]` into `calls` and whose property setters record `['set', prop, value]`):
+- [x] **Step 1: Write failing tests** with a recording mock ctx (a plain object whose methods push `[name, ...args]` into `calls` and whose property setters record `['set', prop, value]`):
   1. `rasterGeometry({ pageWidth: 1409, pageHeight: 1869 }, 1024)` → `{ width: 772, height: 1024 }`; landscape `{2000, 1000}` → `{1024, 512}`; null dims → same as A5; long edge 768 honoured.
   2. `strokeWidth(0, 1024) ≈ 1.2288`, `strokeWidth(1, 1024) ≈ 4.096`, monotonic in pressure, doubles with long edge, clamps pressure > 1.
   3. `drawStrokes` first fills white over the whole size; a 3-point stroke at `(0.5,0.5)…` produces 2 `stroke()` calls with `moveTo(386, 512)` for size 772×1024; a single-point stroke produces `arc` + `fill`; empty stroke list only fills background; legacy points without `t` work.
   4. `renderPage` with a fake factory returns `{ blob, width: 772, height: 1024 }` and the blob is what the factory's `toBlob` returned.
-- [ ] **Step 2: Run** `npx vitest run src/transcription/rasterize.test.ts` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** → PASS; eslint clean.
-- [ ] **Step 5: Commit** `feat(transcription): rasterize pages as black ink on white`.
+- [x] **Step 2: Run** `npx vitest run src/transcription/rasterize.test.ts` → FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** → PASS; eslint clean.
+- [x] **Step 5: Commit** `feat(transcription): rasterize pages as black ink on white`.
 
 ### Task 6: Transcription queue and startup wiring
 
@@ -316,7 +316,7 @@ Behaviour (spec §3 queue):
 - `stop()`: unsubscribe; the worker finishes its current job and stops taking new ones.
 - `ensureTranscriptionQueue(engine)`: if a singleton exists return it; else build with `getSettings` reading `ollama.baseUrl`, `ollama.model`, `transcription.renderLongEdge` via `getSettingValue`, `createTranscriber: baseUrl => createOllamaTranscriber({ baseUrl })`, `render: (s, d, e) => renderPage(s, d, e)`; call `void queue.start().catch(log)`; store and return.
 
-- [ ] **Step 1: Write failing tests** (`resetDatabase()` in `beforeEach`; fake engine = `{ subscribePageFinalized }` backed by `createEmitter<string>()`; fake transcriber `vi.fn()` resolving `{ markdown: 'text', model: 'm', promptVersion: 'generic-v1' }`; fake render resolving `{ blob: new Blob(['x'], { type: 'image/png' }), width: 772, height: 1024 }`; settings `{ baseUrl: 'http://o', model: 'gemma4:12b', renderLongEdge: 1024 }`; seed notes/pages via `createNote`/`createPage`):
+- [x] **Step 1: Write failing tests** (`resetDatabase()` in `beforeEach`; fake engine = `{ subscribePageFinalized }` backed by `createEmitter<string>()`; fake transcriber `vi.fn()` resolving `{ markdown: 'text', model: 'm', promptVersion: 'generic-v1' }`; fake render resolving `{ blob: new Blob(['x'], { type: 'image/png' }), width: 772, height: 1024 }`; settings `{ baseUrl: 'http://o', model: 'gemma4:12b', renderLongEdge: 1024 }`; seed notes/pages via `createNote`/`createPage`):
   1. a finalized page emitted by the engine ends `done` with markdown `text`, `model 'm'`, `render` meta `{ type: 'image/png', width: 772, height: 1024 }` stored, and `getPageRender` returns a blob; transcriber got the rendered blob and `{ model: 'gemma4:12b' }`; `render` got `longEdge 1024` and the note's dims.
   2. status sequence observed via `subscribe` + `getPage` reads includes `pending`, `running`, `done` in that order.
   3. transcriber rejecting `new Error('boom')` → page `failed`, `error 'boom'`; a second page enqueued after it still reaches `done`.
@@ -326,10 +326,10 @@ Behaviour (spec §3 queue):
   7. `retry` on a `failed` page re-runs and reaches `done`.
   8. enqueuing the same id twice while pending runs the transcriber once.
   9. `ensureTranscriptionQueue` returns the same instance on repeated calls (use `resetTranscriptionQueueForTests()` in `afterEach`), and `getTranscriptionQueue()` returns it.
-- [ ] **Step 2: Run** `npx vitest run src/transcription/queue.test.ts src/transcription/startTranscription.test.ts` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** → PASS; `npx vitest run` full suite PASS; eslint clean.
-- [ ] **Step 5: Commit** `feat(transcription): serial, resumable page transcription queue`.
+- [x] **Step 2: Run** `npx vitest run src/transcription/queue.test.ts src/transcription/startTranscription.test.ts` → FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** → PASS; `npx vitest run` full suite PASS; eslint clean.
+- [x] **Step 5: Commit** `feat(transcription): serial, resumable page transcription queue`.
 
 ### Task 7: Transcription settings
 
@@ -343,17 +343,17 @@ Behaviour (spec §3 queue):
 
 Behaviour: on mount load the three settings; then fetch models from the loaded base URL. Render: heading "Handwriting transcription"; "Ollama address" `<input>` (saved on blur, then models refetched); "Model" native `<select>` listing installed models, plus the saved model as an option if not installed (labelled `(not installed)`), saved on change; a "Refresh" button; while loading "Loading models…"; on failure a line "Could not reach Ollama at <url>: <message>" (A13 hint: "Is Ollama running, and does OLLAMA_ORIGINS allow this page?"); "Render size (long edge, px)" number input `min=768 step=64`, saved on blur as `Math.max(MIN_RENDER_LONG_EDGE, Math.round(value))` (NaN → default 1024) and the input shows the clamped value.
 
-- [ ] **Step 1: Write failing tests** (`createRoot` + `act`; `resetDatabase()`; `fetchImpl` = `vi.fn` resolving `/api/tags` → `{ models: [{ name: 'llava:7b' }, { name: 'gemma4:12b' }] }`); use `await act(async () => { ... })` and `vi.waitFor` for async loads:
+- [x] **Step 1: Write failing tests** (`createRoot` + `act`; `resetDatabase()`; `fetchImpl` = `vi.fn` resolving `/api/tags` → `{ models: [{ name: 'llava:7b' }, { name: 'gemma4:12b' }] }`); use `await act(async () => { ... })` and `vi.waitFor` for async loads:
   1. lists installed models as `<option>`s and selects the saved default `gemma4:12b`.
   2. unreachable (`fetchImpl` rejects `TypeError('Failed to fetch')`) → text contains `Could not reach Ollama`.
   3. changing the select to `llava:7b` → `getSettingValue('ollama.model')` resolves `llava:7b`.
   4. entering `500` into the render input and blurring → stored `768`, input value `768`.
   5. changing the address and blurring stores it and refetches from `<new>/api/tags`.
   (To change a controlled input in happy-dom: set `input.value` via the native setter `Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, '500')`, then dispatch `new Event('input', { bubbles: true })`, then `input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))` for blur; for select use `HTMLSelectElement.prototype` and `'change'`.)
-- [ ] **Step 2: Run** → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `npx vitest run src/notes src/app` → PASS; eslint clean.
-- [ ] **Step 5: Commit** `feat(notes): transcription settings with installed-model picker`.
+- [x] **Step 2: Run** → FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `npx vitest run src/notes src/app` → PASS; eslint clean.
+- [x] **Step 5: Commit** `feat(notes): transcription settings with installed-model picker`.
 
 ### Task 8: Notes view
 
@@ -373,19 +373,51 @@ Behaviour (spec §4):
 - Ink: if the viewed page is the active page (`page.id === state.activePageId`), `InkCanvas live` reads `engine.getLiveStrokes()` and redraws on `engine.subscribeInk` throttled by `requestAnimationFrame` (cancel on unmount); else draws `page.strokes`. Canvas intrinsic size = `rasterGeometry(dims, 1024)`; CSS `w-full h-auto max-h-[75vh] object-contain border bg-white`. Guard `getContext('2d')` returning null (happy-dom) — do nothing then.
 - Transcript panel: active unfinalized page → "Transcribed when the page is finished." Otherwise by `page.transcript?.status`: `pending` → "Waiting to transcribe…"; `running` → "Transcribing…"; `done` → markdown in a `whitespace-pre-wrap` block (empty → "Blank page"), with a muted `model · promptVersion` line; `failed` → "Transcription failed: {error}" and a **Retry** button (`queue.retry(page.id)`); no transcript on a finalized page → **Transcribe** button (`queue.retry`).
 
-- [ ] **Step 1: Write failing tests** (`createRoot` + `act`; `resetDatabase()`; render inside `<CaptureProvider engine={createCaptureEngine({ controller: createFakeDeviceController() })}>`; fake queue `{ start, enqueue, retry: vi.fn(async () => {}), subscribe: () => () => {}, idle, stop }`; seed storage with `createNote`/`createPage`/`setPageTranscript`):
+- [x] **Step 1: Write failing tests** (`createRoot` + `act`; `resetDatabase()`; render inside `<CaptureProvider engine={createCaptureEngine({ controller: createFakeDeviceController() })}>`; fake queue `{ start, enqueue, retry: vi.fn(async () => {}), subscribe: () => () => {}, idle, stop }`; seed storage with `createNote`/`createPage`/`setPageTranscript`):
   1. renders the "New page" button from `PageTurnControls`.
   2. lists a live note and a legacy note (`legacy: true`) with the `Legacy` label.
   3. clicking **New note** makes `engine.getState().activeNoteId` non-null and the list shows the new note.
   4. selecting a note whose page 0 has a `done` transcript shows the markdown text and `Page 1 of 2`; clicking `Next page` shows page 2's `failed` error text and a Retry button; clicking Retry calls `queue.retry(page2.id)`.
   5. a legacy note with null page dims and points without `t` renders without throwing.
-- [ ] **Step 2: Run** → FAIL.
-- [ ] **Step 3: Implement** the four source files.
-- [ ] **Step 4: Run** `npx vitest run` (full) → PASS; `npm run build` → success; `npx eslint src/notes` clean.
-- [ ] **Step 5: Commit** `feat(notes): notes view with live ink, page navigation and transcripts`.
+- [x] **Step 2: Run** → FAIL.
+- [x] **Step 3: Implement** the four source files.
+- [x] **Step 4: Run** `npx vitest run` (full) → PASS; `npm run build` → success; `npx eslint src/notes` clean.
+- [x] **Step 5: Commit** `feat(notes): notes view with live ink, page navigation and transcripts`.
+
+### Task 10: Transcript-retry fix (added after review of Task 6)
+
+A review of the queue found `writeTranscript` blanking `markdown` for every
+status but `done`, so `retry()` on an already-transcribed page destroyed the
+transcript the moment the page went `pending` — and the commonest reason to
+press Retry is that Ollama is not running, so the re-run failed and the text
+was gone for good.
+
+**Files:** Modify `src/transcription/queue.ts`, `src/transcription/queue.test.ts`.
+
+- [x] **Step 1:** Failing tests — a retry whose re-run fails keeps the stored
+  markdown (and keeps it while `pending` and while `running`); a successful
+  re-run replaces it; `enqueue`/`retry` resolve `true`/`false` for whether the
+  call queued the page (duplicate, in-flight, stopped); and a regression test for
+  the pending-mark race below.
+- [x] **Step 2:** Non-`done` writes carry the stored markdown forward; only a
+  `done` write replaces it (`''` for a genuinely blank page). Spec F1-A11.
+- [x] **Step 3:** `enqueue` becomes non-`async` returning `Promise<boolean>` so
+  the dedupe check and the push stay synchronous; `retry` resolves the same way.
+  Spec F1-A12.
+- [x] **Step 4:** Each queue entry carries the promise of its own `pending`
+  write and the worker awaits it before running the job — a page queued while
+  the worker was busy could otherwise finish before its `pending` mark landed,
+  leaving a transcribed page looking queued forever.
+- [x] **Step 5:** Commit `fix(transcription): stop a retry destroying the transcript it replaces`.
 
 ### Task 9: Final verification and summary commit
 
-- [ ] `npm run build`, `npx vitest run`, `npx eslint` on every touched path; record counts.
-- [ ] Append any new assumptions to `docs/features/f1-spec.md` → Assumptions.
-- [ ] Commit `docs(f1): feature spec, plan and summary` with a body summarising the feature, how the queue starts, and removed deps.
+- [x] `npm run build`, `npx vitest run`, `npx eslint` on every touched path; record counts.
+- [x] Append any new assumptions to `docs/features/f1-spec.md` → Assumptions.
+- [x] Commit `docs(f1): feature spec, plan and summary` with a body summarising the feature, how the queue starts, and removed deps.
+
+**Outcome:** `npm run build` succeeds; `npx vitest run` → 341 tests in 34 files,
+all passing (baseline before F1 was 241 in 26 files); `npx eslint src` → 0
+errors, and the only 4 warnings are pre-existing `no-explicit-any` in
+`src/utils/huionTransport.ts`, which F1 did not touch. No file outside F1's
+ownership (`docs/architecture.md` §4) was modified.

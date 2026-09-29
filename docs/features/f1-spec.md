@@ -159,12 +159,17 @@ stroke. `pageId` is null until the page record exists (the auto-start window).
     pages with no transcript (a crash between finalize and enqueue). Legacy/ROM
     pages without transcript are not auto-queued (retry is the manual path).
   - `enqueue(pageId)`: writes `pending` immediately (so a reload resumes it),
-    dedupes, processes serially.
+    dedupes, processes serially, and resolves `true`/`false` for whether this
+    call is what queued the page (F1-A12). The `pending` mark carries the prior
+    markdown forward (F1-A11), and the job waits for that write before it runs,
+    so a slow mark can never land on top of the `running`/`done` write of the
+    job it belongs to.
   - Job: page with zero points → `done`, empty markdown, no model call. Else
     render → `setPageRender` → `running` → `transcribePage` → `done` (model,
     promptVersion from the result) or `failed` (error message). One failure never
     stops the queue.
-  - `retry(pageId)` re-enqueues a `failed` (or any) page. `subscribe(fn)`
+  - `retry(pageId)` re-enqueues a `failed` (or any) page, keeping its last good
+    markdown until the re-run succeeds (F1-A11). `subscribe(fn)`
     notifies `pageId` on every status change (the UI refreshes from it).
     `stop()` unsubscribes.
 - `startTranscription.ts`: `ensureTranscriptionQueue(engine)` — a
@@ -188,7 +193,9 @@ stroke. `pageId` is null until the page record exists (the auto-start window).
   created.
 - `InkCanvas`: a canvas sized to the page aspect using `drawStrokes`.
 - Transcript panel: status (Waiting / Transcribing / Done / Failed + error),
-  the markdown as pre-wrapped text, and **Retry** (failed pages, and
+  the markdown as pre-wrapped text — for a non-`done` status the retained text is
+  shown under a muted `Previous transcript` label rather than as the current
+  transcript (F1-A11) — and **Retry** (failed pages, and
   "Transcribe" for finalized pages without transcript, e.g. legacy). The active,
   unfinalized page shows "Transcribed when the page is finished".
 - `TranscriptionSettings`: Ollama URL input, model `<select>` of installed
@@ -285,3 +292,15 @@ UI (component tests, `createRoot` + `act`):
   notes. In the app, `useSyncExternalStore`'s `subscribe` attaches the kept
   engine on first render.
 - F1-A9 The render is PNG; the per-page timeout is 180 s; `num_predict` 2000.
+- F1-A11 ⚑ A transcript record keeps the markdown of its last successful run
+  while its status is `pending`, `running` or `failed`; only a `done` write
+  replaces the text. Blanking it at enqueue time (the first implementation) meant
+  `retry` on an already-transcribed page destroyed the transcript immediately, and
+  the commonest reason to press Retry — Ollama is not running — then lost it for
+  good. The notes view therefore renders the *status* for those three statuses and
+  shows any retained text below it under a muted `Previous transcript` label, so
+  the kept copy is visible without ever passing as current.
+- F1-A12 `enqueue`/`retry` resolve `true` when the call queued the page and
+  `false` when it was already queued, already running, or the queue is stopped.
+  Without it a Retry press on a page whose job is in flight would look like it
+  did nothing; the panel says `Already queued.` instead.
