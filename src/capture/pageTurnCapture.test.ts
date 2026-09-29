@@ -70,11 +70,28 @@ describe('attachPageTurnCapture - capture lifecycle', () => {
     expect(controller.isCapturing).toBe(true);
   });
 
-  it('stops capture once when the reconnect gives up', () => {
+  it('does not stop on the first emission of a two-step drop', async () => {
+    // The real controller publishes an unexpected drop as two synchronous
+    // emissions: onStatus('Disconnected') first, with isReconnecting still
+    // false, and only then handleDrop()'s isReconnecting: true. Stopping on
+    // the first one flips the controller's `capturing` off, so handleDrop()
+    // returns early and auto-reconnect never starts.
+    const { controller, onError } = setup(LIVE);
+    controller.setDeviceState({ isConnected: false, isStreaming: false });
+    controller.setDeviceState({ isReconnecting: true });
+    await flush();
+
+    expect(lifecycle(controller)).toEqual(['startCapture']);
+    expect(controller.isCapturing).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('stops capture once when the reconnect gives up', async () => {
     const { controller } = setup(LIVE);
     controller.setDeviceState({ isConnected: false, isStreaming: false, isReconnecting: true });
     controller.setDeviceState({ isReconnecting: false });
     controller.setDeviceState({ status: 'Disconnected' });
+    await flush();
     expect(lifecycle(controller)).toEqual(['startCapture', 'stopCapture']);
   });
 
@@ -82,6 +99,7 @@ describe('attachPageTurnCapture - capture lifecycle', () => {
     const { controller } = setup(LIVE);
     controller.setDeviceState({ isConnected: false, isStreaming: false, isReconnecting: true });
     controller.setDeviceState({ isReconnecting: false });
+    await flush();
     await controller.connect();
     await controller.startStreaming();
     expect(lifecycle(controller)).toEqual(['startCapture', 'stopCapture', 'startCapture']);
@@ -91,6 +109,7 @@ describe('attachPageTurnCapture - capture lifecycle', () => {
   it('stops on a manual disconnect and starts again on the next connect', async () => {
     const { controller } = setup(LIVE);
     await controller.disconnect();
+    await flush();
     expect(lifecycle(controller)).toEqual(['startCapture', 'stopCapture']);
     await controller.connect();
     await controller.startStreaming();
@@ -114,6 +133,17 @@ describe('attachPageTurnCapture - capture lifecycle', () => {
     detach();
     detach();
     expect(lifecycle(controller)).toEqual([]);
+  });
+
+  it('reports a stopCapture that throws instead of propagating it', () => {
+    const { controller, onError, detach } = setup(LIVE);
+    const failure = new Error('detector already gone');
+    controller.stopCapture = () => {
+      throw failure;
+    };
+
+    expect(() => detach()).not.toThrow();
+    expect(onError).toHaveBeenCalledWith('stopCapture failed', failure);
   });
 
   it('attach, detach, attach (StrictMode) leaves one capture and one subscription', () => {
@@ -251,7 +281,7 @@ describe('attachPageTurnCapture - startCapture failures', () => {
     expect(onError).toHaveBeenCalledTimes(1);
   });
 
-  it('stops right away when the pad disconnects while startCapture is pending', async () => {
+  it('stops when the pad disconnects while startCapture is still pending', async () => {
     const controller = createFakeDeviceController(LIVE);
     const onError = vi.fn();
     let finishStart: () => void = () => {};
@@ -263,6 +293,7 @@ describe('attachPageTurnCapture - startCapture failures', () => {
 
     attachPageTurnCapture({ controller, engine: createStubCaptureEngine(), onError });
     controller.setDeviceState({ isConnected: false, isStreaming: false });
+    await flush();
     expect(lifecycle(controller)).toEqual(['stopCapture']);
 
     finishStart();

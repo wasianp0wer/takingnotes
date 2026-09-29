@@ -26,6 +26,14 @@ function logError(message: string, error: unknown) {
  *   count; stopping would end the reconnect and re-anchor that baseline.
  * - Stop only on a full disconnect (not connected, not reconnecting): an app
  *   disconnect() or the reconnect policy giving up.
+ * - The stop decision waits one microtask for the state to settle. An
+ *   unexpected drop reaches us as two synchronous emissions: the controller's
+ *   onStatus('Disconnected') publishes { isConnected: false, isStreaming:
+ *   false } with isReconnecting still false, and only then does handleDrop()
+ *   publish isReconnecting: true. Stopping on that first emission would flip
+ *   the controller's own `capturing` flag off, so handleDrop() - which is
+ *   gated on it - would return early and auto-reconnect would never start.
+ *   Starting stays synchronous; there is no equivalent half-state on the way up.
  */
 export function attachPageTurnCapture(deps: PageTurnCaptureDeps): () => void {
   const { controller, engine } = deps;
@@ -42,6 +50,9 @@ export function attachPageTurnCapture(deps: PageTurnCaptureDeps): () => void {
   // publishes must not trigger an immediate retry (an endless loop when
   // startCapture throws synchronously).
   let recovering = false;
+  // At most one deferred stop decision in flight, so a burst of stop-looking
+  // emissions settles into a single check.
+  let stopScheduled = false;
 
   function stop() {
     try {
@@ -73,13 +84,28 @@ export function attachPageTurnCapture(deps: PageTurnCaptureDeps): () => void {
     }
   }
 
+  // `owned` stays true until the deferred check runs, so an emission in
+  // between neither starts a second capture nor schedules a second stop; if the
+  // link is back by then, the stop simply does not happen.
+  function scheduleStop() {
+    if (stopScheduled) return;
+    stopScheduled = true;
+    queueMicrotask(() => {
+      stopScheduled = false;
+      if (!attached || !owned) return;
+      const state = controller.getState();
+      if (state.isConnected || state.isReconnecting) return;
+      owned = false;
+      stop();
+    });
+  }
+
   function evaluate(state: DeviceState) {
     if (!attached || recovering) return;
     if (!owned && state.isConnected && state.isStreaming) {
       start();
     } else if (owned && !state.isConnected && !state.isReconnecting) {
-      owned = false;
-      stop();
+      scheduleStop();
     }
   }
 
