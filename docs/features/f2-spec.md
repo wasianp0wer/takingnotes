@@ -226,3 +226,34 @@ Tests never download models: the Worker and pipeline are faked at
   decode is over 1 GB of float samples before resampling). Chunked decoding is
   deferred; very long recordings may fail to transcribe on low-memory machines
   and show as `failed` with the browser's error.
+- F2-A12 The production build strips onnxruntime-web's WASM binary.
+  `@huggingface/transformers` points onnxruntime-web at the jsdelivr CDN at
+  runtime (it sets `wasmPaths` whenever they are unset), but onnxruntime-web's
+  bundle still contains a `new URL(...)` fallback that makes Vite emit the
+  file anyway — 26.8 MB, which also exceeds Cloudflare Pages' 25 MiB per-file
+  limit. A small `generateBundle` plugin in `vite.config.ts` (`stripOrtWasm`)
+  drops `ort-wasm*.wasm` from the output; one top-level plugin registration
+  covers the worker chunk too. The consequence is that the WASM backend
+  depends on that CDN being reachable; self-hosting the runtime would mean
+  removing the plugin.
+- F2-A13 The recordings view offers a transcribe action for a recording the
+  queue has forgotten. A crash or reload can leave a transcript at `pending`
+  or `running` while the queue holds no memory of it. When such a recording is
+  neither the queue's `activeId` nor in `queuedIds`, the detail pane shows a
+  `Retry` button alongside the status text the spec already specifies, so the
+  user is never stuck looking at a row that will never progress.
+- F2-A14 `stop()` cancels a start that is still waiting for the microphone. A
+  stop requested while the recorder is `starting` is recorded and acted on as
+  soon as `getUserMedia` resolves: every acquired track is stopped, no
+  `MediaRecorder` is constructed, and the recorder returns to `idle` with no
+  error and nothing saved. The microphone is never left live after an
+  explicit stop.
+- F2-A15 Both of the view's asynchronous loads are sequenced against newer
+  work. The recordings list reload is guarded by a sequence number bumped
+  when the read starts, so an older `listRecordings()` snapshot resolving
+  after a newer one is discarded rather than stranding rows on stale status
+  (the queue writes several statuses in quick succession). The Whisper model
+  setting likewise ignores its initial read once the user has begun editing,
+  and refuses to save until that read has landed — otherwise blurring an
+  empty field before the load arrived would persist the default over a
+  stored model.
