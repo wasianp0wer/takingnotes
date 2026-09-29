@@ -9,10 +9,19 @@ export interface StrokePoint {
   x: number;
   y: number;
   pressure: number;
+  /**
+   * Epoch ms (`Date.now()` clock) when the point was received. Live capture
+   * only; ROM and legacy points omit it. This clock is shared with audio
+   * segment times, which is what lets Phase 2 align ink with a recording.
+   */
+  t?: number;
 }
 
 export interface PageStroke {
   points: StrokePoint[];
+  /** Epoch ms of the first/last point. Live capture only. */
+  startedAt?: number;
+  endedAt?: number;
 }
 
 export interface TranscriptRecord {
@@ -61,6 +70,12 @@ export interface NoteRecord {
    * partway through. `null` for notes captured by this app.
    */
   legacySourceId: string | null;
+  /**
+   * Session this note belongs to. `null` for legacy or imported notes. Absent
+   * on v1 rows, which reads as `null` - optional rather than required so the
+   * v2 upgrade needs no data migration.
+   */
+  sessionId?: string | null;
 }
 
 /** Dimensions and MIME type of a page render. The bytes live in `pageRenders`. */
@@ -95,9 +110,113 @@ export interface PageRecord {
   /** Metadata only - never the image bytes. See `getPageRender`. */
   render: PageRenderMeta | null;
   transcript: TranscriptRecord | null;
+  /**
+   * Epoch ms when the page stopped accepting strokes (page turn, new page or
+   * note end). `null` while the page is still being written. Absent on v1 rows,
+   * which reads as finalized: a legacy page is complete by definition.
+   */
+  finalizedAt?: number | null;
 }
 
 export interface SettingRecord {
   key: string;
   value: unknown;
+}
+
+export type SessionStatus = 'active' | 'ended';
+
+/**
+ * Groups the notes and recordings captured together. Phase 1 creates one
+ * session per note; Phase 2 lets one manually started session span several.
+ */
+export interface SessionRecord {
+  id: string;
+  title: string;
+  status: SessionStatus;
+  startedAt: number;
+  endedAt: number | null;
+}
+
+export interface TranscriptSegment {
+  /** Offset from `RecordingRecord.startedAt`, in ms. Absolute = startedAt + startMs. */
+  startMs: number;
+  endMs: number;
+  text: string;
+}
+
+/** Audio transcript of a recording. Distinct from `TranscriptRecord`, which is page handwriting. */
+export interface AudioTranscriptRecord {
+  text: string;
+  segments: TranscriptSegment[];
+  /** Whisper model id, e.g. `Xenova/whisper-base.en`. */
+  model: string;
+  language: string | null;
+  status: TranscriptStatus;
+  error: string | null;
+  updatedAt: number;
+}
+
+export interface RecordingRecord {
+  id: string;
+  sessionId: string | null;
+  /** Convenience link to the note that was active at record start. */
+  noteId: string | null;
+  title: string;
+  startedAt: number;
+  endedAt: number | null;
+  durationMs: number;
+  mimeType: string;
+  byteLength: number;
+  transcript: AudioTranscriptRecord | null;
+}
+
+/**
+ * The bytes of a recording, in their own store keyed by recording id so that
+ * listing recordings never drags megabytes of audio into the heap - the same
+ * reasoning as `PageRenderRecord` (spec D7).
+ */
+export interface RecordingAudioRecord {
+  data: ArrayBuffer;
+  type: string;
+}
+
+export type CalendarEventKind = 'deadline' | 'event';
+export type CalendarEventSource = 'manual' | 'syllabus';
+
+export interface CalendarEventRecord {
+  id: string;
+  title: string;
+  kind: CalendarEventKind;
+  /** Epoch ms. For a deadline this is the due moment unless `allDay`. */
+  startsAt: number;
+  endsAt: number | null;
+  /** All-day items are due at the end of their local day (23:59:59.999). */
+  allDay: boolean;
+  /** Defaults copied onto the generated task. */
+  required: boolean;
+  estimatedMinutes: number;
+  notes: string;
+  source: CalendarEventSource;
+  /** Phase 2 syllabus import: stable reference to the source item, for idempotent re-import. */
+  sourceRef: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type TaskStatus = 'open' | 'done' | 'dismissed';
+export type TaskSource = 'manual' | 'calendar' | 'scratchpad';
+
+export interface TaskRecord {
+  id: string;
+  title: string;
+  required: boolean;
+  estimatedMinutes: number;
+  dueAt: number | null;
+  status: TaskStatus;
+  source: TaskSource;
+  /** Set when `source === 'calendar'`; at most one open task per event. */
+  eventId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
 }
