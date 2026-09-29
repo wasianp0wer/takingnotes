@@ -10,6 +10,12 @@ export interface CreatePageInput {
   strokes: PageStroke[];
   /** Defaults to now; the legacy migration passes the recorded timestamp. */
   capturedAt?: number;
+  /**
+   * Defaults to `null` - a live page starts open. The legacy migration passes a
+   * timestamp, because an imported ROM page is complete by definition and must
+   * not look like a page that is still being written.
+   */
+  finalizedAt?: number | null;
 }
 
 export function countPoints(strokes: PageStroke[]): number {
@@ -28,6 +34,7 @@ export async function createPage(input: CreatePageInput): Promise<PageRecord> {
     capturedAt: input.capturedAt ?? Date.now(),
     render: null,
     transcript: null,
+    finalizedAt: input.finalizedAt ?? null,
   };
 
   const db = await openNotesDb();
@@ -115,4 +122,48 @@ export function setPageTranscript(
   transcript: TranscriptRecord,
 ): Promise<PageRecord> {
   return patchPage(id, { transcript });
+}
+
+/**
+ * Replaces the page's strokes and recomputes `pointCount`. Live capture calls
+ * this repeatedly with a growing array (pen-up plus a periodic flush), so it
+ * replaces rather than appends: re-flushing the same strokes is then a no-op
+ * instead of a duplication, and a stroke that was trimmed locally disappears.
+ */
+export function setPageStrokes(id: string, strokes: PageStroke[]): Promise<PageRecord> {
+  return patchPage(id, { strokes, pointCount: countPoints(strokes) });
+}
+
+/**
+ * The single reading of `finalizedAt`'s documented default: absent (a v1 row,
+ * written before the field existed) means finalized, because a legacy page is
+ * complete by definition. Only an explicit `null` is an open page.
+ */
+export function isPageFinalized(page: PageRecord): boolean {
+  return page.finalizedAt !== null;
+}
+
+/**
+ * Marks the page as closed to further strokes. Leaves an already-finalized page
+ * untouched: startup recovery finalizes whatever was left open, and it must not
+ * move the mark on a page that was closed properly (which would re-date it for
+ * anything keyed on the finalize moment).
+ */
+export async function finalizePage(id: string, at: number): Promise<PageRecord> {
+  const db = await openNotesDb();
+  const tx = db.transaction('pages', 'readwrite');
+  const existing = await tx.store.get(id);
+  if (!existing) {
+    tx.abort();
+    await tx.done.catch(() => undefined);
+    throw new Error(`Page not found: ${id}`);
+  }
+  if (isPageFinalized(existing)) {
+    await tx.done;
+    return existing;
+  }
+  const merged: PageRecord = { ...existing, finalizedAt: at };
+  await tx.store.put(merged);
+  await tx.done;
+  return merged;
 }

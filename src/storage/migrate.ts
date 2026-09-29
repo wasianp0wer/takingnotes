@@ -136,13 +136,17 @@ export async function migrateLegacyNotebooks(
       let notebookPages = 0;
       for (const [pageIndex, legacyPage] of legacyPages.entries()) {
         if (!isRecord(legacyPage)) continue;
+        const capturedAt = toNumber(legacyPage.timestamp, downloadedAt);
         await createPage({
           noteId: note.id,
           pageIndex,
           devicePageNum: toNumber(legacyPage.pageNum, pageIndex),
           source: 'rom',
           strokes: toStrokes(legacyPage.strokes),
-          capturedAt: toNumber(legacyPage.timestamp, downloadedAt),
+          capturedAt,
+          // An imported ROM page is complete; without this it would look like a
+          // page still being written and startup recovery would "finalize" it.
+          finalizedAt: capturedAt,
         });
         notebookPages += 1;
       }

@@ -5,10 +5,12 @@ import { createNote, deleteNote } from '@/storage/notes';
 import {
   countPoints,
   createPage,
+  finalizePage,
   getPage,
   getPageRender,
   listPages,
   setPageRender,
+  setPageStrokes,
   setPageTranscript,
 } from '@/storage/pages';
 import type { PageStroke } from '@/storage/types';
@@ -225,6 +227,97 @@ describe('pages repository', () => {
         updatedAt: 1,
       }),
     ).rejects.toThrow('missing');
+  });
+
+  it('replaces the strokes of a page and recomputes its point count', async () => {
+    const note = await createNote({ title: 'N', deviceId: 'huion:abc', pageBaseline: 0 });
+    const page = await createPage({
+      noteId: note.id,
+      pageIndex: 0,
+      devicePageNum: null,
+      source: 'live',
+      strokes: [],
+    });
+    expect(page.finalizedAt).toBeNull();
+
+    const updated = await setPageStrokes(page.id, STROKES);
+    expect(updated.pointCount).toBe(3);
+    expect(updated.strokes).toEqual(STROKES);
+
+    // Incremental capture calls this repeatedly with a growing array; replacing
+    // rather than appending is what makes a re-flush of the same strokes a
+    // no-op instead of a duplication.
+    const again = await setPageStrokes(page.id, STROKES);
+    expect(again.pointCount).toBe(3);
+    expect(again.strokes).toHaveLength(2);
+
+    const shorter = await setPageStrokes(page.id, [STROKES[0]]);
+    expect(shorter.pointCount).toBe(2);
+  });
+
+  it('keeps live-capture timestamps on strokes and points', async () => {
+    const note = await createNote({ title: 'N', deviceId: 'huion:abc', pageBaseline: 0 });
+    const page = await createPage({
+      noteId: note.id,
+      pageIndex: 0,
+      devicePageNum: null,
+      source: 'live',
+      strokes: [],
+    });
+
+    await setPageStrokes(page.id, [
+      {
+        points: [{ x: 0.5, y: 0.5, pressure: 0.3, t: 1_700 }],
+        startedAt: 1_700,
+        endedAt: 1_700,
+      },
+    ]);
+
+    const loaded = await getPage(page.id);
+    expect(loaded?.strokes[0].startedAt).toBe(1_700);
+    expect(loaded?.strokes[0].endedAt).toBe(1_700);
+    expect(loaded?.strokes[0].points[0].t).toBe(1_700);
+  });
+
+  it('finalizes a page once and keeps the first timestamp', async () => {
+    const note = await createNote({ title: 'N', deviceId: 'huion:abc', pageBaseline: 0 });
+    const page = await createPage({
+      noteId: note.id,
+      pageIndex: 0,
+      devicePageNum: null,
+      source: 'live',
+      strokes: [],
+    });
+
+    const finalized = await finalizePage(page.id, 5_000);
+    expect(finalized.finalizedAt).toBe(5_000);
+
+    // Startup recovery finalizes whatever is still open; it must not move the
+    // mark on a page that was already closed properly.
+    const again = await finalizePage(page.id, 9_000);
+    expect(again.finalizedAt).toBe(5_000);
+  });
+
+  it('throws when finalizing or re-stroking an unknown page', async () => {
+    await expect(finalizePage('missing', 1)).rejects.toThrow('missing');
+    await expect(setPageStrokes('missing', [])).rejects.toThrow('missing');
+  });
+
+  it('treats a page created with an explicit finalizedAt as closed', async () => {
+    // The legacy migration imports complete ROM pages; they must never look
+    // like a page that is still being written.
+    const note = await createNote({ title: 'N', deviceId: 'huion:abc', pageBaseline: 0 });
+    const page = await createPage({
+      noteId: note.id,
+      pageIndex: 0,
+      devicePageNum: 1,
+      source: 'rom',
+      strokes: STROKES,
+      capturedAt: 2_000,
+      finalizedAt: 2_000,
+    });
+
+    expect(page.finalizedAt).toBe(2_000);
   });
 
   it('deletes pages when their note is deleted', async () => {

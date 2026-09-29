@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { createNote, deleteNote, getNote, listNotes, updateNote } from '@/storage/notes';
+import {
+  createNote,
+  deleteNote,
+  getNote,
+  listNotes,
+  listNotesBySession,
+  updateNote,
+} from '@/storage/notes';
 import { resetDatabase } from '@/test/resetDb';
 
 beforeEach(resetDatabase);
@@ -75,5 +82,39 @@ describe('notes repository', () => {
     const created = await createNote({ title: 'Temp', deviceId: 'huion:abc', pageBaseline: 0 });
     await deleteNote(created.id);
     expect(await getNote(created.id)).toBeUndefined();
+  });
+
+  it('defaults sessionId to null', async () => {
+    const note = await createNote({ title: 'Loose', deviceId: 'huion:abc', pageBaseline: 0 });
+    expect(note.sessionId).toBeNull();
+  });
+
+  it('lists the notes of one session, oldest first', async () => {
+    const mine = await createNote({
+      title: 'First',
+      deviceId: 'huion:abc',
+      pageBaseline: 0,
+      sessionId: 'sess-1',
+      startedAt: 1_000,
+    });
+    const alsoMine = await createNote({
+      title: 'Second',
+      deviceId: 'huion:abc',
+      pageBaseline: 0,
+      sessionId: 'sess-1',
+      startedAt: 2_000,
+    });
+    await createNote({
+      title: 'Theirs',
+      deviceId: 'huion:abc',
+      pageBaseline: 0,
+      sessionId: 'sess-2',
+    });
+    // A note with no session must not be swept into any session's list.
+    await createNote({ title: 'Loose', deviceId: 'huion:abc', pageBaseline: 0 });
+
+    const listed = await listNotesBySession('sess-1');
+    expect(listed.map((note) => note.id)).toEqual([mine.id, alsoMine.id]);
+    expect(await listNotesBySession('sess-3')).toEqual([]);
   });
 });

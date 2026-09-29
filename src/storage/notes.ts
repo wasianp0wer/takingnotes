@@ -20,6 +20,8 @@ export interface CreateNoteInput {
   endedAt?: number | null;
   legacy?: boolean;
   legacySourceId?: string | null;
+  /** Null for legacy or imported notes, which belong to no session. */
+  sessionId?: string | null;
 }
 
 export async function createNote(input: CreateNoteInput): Promise<NoteRecord> {
@@ -39,6 +41,7 @@ export async function createNote(input: CreateNoteInput): Promise<NoteRecord> {
     summaryModel: null,
     legacy: input.legacy ?? false,
     legacySourceId: input.legacySourceId ?? null,
+    sessionId: input.sessionId ?? null,
   };
 
   const db = await openNotesDb();
@@ -81,6 +84,17 @@ export async function listNotes(): Promise<NoteRecord[]> {
   const db = await openNotesDb();
   const ascending = await db.getAllFromIndex('notes', 'by-started');
   return ascending.reverse();
+}
+
+/**
+ * The notes of one session, oldest first: within a session, chronological order
+ * is the useful one. Notes whose `sessionId` is null or absent are not in the
+ * index at all (IndexedDB skips null keys), so they can never be swept up here.
+ */
+export async function listNotesBySession(sessionId: string): Promise<NoteRecord[]> {
+  const db = await openNotesDb();
+  const notes = await db.getAllFromIndex('notes', 'by-session', IDBKeyRange.only(sessionId));
+  return notes.sort((a, b) => a.startedAt - b.startedAt);
 }
 
 /**
