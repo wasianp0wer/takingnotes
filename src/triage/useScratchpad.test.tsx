@@ -62,6 +62,7 @@ describe('useScratchpad', () => {
   it('collapses rapid typing into a single stored write of the final text', async () => {
     const m = mount(<Probe debounceMs={30} />);
     await waitFor(() => expect(latest.loaded).toBe(true));
+    vi.mocked(setSettingValue).mockClear();
 
     act(() => latest.setText('a'));
     act(() => latest.setText('ab'));
@@ -75,6 +76,8 @@ describe('useScratchpad', () => {
     // write from an earlier keystroke would show up as flicker here.
     await flush(3);
     expect(await getSettingValue('triage.scratchpad')).toBe('abc');
+    // Three keystrokes, exactly one write - the point of the debounce.
+    expect(vi.mocked(setSettingValue)).toHaveBeenCalledTimes(1);
 
     m.unmount();
     await flush();

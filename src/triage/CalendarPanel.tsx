@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import { addLocalDays, isSameLocalDay, monthGrid, startOfLocalDay, toDateInputValue } from '@/triage/dates';
 import { emptyEventForm, eventFormFromRecord, type EventFormState, type EventFormValue } from '@/triage/eventForm';
 import { EventDialog } from '@/triage/EventDialog';
-import { formatDayLabel, formatMonthTitle, formatTime } from '@/triage/format';
+import { WEEKDAYS, formatDayLabel, formatMonthTitle, formatTime } from '@/triage/format';
 
 export interface CalendarPanelProps {
   events: CalendarEventRecord[];
@@ -20,7 +20,6 @@ export interface CalendarPanelProps {
 /** Today plus the next 7 days. */
 export const AGENDA_DAYS = 8;
 
-const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 /** A cell shows at most this many dots, so a busy day never overflows. */
 const MAX_DOTS = 3;
 

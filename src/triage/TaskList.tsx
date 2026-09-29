@@ -7,8 +7,9 @@ import type { CreateTaskInput } from '@/storage/tasks';
 import type { TaskRecord } from '@/storage/types';
 import { cn } from '@/lib/utils';
 import { endOfLocalDay, localDateTimeFromInputs } from '@/triage/dates';
+import { parseEstimateMinutes } from '@/triage/estimate';
 import { formatDue } from '@/triage/format';
-import { DEFAULT_ESTIMATE_MINUTES, rankTasks } from '@/triage/priority';
+import { rankTasks } from '@/triage/priority';
 import type { TaskPatch } from '@/triage/useTriageData';
 
 export interface TaskListProps {
@@ -109,7 +110,9 @@ function TaskRow({
   };
 
   const dueLabel = formatDue(task.dueAt, now);
-  const overdue = dueLabel.startsWith('Overdue · ');
+  // From the data, not from `dueLabel`'s copy: styling must not break the day
+  // someone rewords the label.
+  const overdue = task.dueAt !== null && task.dueAt < now;
   const sourceHint = SOURCE_HINT[task.source];
 
   return (
@@ -200,9 +203,8 @@ function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
       }
     }
 
-    const trimmedEstimate = estimate.trim();
-    const estimateNumber = trimmedEstimate === '' ? DEFAULT_ESTIMATE_MINUTES : Number(trimmedEstimate);
-    if (!Number.isFinite(estimateNumber) || estimateNumber < 0) {
+    const estimatedMinutes = parseEstimateMinutes(estimate);
+    if (estimatedMinutes === null) {
       setError('Estimate must be a number of minutes.');
       return;
     }
@@ -215,7 +217,7 @@ function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
         title: trimmedTitle,
         dueAt,
         required,
-        estimatedMinutes: Math.round(estimateNumber),
+        estimatedMinutes,
         source: 'manual',
       });
     } catch (err) {

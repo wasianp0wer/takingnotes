@@ -1,5 +1,6 @@
 import type { CalendarEventKind, CalendarEventRecord } from '@/storage/types';
 import { localDateTimeFromInputs, toDateInputValue, toTimeInputValue } from '@/triage/dates';
+import { parseEstimateMinutes } from '@/triage/estimate';
 import { DEFAULT_ESTIMATE_MINUTES } from '@/triage/priority';
 
 export interface EventFormState {
@@ -67,12 +68,10 @@ export function eventValueFromForm(form: EventFormState): EventFormResult {
     startsAt = timed;
   }
 
-  const trimmedEstimate = form.estimatedMinutes.trim();
-  const estimateNumber = trimmedEstimate === '' ? DEFAULT_ESTIMATE_MINUTES : Number(trimmedEstimate);
-  if (!Number.isFinite(estimateNumber) || estimateNumber < 0) {
+  const estimatedMinutes = parseEstimateMinutes(form.estimatedMinutes);
+  if (estimatedMinutes === null) {
     return { ok: false, error: 'Estimate must be a number of minutes.' };
   }
-  const estimatedMinutes = Math.round(estimateNumber);
 
   return {
     ok: true,

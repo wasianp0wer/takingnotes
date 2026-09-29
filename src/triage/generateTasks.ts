@@ -3,6 +3,7 @@ import { SETTING_DEFAULTS, getSettingValue } from '@/storage/settingKeys';
 import { createTask, listTasks, updateTask } from '@/storage/tasks';
 import type { CalendarEventRecord, TaskRecord } from '@/storage/types';
 import { addLocalDays, endOfLocalDay, startOfLocalDay } from '@/triage/dates';
+import { dismissTask } from '@/triage/taskActions';
 
 export interface NewTask {
   title: string;
@@ -138,6 +139,8 @@ async function runSync(now: number): Promise<TaskSyncPlan> {
   const plan = planTaskSync(events, tasks, now, lookahead);
   for (const input of plan.create) await createTask(input);
   for (const { id, patch } of plan.update) await updateTask(id, patch);
-  for (const id of plan.dismiss) await updateTask(id, { status: 'dismissed' });
+  // Through `dismissTask`, so "dismissed" means one thing everywhere: the
+  // status *and* a cleared `completedAt`.
+  for (const id of plan.dismiss) await dismissTask(id);
   return plan;
 }

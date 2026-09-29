@@ -97,6 +97,26 @@ describe('syncTasksFromCalendar', () => {
     expect(tasks[0]?.status).toBe('dismissed');
   });
 
+  it('dismisses through dismissTask, so a sync-dismissed task never keeps a completedAt', async () => {
+    const event = await createEvent({
+      title: 'Seminar',
+      kind: 'deadline',
+      startsAt: Date.now() + 24 * HOUR,
+    });
+    await syncTasksFromCalendar();
+    const task = (await listTasks())[0]!;
+
+    // The state the read-then-write race can leave behind: still open, but
+    // already carrying a completedAt from a Done the user just clicked.
+    await updateTask(task.id, { completedAt: Date.now() });
+
+    await deleteEvent(event.id);
+    await syncTasksFromCalendar();
+
+    // One definition of "dismissed", the one in taskActions.
+    expect((await listTasks())[0]).toMatchObject({ status: 'dismissed', completedAt: null });
+  });
+
   it('keeps a user edit of required and estimate while the due date follows the event', async () => {
     const event = await createEvent({
       title: 'Essay',

@@ -143,6 +143,34 @@ describe('TaskList', () => {
     m.unmount();
   });
 
+  it('a fractional estimate commits rounded to the nearest minute', () => {
+    const onPatch = vi.fn();
+    const m = mount(
+      <TaskList tasks={[URGENT]} now={NOW} onAdd={noop} onPatch={onPatch} onComplete={noop} onDismiss={noop} />,
+    );
+    const input = m.container.querySelector('[aria-label="Estimate (minutes)"]') as HTMLInputElement;
+    typeInto(input, '90.6');
+    blur(input);
+    expect(onPatch).toHaveBeenCalledWith('a', { estimatedMinutes: 91 });
+    // The field keeps what was typed; it follows the stored value only once
+    // the save round-trips back in as a changed prop.
+    expect(input.value).toBe('90.6');
+    m.unmount();
+  });
+
+  it('a fractional estimate that rounds back to the stored value reverts instead of patching', () => {
+    const onPatch = vi.fn();
+    const m = mount(
+      <TaskList tasks={[URGENT]} now={NOW} onAdd={noop} onPatch={onPatch} onComplete={noop} onDismiss={noop} />,
+    );
+    const input = m.container.querySelector('[aria-label="Estimate (minutes)"]') as HTMLInputElement;
+    typeInto(input, '240.2');
+    blur(input);
+    expect(onPatch).not.toHaveBeenCalled();
+    expect(input.value).toBe('240');
+    m.unmount();
+  });
+
   it('committing the unchanged estimate does not call onPatch', () => {
     const onPatch = vi.fn();
     const m = mount(
