@@ -218,6 +218,7 @@ describe('useTriageData', () => {
   });
 
   it('surfaces a refresh error and clears it on the next successful refresh', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     const m = mount(<Probe />);
     await waitFor(() => expect(latest.loaded).toBe(true));
 
@@ -232,6 +233,26 @@ describe('useTriageData', () => {
     });
     await waitFor(() => expect(latest.error).toBeNull());
 
+    consoleError.mockRestore();
+    m.unmount();
+    await flush();
+  });
+
+  it('patchTask on a missing id sets error instead of rejecting', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const m = mount(<Probe />);
+    await waitFor(() => expect(latest.loaded).toBe(true));
+
+    // Must resolve, not reject - callers invoke these straight from click
+    // handlers and can only safely `void` a promise that never rejects.
+    await act(async () => {
+      await latest.patchTask('missing-id', { title: 'x' });
+    });
+
+    expect(latest.error).toMatch(/missing-id/);
+    expect(consoleError).toHaveBeenCalledWith('[triage] mutation failed', expect.any(Error));
+
+    consoleError.mockRestore();
     m.unmount();
     await flush();
   });

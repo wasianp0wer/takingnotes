@@ -1,10 +1,24 @@
 import { act } from 'react';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getSettingValue, setSettingValue } from '@/storage/settingKeys';
 import { resetDatabase } from '@/test/resetDb';
 import { flush, mount, waitFor } from '@/triage/testing';
 import { useScratchpad, type ScratchpadState } from '@/triage/useScratchpad';
+
+/**
+ * `getSettingValue`/`setSettingValue` delegate to the real repository unless
+ * a test overrides one once, which is how the load-failure and save-failure
+ * cases below are provoked (mirrors generateTasks.sync.test.ts).
+ */
+vi.mock('@/storage/settingKeys', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/storage/settingKeys')>();
+  return {
+    ...actual,
+    getSettingValue: vi.fn(actual.getSettingValue),
+    setSettingValue: vi.fn(actual.setSettingValue),
+  };
+});
 
 beforeEach(resetDatabase);
 
@@ -115,5 +129,45 @@ describe('useScratchpad', () => {
     await flush();
 
     expect(await getSettingValue('triage.scratchpad')).toBe('strict text');
+  });
+
+  it('marks loaded and logs it, even when the initial read fails', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(getSettingValue).mockRejectedValueOnce(new Error('db closed'));
+
+    const m = mount(<Probe />);
+    await waitFor(() => expect(latest.loaded).toBe(true));
+
+    expect(consoleError).toHaveBeenCalledWith('[triage] scratchpad load failed', expect.any(Error));
+    expect(latest.text).toBe('');
+
+    consoleError.mockRestore();
+    m.unmount();
+    await flush();
+  });
+
+  it('retries and logs a save that failed, instead of losing the text', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const m = mount(<Probe debounceMs={20} />);
+    await waitFor(() => expect(latest.loaded).toBe(true));
+
+    vi.mocked(setSettingValue).mockRejectedValueOnce(new Error('disk full'));
+    act(() => latest.setText('resilient'));
+
+    await waitFor(() =>
+      expect(consoleError).toHaveBeenCalledWith('[triage] scratchpad save failed', expect.any(Error)),
+    );
+    // The failed attempt never landed.
+    expect(await getSettingValue('triage.scratchpad')).toBe('');
+
+    // A later flush retries the same text and this time it succeeds.
+    await act(async () => {
+      await latest.flush();
+    });
+    expect(await getSettingValue('triage.scratchpad')).toBe('resilient');
+
+    consoleError.mockRestore();
+    m.unmount();
+    await flush();
   });
 });

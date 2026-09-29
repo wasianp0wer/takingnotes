@@ -80,56 +80,56 @@ export function useTriageData(opts?: { syncIntervalMs?: number }): TriageData {
     };
   }, [refresh, syncIntervalMs]);
 
-  const saveEvent = useCallback(
-    async (value: EventFormValue, id?: string | null): Promise<void> => {
-      if (id) {
-        await updateEvent(id, value);
-      } else {
-        await createEvent(value);
+  /**
+   * Runs a single storage mutation, then refreshes. `action` failures (a
+   * missing id, a closed database, ...) are caught here rather than left to
+   * propagate: every mutator below is called straight from a click handler,
+   * and an unhandled rejection there is worse than a surfaced `error`. This
+   * never rethrows, so `void mutator(...)` is always safe.
+   */
+  const runMutation = useCallback(
+    async (action: () => Promise<unknown>): Promise<void> => {
+      try {
+        await action();
+      } catch (err) {
+        console.error('[triage] mutation failed', err);
+        if (mountedRef.current) setError(err instanceof Error ? err.message : String(err));
+        return;
       }
       await refresh();
     },
     [refresh],
   );
 
+  const saveEvent = useCallback(
+    (value: EventFormValue, id?: string | null): Promise<void> =>
+      runMutation(() => (id ? updateEvent(id, value) : createEvent(value))),
+    [runMutation],
+  );
+
   const removeEvent = useCallback(
-    async (id: string): Promise<void> => {
-      await deleteEvent(id);
-      await refresh();
-    },
-    [refresh],
+    (id: string): Promise<void> => runMutation(() => deleteEvent(id)),
+    [runMutation],
   );
 
   const addTask = useCallback(
-    async (input: CreateTaskInput): Promise<void> => {
-      await createTask(input);
-      await refresh();
-    },
-    [refresh],
+    (input: CreateTaskInput): Promise<void> => runMutation(() => createTask(input)),
+    [runMutation],
   );
 
   const patchTask = useCallback(
-    async (id: string, patch: TaskPatch): Promise<void> => {
-      await updateTask(id, patch);
-      await refresh();
-    },
-    [refresh],
+    (id: string, patch: TaskPatch): Promise<void> => runMutation(() => updateTask(id, patch)),
+    [runMutation],
   );
 
   const completeTask = useCallback(
-    async (id: string): Promise<void> => {
-      await completeTaskAction(id);
-      await refresh();
-    },
-    [refresh],
+    (id: string): Promise<void> => runMutation(() => completeTaskAction(id)),
+    [runMutation],
   );
 
   const dismissTask = useCallback(
-    async (id: string): Promise<void> => {
-      await dismissTaskAction(id);
-      await refresh();
-    },
-    [refresh],
+    (id: string): Promise<void> => runMutation(() => dismissTaskAction(id)),
+    [runMutation],
   );
 
   return {
