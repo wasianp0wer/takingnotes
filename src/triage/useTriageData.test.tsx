@@ -2,6 +2,7 @@ import { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createEvent, listEvents } from '@/storage/events';
+import { createTask } from '@/storage/tasks';
 import { resetDatabase } from '@/test/resetDb';
 import { flush, mount, waitFor } from '@/triage/testing';
 import { useTriageData, type TriageData } from '@/triage/useTriageData';
@@ -14,6 +15,12 @@ import { useTriageData, type TriageData } from '@/triage/useTriageData';
 vi.mock('@/storage/events', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/storage/events')>();
   return { ...actual, listEvents: vi.fn(actual.listEvents) };
+});
+
+/** Same pattern, for the `addTask(..., { rethrow: true })` failure-path test. */
+vi.mock('@/storage/tasks', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/storage/tasks')>();
+  return { ...actual, createTask: vi.fn(actual.createTask) };
 });
 
 const HOUR = 3_600_000;
@@ -232,6 +239,45 @@ describe('useTriageData', () => {
       await latest.refresh();
     });
     await waitFor(() => expect(latest.error).toBeNull());
+
+    consoleError.mockRestore();
+    m.unmount();
+    await flush();
+  });
+
+  it('addTask with { rethrow: true } rejects on a failed create and still sets error', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const m = mount(<Probe />);
+    await waitFor(() => expect(latest.loaded).toBe(true));
+
+    vi.mocked(createTask).mockRejectedValueOnce(new Error('storage full'));
+
+    await act(async () => {
+      await expect(latest.addTask({ title: 'Scratchpad line' }, { rethrow: true })).rejects.toThrow(
+        'storage full',
+      );
+    });
+
+    expect(latest.error).toBe('storage full');
+    expect(latest.tasks.some((t) => t.title === 'Scratchpad line')).toBe(false);
+
+    consoleError.mockRestore();
+    m.unmount();
+    await flush();
+  });
+
+  it('addTask without rethrow resolves normally even on a failed create (existing callers keep firing and forgetting)', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const m = mount(<Probe />);
+    await waitFor(() => expect(latest.loaded).toBe(true));
+
+    vi.mocked(createTask).mockRejectedValueOnce(new Error('storage full'));
+
+    await act(async () => {
+      await latest.addTask({ title: 'Manual line' });
+    });
+
+    expect(latest.error).toBe('storage full');
 
     consoleError.mockRestore();
     m.unmount();

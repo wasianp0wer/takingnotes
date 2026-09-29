@@ -20,7 +20,13 @@ export interface TriageData {
   refresh(): Promise<void>;
   saveEvent(value: EventFormValue, id?: string | null): Promise<void>;
   removeEvent(id: string): Promise<void>;
-  addTask(input: CreateTaskInput): Promise<void>;
+  /**
+   * `opts.rethrow` lets one call site (Scratchpad's promote, which must tell
+   * "committed" apart from "failed" so it never deletes text for a task that
+   * was never saved) observe the failure; `error` is still set either way,
+   * so every other caller's fire-and-forget behavior is unchanged.
+   */
+  addTask(input: CreateTaskInput, opts?: { rethrow?: boolean }): Promise<void>;
   patchTask(id: string, patch: TaskPatch): Promise<void>;
   completeTask(id: string): Promise<void>;
   dismissTask(id: string): Promise<void>;
@@ -84,16 +90,20 @@ export function useTriageData(opts?: { syncIntervalMs?: number }): TriageData {
    * Runs a single storage mutation, then refreshes. `action` failures (a
    * missing id, a closed database, ...) are caught here rather than left to
    * propagate: every mutator below is called straight from a click handler,
-   * and an unhandled rejection there is worse than a surfaced `error`. This
-   * never rethrows, so `void mutator(...)` is always safe.
+   * and an unhandled rejection there is worse than a surfaced `error`. By
+   * default this never rethrows, so `void mutator(...)` is always safe;
+   * `opts.rethrow` opts one call in, for the rare caller (Scratchpad's
+   * promote) that must tell success from failure to avoid destroying data
+   * on a failed write - `error` is still set in that case too.
    */
   const runMutation = useCallback(
-    async (action: () => Promise<unknown>): Promise<void> => {
+    async (action: () => Promise<unknown>, opts?: { rethrow?: boolean }): Promise<void> => {
       try {
         await action();
       } catch (err) {
         console.error('[triage] mutation failed', err);
         if (mountedRef.current) setError(err instanceof Error ? err.message : String(err));
+        if (opts?.rethrow) throw err;
         return;
       }
       await refresh();
@@ -113,7 +123,8 @@ export function useTriageData(opts?: { syncIntervalMs?: number }): TriageData {
   );
 
   const addTask = useCallback(
-    (input: CreateTaskInput): Promise<void> => runMutation(() => createTask(input)),
+    (input: CreateTaskInput, opts?: { rethrow?: boolean }): Promise<void> =>
+      runMutation(() => createTask(input), opts),
     [runMutation],
   );
 

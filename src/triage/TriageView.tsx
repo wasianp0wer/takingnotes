@@ -46,7 +46,10 @@ export function TriageView() {
             text={pad.text}
             loaded={pad.loaded}
             onChange={pad.setText}
-            onPromote={(title) => data.addTask({ title, source: 'scratchpad' })}
+            // `rethrow: true`: Scratchpad must be able to tell a failed save
+            // from a successful one so it never deletes the only copy of the
+            // user's line on a failed write (see useTriageData.addTask).
+            onPromote={(title) => data.addTask({ title, source: 'scratchpad' }, { rethrow: true })}
           />
         </section>
       </div>
