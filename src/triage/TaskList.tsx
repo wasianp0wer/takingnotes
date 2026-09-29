@@ -15,6 +15,11 @@ export interface TaskListProps {
   /** Open tasks only; the caller (Task 8's TriageView) filters by status. */
   tasks: TaskRecord[];
   now: number;
+  /**
+   * Must **reject** if the write failed: the add form is the only copy of what
+   * the user typed, so it clears its fields on success only. `TriageView`
+   * supplies `useTriageData.addTask(..., { rethrow: true })` for exactly this.
+   */
   onAdd(input: CreateTaskInput): Promise<void> | void;
   onPatch(id: string, patch: TaskPatch): Promise<void> | void;
   onComplete(id: string): Promise<void> | void;
@@ -167,7 +172,7 @@ function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
   const [error, setError] = useState<string | null>(null);
   const requiredRef = useRef<HTMLInputElement>(null);
 
-  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
 
     const trimmedTitle = title.trim();
@@ -205,13 +210,21 @@ function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
     const required = requiredRef.current?.checked ?? true;
 
     setError(null);
-    void onAdd({
-      title: trimmedTitle,
-      dueAt,
-      required,
-      estimatedMinutes: Math.round(estimateNumber),
-      source: 'manual',
-    });
+    try {
+      await onAdd({
+        title: trimmedTitle,
+        dueAt,
+        required,
+        estimatedMinutes: Math.round(estimateNumber),
+        source: 'manual',
+      });
+    } catch (err) {
+      // The task was never saved, so the form holds the only copy of this
+      // input: keep every field and say so instead of clearing them.
+      console.error('[triage] add task failed', err);
+      setError("Couldn't add that task — your text is still here.");
+      return;
+    }
 
     setTitle('');
     setDate('');
@@ -221,7 +234,7 @@ function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
   };
 
   return (
-    <form aria-label="Add task" onSubmit={handleSubmit} className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+    <form aria-label="Add task" onSubmit={(e) => void handleSubmit(e)} className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
       <Label htmlFor="task-list-new-title" className="sr-only">
         Task title
       </Label>

@@ -18,13 +18,15 @@ export interface TriageData {
   loaded: boolean;
   error: string | null;
   refresh(): Promise<void>;
-  saveEvent(value: EventFormValue, id?: string | null): Promise<void>;
+  /** See `addTask` for `opts.rethrow`; `EventDialog` needs it for the same reason. */
+  saveEvent(value: EventFormValue, id?: string | null, opts?: { rethrow?: boolean }): Promise<void>;
   removeEvent(id: string): Promise<void>;
   /**
-   * `opts.rethrow` lets one call site (Scratchpad's promote, which must tell
-   * "committed" apart from "failed" so it never deletes text for a task that
-   * was never saved) observe the failure; `error` is still set either way,
-   * so every other caller's fire-and-forget behavior is unchanged.
+   * `opts.rethrow` lets the call sites that hold the only copy of the user's
+   * text (Scratchpad's promote, the add-task form) tell "committed" apart from
+   * "failed" so they never destroy input for a write that never landed;
+   * `error` is still set either way, so every other caller's fire-and-forget
+   * behavior is unchanged.
    */
   addTask(input: CreateTaskInput, opts?: { rethrow?: boolean }): Promise<void>;
   patchTask(id: string, patch: TaskPatch): Promise<void>;
@@ -92,9 +94,9 @@ export function useTriageData(opts?: { syncIntervalMs?: number }): TriageData {
    * propagate: every mutator below is called straight from a click handler,
    * and an unhandled rejection there is worse than a surfaced `error`. By
    * default this never rethrows, so `void mutator(...)` is always safe;
-   * `opts.rethrow` opts one call in, for the rare caller (Scratchpad's
-   * promote) that must tell success from failure to avoid destroying data
-   * on a failed write - `error` is still set in that case too.
+   * `opts.rethrow` opts a call in, for the callers (Scratchpad's promote, the
+   * add-task form, the event dialog) that must tell success from failure to
+   * avoid destroying data on a failed write - `error` is still set too.
    */
   const runMutation = useCallback(
     async (action: () => Promise<unknown>, opts?: { rethrow?: boolean }): Promise<void> => {
@@ -112,8 +114,8 @@ export function useTriageData(opts?: { syncIntervalMs?: number }): TriageData {
   );
 
   const saveEvent = useCallback(
-    (value: EventFormValue, id?: string | null): Promise<void> =>
-      runMutation(() => (id ? updateEvent(id, value) : createEvent(value))),
+    (value: EventFormValue, id?: string | null, opts?: { rethrow?: boolean }): Promise<void> =>
+      runMutation(() => (id ? updateEvent(id, value) : createEvent(value)), opts),
     [runMutation],
   );
 

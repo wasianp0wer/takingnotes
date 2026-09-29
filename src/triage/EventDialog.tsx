@@ -22,6 +22,11 @@ export interface EventDialogProps {
   initial: EventFormState;
   /** null → creating. */
   eventId: string | null;
+  /**
+   * Must **reject** if the write failed, so the dialog can stay open and keep
+   * the user's typed values instead of closing over a lost save. `TriageView`
+   * supplies `useTriageData.saveEvent(..., { rethrow: true })` for that.
+   */
   onSave(value: EventFormValue): Promise<void>;
   onDelete?(): Promise<void>;
 }
@@ -50,6 +55,12 @@ export function EventDialog({ open, onOpenChange, initial, eventId, onSave, onDe
     try {
       await onSave(result.value);
       onOpenChange(false);
+    } catch (err) {
+      // Nothing was written, and this form is the only copy of the title,
+      // date, notes and estimate the user typed: stay open, say why, and let
+      // them retry rather than closing and throwing the lot away.
+      console.error('[triage] event save failed', err);
+      setError("Couldn't save this event — your changes are still here.");
     } finally {
       setSaving(false);
     }

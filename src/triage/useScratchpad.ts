@@ -5,9 +5,20 @@ import { getSettingValue, setSettingValue } from '@/storage/settingKeys';
 export interface ScratchpadState {
   text: string;
   loaded: boolean;
+  /**
+   * Set while the last write attempt is known to have failed, so the UI can
+   * stop claiming the text is saved; cleared by the next successful write.
+   */
+  error: string | null;
   setText(next: string): void;
   flush(): Promise<void>;
 }
+
+/**
+ * Deliberately blunt: the text survives in the textarea and is retried, but a
+ * retry can fail too, so the user is told to take their own copy.
+ */
+const SAVE_FAILED = "Couldn't save the scratchpad — copy your text somewhere safe.";
 
 /**
  * A single autosaved setting (`triage.scratchpad`), debounced so every
@@ -27,6 +38,7 @@ export function useScratchpad(opts?: { debounceMs?: number }): ScratchpadState {
 
   const [text, setTextState] = useState('');
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // The latest text the user wants persisted. Set from `setText` (an event
   // handler, not render) so this never touches `.current` during render.
@@ -38,6 +50,18 @@ export function useScratchpad(opts?: { debounceMs?: number }): ScratchpadState {
   const editedRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // Writes outlive the component (the unmount cleanup flushes pending text),
+  // so their `setError` must be skipped once there is nothing left to tell.
+  const mountedRef = useRef(true);
+  // Mirrors `error`, so the common case - a successful write clearing an error
+  // that was never set - schedules no update at all.
+  const errorRef = useRef<string | null>(null);
+
+  const showError = useCallback((next: string | null) => {
+    if (!mountedRef.current || errorRef.current === next) return;
+    errorRef.current = next;
+    setError(next);
+  }, []);
 
   const isDirty = useCallback(() => pendingTextRef.current !== persistedRef.current, []);
 
@@ -47,6 +71,7 @@ export function useScratchpad(opts?: { debounceMs?: number }): ScratchpadState {
       .then(
         () => {
           persistedRef.current = value;
+          showError(null);
         },
         (err: unknown) => {
           // Left un-rethrown on purpose: a failed write must not wedge the
@@ -54,13 +79,15 @@ export function useScratchpad(opts?: { debounceMs?: number }): ScratchpadState {
           // unhandled rejection for a fire-and-forget caller (the debounce
           // timer, the unmount cleanup). `isDirty()` stays true because
           // `persistedRef` was not advanced, so the next flush or unmount
-          // retries the same text.
+          // retries the same text. The failure is still surfaced through
+          // `error`, so the UI stops claiming the text has been saved.
           console.error('[triage] scratchpad save failed', err);
+          showError(SAVE_FAILED);
         },
       );
     writeQueueRef.current = run;
     return run;
-  }, []);
+  }, [showError]);
 
   const flush = useCallback((): Promise<void> => {
     if (timerRef.current !== null) {
@@ -101,7 +128,9 @@ export function useScratchpad(opts?: { debounceMs?: number }): ScratchpadState {
   // text - runs on every unmount (including StrictMode's throwaway one),
   // never depending on whether the load has resolved yet.
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (timerRef.current !== null) {
         clearTimeout(timerRef.current);
         timerRef.current = null;
@@ -124,5 +153,5 @@ export function useScratchpad(opts?: { debounceMs?: number }): ScratchpadState {
     [debounceMs, writeNow],
   );
 
-  return { text, loaded, setText, flush };
+  return { text, loaded, error, setText, flush };
 }

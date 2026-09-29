@@ -31,7 +31,10 @@ export function TriageView() {
         <TaskList
           tasks={openTasks}
           now={now}
-          onAdd={data.addTask}
+          // `rethrow: true`: the add form must be able to tell a failed save
+          // from a successful one so it never clears the fields - and loses
+          // the only copy of what the user typed - on a failed write.
+          onAdd={(input) => data.addTask(input, { rethrow: true })}
           onPatch={data.patchTask}
           onComplete={data.completeTask}
           onDismiss={data.dismissTask}
@@ -39,12 +42,20 @@ export function TriageView() {
       </section>
       <div className="flex min-w-0 flex-col gap-4">
         <section aria-label="Calendar" className="rounded-lg border border-border p-4">
-          <CalendarPanel events={data.events} now={now} onSaveEvent={data.saveEvent} onDeleteEvent={data.removeEvent} />
+          <CalendarPanel
+            events={data.events}
+            now={now}
+            // `rethrow: true`: EventDialog must stay open and keep the typed
+            // title/date/notes/estimate when the write fails (see addTask).
+            onSaveEvent={(value, id) => data.saveEvent(value, id, { rethrow: true })}
+            onDeleteEvent={data.removeEvent}
+          />
         </section>
         <section aria-label="Scratchpad" className="rounded-lg border border-border p-4">
           <Scratchpad
             text={pad.text}
             loaded={pad.loaded}
+            error={pad.error}
             onChange={pad.setText}
             // `rethrow: true`: Scratchpad must be able to tell a failed save
             // from a successful one so it never deletes the only copy of the

@@ -99,6 +99,16 @@ describe('Scratchpad', () => {
     m.unmount();
   });
 
+  it('replaces the autosave hint with a save error when the caller reports one', () => {
+    const m = mount(
+      <Scratchpad text="unsaved work" loaded error="Couldn't save it." onChange={noop} onPromote={noop} />,
+    );
+    // The hint must not keep claiming a save that did not happen.
+    expect(m.container.textContent).not.toContain('Saved automatically.');
+    expect(m.container.querySelector('[role="alert"]')?.textContent).toBe("Couldn't save it.");
+    m.unmount();
+  });
+
   it('disables the textarea until loaded', () => {
     const m = mount(<Scratchpad text="" loaded={false} onChange={noop} onPromote={noop} />);
     expect(textarea(m.container).disabled).toBe(true);

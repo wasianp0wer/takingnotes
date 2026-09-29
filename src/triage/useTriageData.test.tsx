@@ -14,7 +14,7 @@ import { useTriageData, type TriageData } from '@/triage/useTriageData';
  */
 vi.mock('@/storage/events', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/storage/events')>();
-  return { ...actual, listEvents: vi.fn(actual.listEvents) };
+  return { ...actual, listEvents: vi.fn(actual.listEvents), createEvent: vi.fn(actual.createEvent) };
 });
 
 /** Same pattern, for the `addTask(..., { rethrow: true })` failure-path test. */
@@ -278,6 +278,60 @@ describe('useTriageData', () => {
     });
 
     expect(latest.error).toBe('storage full');
+
+    consoleError.mockRestore();
+    m.unmount();
+    await flush();
+  });
+
+  it('saveEvent with { rethrow: true } rejects on a failed write and still sets error', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const m = mount(<Probe />);
+    await waitFor(() => expect(latest.loaded).toBe(true));
+
+    vi.mocked(createEvent).mockRejectedValueOnce(new Error('storage offline'));
+
+    const value = {
+      title: 'Seminar',
+      kind: 'deadline' as const,
+      startsAt: Date.now() + 24 * HOUR,
+      allDay: false,
+      required: true,
+      estimatedMinutes: 30,
+      notes: '',
+    };
+    await act(async () => {
+      await expect(latest.saveEvent(value, null, { rethrow: true })).rejects.toThrow('storage offline');
+    });
+
+    expect(latest.error).toBe('storage offline');
+    expect(latest.events.some((e) => e.title === 'Seminar')).toBe(false);
+
+    consoleError.mockRestore();
+    m.unmount();
+    await flush();
+  });
+
+  it('saveEvent without rethrow resolves normally even on a failed write', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const m = mount(<Probe />);
+    await waitFor(() => expect(latest.loaded).toBe(true));
+
+    vi.mocked(createEvent).mockRejectedValueOnce(new Error('storage offline'));
+
+    await act(async () => {
+      await latest.saveEvent({
+        title: 'Seminar',
+        kind: 'deadline',
+        startsAt: Date.now() + 24 * HOUR,
+        allDay: false,
+        required: true,
+        estimatedMinutes: 30,
+        notes: '',
+      });
+    });
+
+    expect(latest.error).toBe('storage offline');
 
     consoleError.mockRestore();
     m.unmount();

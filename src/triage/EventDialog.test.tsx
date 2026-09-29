@@ -144,6 +144,37 @@ describe('EventDialog', () => {
     m.unmount();
   });
 
+  it('a failed save keeps the dialog open with everything typed in it, and shows why', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onSave = vi.fn().mockRejectedValue(new Error('storage full'));
+    const onOpenChange = vi.fn();
+    const m = mount(
+      <EventDialog open onOpenChange={onOpenChange} initial={emptyEventForm(DAY_MS)} eventId={null} onSave={onSave} />,
+    );
+
+    const titleInput = document.body.querySelector('[aria-label="Title"]') as HTMLInputElement;
+    typeInto(titleInput, 'Turn in essay');
+    const notes = document.body.querySelector('[aria-label="Notes"]') as HTMLTextAreaElement;
+    typeInto(notes, 'draft is in the blue folder');
+
+    await click(findByText('button', 'Save'));
+
+    await waitFor(() => {
+      const alert = document.body.querySelector('[role="alert"]');
+      expect(alert?.textContent).toBe("Couldn't save this event — your changes are still here.");
+    });
+    // The dialog is the only copy of these values, so it must not close.
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(titleInput.value).toBe('Turn in essay');
+    expect(notes.value).toBe('draft is in the blue folder');
+    // Save is usable again for a retry.
+    expect((findByText('button', 'Save') as HTMLButtonElement).disabled).toBe(false);
+    expect(consoleError).toHaveBeenCalledWith('[triage] event save failed', expect.any(Error));
+
+    consoleError.mockRestore();
+    m.unmount();
+  });
+
   it('disables Save while a save is in flight', async () => {
     let resolveSave: () => void = () => {};
     const onSave = vi.fn(

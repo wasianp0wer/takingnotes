@@ -1,10 +1,25 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createEvent } from '@/storage/events';
-import { listTasks } from '@/storage/tasks';
+import { createTask, listTasks } from '@/storage/tasks';
 import { resetDatabase } from '@/test/resetDb';
-import { click, mount, typeInto, waitFor } from '@/triage/testing';
+import { click, flush, mount, typeInto, waitFor } from '@/triage/testing';
 import { TriageView } from '@/triage/TriageView';
+
+/**
+ * Both writers delegate to the real repository unless a test overrides one
+ * once, which is how the "a failed write must not destroy the user's input"
+ * cases below are provoked (mirrors useTriageData.test.tsx).
+ */
+vi.mock('@/storage/tasks', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/storage/tasks')>();
+  return { ...actual, createTask: vi.fn(actual.createTask) };
+});
+
+vi.mock('@/storage/events', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/storage/events')>();
+  return { ...actual, createEvent: vi.fn(actual.createEvent) };
+});
 
 const HOUR = 3_600_000;
 
@@ -67,6 +82,50 @@ describe('TriageView', () => {
     const promoted = tasks.find((t) => t.title === 'Buy milk');
     expect(promoted?.source).toBe('scratchpad');
 
+    m.unmount();
+  });
+
+  it('wires the add form to a rethrowing addTask, so a failed create keeps the typed title', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const m = mount(<TriageView />);
+    await waitFor(() => {
+      expect(section(m.container, 'Tasks').textContent).toContain('No open tasks.');
+    });
+
+    vi.mocked(createTask).mockRejectedValueOnce(new Error('storage offline'));
+
+    const titleInput = m.container.querySelector('[aria-label="Task title"]') as HTMLInputElement;
+    typeInto(titleInput, 'Keep me');
+    await click(buttonWithText(m.container, 'Add'));
+    await flush();
+
+    expect(titleInput.value).toBe('Keep me');
+    expect(section(m.container, 'Tasks').textContent).toContain("Couldn't add that task");
+
+    consoleError.mockRestore();
+    m.unmount();
+  });
+
+  it('wires the event dialog to a rethrowing saveEvent, so a failed create keeps the dialog open', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const m = mount(<TriageView />);
+    await waitFor(() => {
+      expect(section(m.container, 'Tasks').textContent).toContain('No open tasks.');
+    });
+
+    await click(buttonWithText(m.container, 'New event'));
+    const titleInput = document.body.querySelector('[aria-label="Title"]') as HTMLInputElement;
+    typeInto(titleInput, 'Seminar');
+
+    vi.mocked(createEvent).mockRejectedValueOnce(new Error('storage offline'));
+    const save = [...document.body.querySelectorAll('button')].find((b) => b.textContent === 'Save')!;
+    await click(save);
+    await flush();
+
+    expect(document.body.textContent).toContain("Couldn't save this event");
+    expect((document.body.querySelector('[aria-label="Title"]') as HTMLInputElement).value).toBe('Seminar');
+
+    consoleError.mockRestore();
     m.unmount();
   });
 

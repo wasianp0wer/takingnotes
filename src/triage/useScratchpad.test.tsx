@@ -22,6 +22,9 @@ vi.mock('@/storage/settingKeys', async (importOriginal) => {
 
 beforeEach(resetDatabase);
 
+/** The message the hook surfaces when a write rejects. */
+const SAVE_FAILED = "Couldn't save the scratchpad — copy your text somewhere safe.";
+
 let latest: ScratchpadState;
 
 function Probe({ debounceMs }: { debounceMs?: number }) {
@@ -165,6 +168,29 @@ describe('useScratchpad', () => {
       await latest.flush();
     });
     expect(await getSettingValue('triage.scratchpad')).toBe('resilient');
+
+    consoleError.mockRestore();
+    m.unmount();
+    await flush();
+  });
+
+  it('surfaces a failed save as an error, and clears it once a later write succeeds', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const m = mount(<Probe debounceMs={20} />);
+    await waitFor(() => expect(latest.loaded).toBe(true));
+    expect(latest.error).toBeNull();
+
+    vi.mocked(setSettingValue).mockRejectedValueOnce(new Error('disk full'));
+    act(() => latest.setText('visible failure'));
+
+    // Silence here is the bug: the UI claims "Saved automatically."
+    await waitFor(() => expect(latest.error).toBe(SAVE_FAILED));
+
+    await act(async () => {
+      await latest.flush();
+    });
+    await waitFor(() => expect(latest.error).toBeNull());
+    expect(await getSettingValue('triage.scratchpad')).toBe('visible failure');
 
     consoleError.mockRestore();
     m.unmount();

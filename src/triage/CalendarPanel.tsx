@@ -12,6 +12,7 @@ import { formatDayLabel, formatMonthTitle, formatTime } from '@/triage/format';
 export interface CalendarPanelProps {
   events: CalendarEventRecord[];
   now: number;
+  /** Must reject on a failed write; `EventDialog` relies on it (see its `onSave`). */
   onSaveEvent(value: EventFormValue, id: string | null): Promise<void>;
   onDeleteEvent(id: string): Promise<void>;
 }

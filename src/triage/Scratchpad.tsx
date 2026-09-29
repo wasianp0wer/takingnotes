@@ -7,6 +7,12 @@ import { lineAtCursor, removeLine, taskTitleFromLine } from '@/triage/scratchpad
 export interface ScratchpadProps {
   text: string;
   loaded: boolean;
+  /**
+   * An autosave failure the caller's `useScratchpad` reported. When set it
+   * takes the place of the autosave hint, which would otherwise keep claiming
+   * a save that did not happen.
+   */
+  error?: string | null;
   onChange(text: string): void;
   onPromote(title: string): Promise<void> | void;
 }
@@ -17,7 +23,7 @@ export interface ScratchpadProps {
  * caret becomes a task title (leading list markers stripped) and is removed
  * from the text, leaving the caret where the line used to start.
  */
-export function Scratchpad({ text, loaded, onChange, onPromote }: ScratchpadProps) {
+export function Scratchpad({ text, loaded, error = null, onChange, onPromote }: ScratchpadProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [status, setStatus] = useState<string | null>(null);
   // Set by `promote` right before calling `onChange`; consumed by the effect
@@ -113,7 +119,13 @@ export function Scratchpad({ text, loaded, onChange, onPromote }: ScratchpadProp
     <div className="flex h-full flex-col gap-2">
       <div className="flex items-baseline justify-between gap-2">
         <h2 className="text-sm font-semibold text-foreground">Scratchpad</h2>
-        <span className="text-xs text-muted-foreground">Saved automatically.</span>
+        {error ? (
+          <span role="alert" className="text-xs text-destructive">
+            {error}
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">Saved automatically.</span>
+        )}
       </div>
       <textarea
         ref={textareaRef}

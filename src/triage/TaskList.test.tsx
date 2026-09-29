@@ -41,8 +41,12 @@ function blur(el: Element): void {
   });
 }
 
-function submit(form: HTMLFormElement): void {
-  act(() => {
+/**
+ * Async because the submit handler awaits `onAdd` before it decides whether to
+ * clear the fields; a synchronous `act` would return before that decision.
+ */
+async function submit(form: HTMLFormElement): Promise<void> {
+  await act(async () => {
     form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   });
 }
@@ -220,17 +224,17 @@ describe('TaskList', () => {
     m.unmount();
   });
 
-  it('add form: empty title shows an error and does not call onAdd', () => {
+  it('add form: empty title shows an error and does not call onAdd', async () => {
     const onAdd = vi.fn();
     const m = mount(<TaskList tasks={[]} now={NOW} onAdd={onAdd} onPatch={noop} onComplete={noop} onDismiss={noop} />);
     const form = m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement;
-    submit(form);
+    await submit(form);
     expect(m.container.textContent).toContain('Give the task a title.');
     expect(onAdd).not.toHaveBeenCalled();
     m.unmount();
   });
 
-  it('add form: title with a date but no time defaults estimate to 60 and due to end of day', () => {
+  it('add form: title with a date but no time defaults estimate to 60 and due to end of day', async () => {
     const onAdd = vi.fn();
     const m = mount(<TaskList tasks={[]} now={NOW} onAdd={onAdd} onPatch={noop} onComplete={noop} onDismiss={noop} />);
     const titleInput = m.container.querySelector('[aria-label="Task title"]') as HTMLInputElement;
@@ -239,7 +243,7 @@ describe('TaskList', () => {
     typeInto(dateInput, '2026-10-02');
 
     const form = m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement;
-    submit(form);
+    await submit(form);
 
     const expectedDueAt = endOfLocalDay(localDateTimeFromInputs('2026-10-02', '')!);
     expect(onAdd).toHaveBeenCalledWith({
@@ -252,14 +256,14 @@ describe('TaskList', () => {
     m.unmount();
   });
 
-  it('add form: title with date and time uses the exact instant', () => {
+  it('add form: title with date and time uses the exact instant', async () => {
     const onAdd = vi.fn();
     const m = mount(<TaskList tasks={[]} now={NOW} onAdd={onAdd} onPatch={noop} onComplete={noop} onDismiss={noop} />);
     typeInto(m.container.querySelector('[aria-label="Task title"]') as HTMLInputElement, 'Meet advisor');
     typeInto(m.container.querySelector('[aria-label="Due date"]') as HTMLInputElement, '2026-10-02');
     typeInto(m.container.querySelector('[aria-label="Due time"]') as HTMLInputElement, '14:30');
 
-    submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
+    await submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
 
     const expectedDueAt = localDateTimeFromInputs('2026-10-02', '14:30');
     expect(onAdd).toHaveBeenCalledWith({
@@ -272,11 +276,11 @@ describe('TaskList', () => {
     m.unmount();
   });
 
-  it('add form: no date at all means no due date', () => {
+  it('add form: no date at all means no due date', async () => {
     const onAdd = vi.fn();
     const m = mount(<TaskList tasks={[]} now={NOW} onAdd={onAdd} onPatch={noop} onComplete={noop} onDismiss={noop} />);
     typeInto(m.container.querySelector('[aria-label="Task title"]') as HTMLInputElement, 'Someday task');
-    submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
+    await submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
     expect(onAdd).toHaveBeenCalledWith({
       title: 'Someday task',
       dueAt: null,
@@ -287,21 +291,21 @@ describe('TaskList', () => {
     m.unmount();
   });
 
-  it('add form: an empty estimate defaults to 60', () => {
+  it('add form: an empty estimate defaults to 60', async () => {
     const onAdd = vi.fn();
     const m = mount(<TaskList tasks={[]} now={NOW} onAdd={onAdd} onPatch={noop} onComplete={noop} onDismiss={noop} />);
     typeInto(m.container.querySelector('[aria-label="Task title"]') as HTMLInputElement, 'Task with default estimate');
-    submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
+    await submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
     expect(onAdd).toHaveBeenCalledWith(expect.objectContaining({ estimatedMinutes: 60 }));
     m.unmount();
   });
 
-  it('add form: a negative estimate shows an error and does not call onAdd', () => {
+  it('add form: a negative estimate shows an error and does not call onAdd', async () => {
     const onAdd = vi.fn();
     const m = mount(<TaskList tasks={[]} now={NOW} onAdd={onAdd} onPatch={noop} onComplete={noop} onDismiss={noop} />);
     typeInto(m.container.querySelector('[aria-label="Task title"]') as HTMLInputElement, 'Bad estimate task');
     typeInto(m.container.querySelector('[aria-label="New task estimate (minutes)"]') as HTMLInputElement, '-5');
-    submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
+    await submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
     expect(onAdd).not.toHaveBeenCalled();
     expect(m.container.textContent).toMatch(/estimate/i);
     m.unmount();
@@ -316,18 +320,57 @@ describe('TaskList', () => {
     await click(checkbox);
     expect(checkbox.checked).toBe(false);
 
-    submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
+    await submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
     expect(onAdd).toHaveBeenCalledWith(expect.objectContaining({ required: false }));
     m.unmount();
   });
 
-  it('add form: resets the title after a successful add', () => {
-    const onAdd = vi.fn();
+  it('add form: clears every field after a successful add', async () => {
+    const onAdd = vi.fn(async () => {});
     const m = mount(<TaskList tasks={[]} now={NOW} onAdd={onAdd} onPatch={noop} onComplete={noop} onDismiss={noop} />);
     const titleInput = m.container.querySelector('[aria-label="Task title"]') as HTMLInputElement;
+    const dateInput = m.container.querySelector('[aria-label="Due date"]') as HTMLInputElement;
+    const timeInput = m.container.querySelector('[aria-label="Due time"]') as HTMLInputElement;
+    const estimateInput = m.container.querySelector('[aria-label="New task estimate (minutes)"]') as HTMLInputElement;
     typeInto(titleInput, 'Task to reset');
-    submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
+    typeInto(dateInput, '2026-10-02');
+    typeInto(timeInput, '14:30');
+    typeInto(estimateInput, '45');
+
+    await submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
+
+    expect(onAdd).toHaveBeenCalledTimes(1);
     expect(titleInput.value).toBe('');
+    expect(dateInput.value).toBe('');
+    expect(timeInput.value).toBe('');
+    expect(estimateInput.value).toBe('');
+    m.unmount();
+  });
+
+  it('add form: a failed add keeps every field the user typed and reports it in the form', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onAdd = vi.fn().mockRejectedValue(new Error('storage full'));
+    const m = mount(<TaskList tasks={[]} now={NOW} onAdd={onAdd} onPatch={noop} onComplete={noop} onDismiss={noop} />);
+    const titleInput = m.container.querySelector('[aria-label="Task title"]') as HTMLInputElement;
+    const dateInput = m.container.querySelector('[aria-label="Due date"]') as HTMLInputElement;
+    const timeInput = m.container.querySelector('[aria-label="Due time"]') as HTMLInputElement;
+    const estimateInput = m.container.querySelector('[aria-label="New task estimate (minutes)"]') as HTMLInputElement;
+    typeInto(titleInput, 'Keep me');
+    typeInto(dateInput, '2026-10-02');
+    typeInto(timeInput, '14:30');
+    typeInto(estimateInput, '45');
+
+    await submit(m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement);
+
+    // Nothing was saved, so the only copy of this input is the form itself.
+    expect(titleInput.value).toBe('Keep me');
+    expect(dateInput.value).toBe('2026-10-02');
+    expect(timeInput.value).toBe('14:30');
+    expect(estimateInput.value).toBe('45');
+    expect(m.container.textContent).toContain("Couldn't add that task — your text is still here.");
+    expect(consoleError).toHaveBeenCalledWith('[triage] add task failed', expect.any(Error));
+
+    consoleError.mockRestore();
     m.unmount();
   });
 });
