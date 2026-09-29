@@ -86,7 +86,11 @@ describe('AppShell', () => {
     });
 
     expect(tab('Triage').getAttribute('data-state')).toBe('active');
-    expect(container.textContent).toContain('Triage arrives with F3');
+    expect(
+      ['Tasks', 'Calendar', 'Scratchpad'].every(
+        (label) => container.querySelector(`section[aria-label="${label}"]`) !== null,
+      ),
+    ).toBe(true);
   });
 
   it('runs the legacy notebook migration once for the whole app', () => {
