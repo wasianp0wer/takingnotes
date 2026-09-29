@@ -5,7 +5,7 @@ import type { TaskRecord } from '@/storage/types';
 import { endOfLocalDay, localDateTimeFromInputs } from '@/triage/dates';
 import { rankTasks } from '@/triage/priority';
 import { TaskList } from '@/triage/TaskList';
-import { click, mount, typeInto } from '@/triage/testing';
+import { click, mount, typeInto, waitFor } from '@/triage/testing';
 
 const NOW = new Date(2026, 8, 28, 9).getTime(); // Monday 28 Sep 2026, 09:00
 const HOUR = 3_600_000;
@@ -399,6 +399,33 @@ describe('TaskList', () => {
     expect(consoleError).toHaveBeenCalledWith('[triage] add task failed', expect.any(Error));
 
     consoleError.mockRestore();
+    m.unmount();
+  });
+
+  it('add form: guards against a double submit while onAdd is in flight', async () => {
+    let resolveAdd: () => void = () => {};
+    const onAdd = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveAdd = resolve;
+        }),
+    );
+    const m = mount(<TaskList tasks={[]} now={NOW} onAdd={onAdd} onPatch={noop} onComplete={noop} onDismiss={noop} />);
+    typeInto(m.container.querySelector('[aria-label="Task title"]') as HTMLInputElement, 'Double click me');
+
+    const form = m.container.querySelector('form[aria-label="Add task"]') as HTMLFormElement;
+    const submitButton = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+
+    await submit(form);
+    await waitFor(() => expect(submitButton.disabled).toBe(true));
+
+    // A second submit lands while the first write is still in flight.
+    await submit(form);
+    expect(onAdd).toHaveBeenCalledTimes(1);
+
+    resolveAdd();
+    await waitFor(() => expect(submitButton.disabled).toBe(false));
+
     m.unmount();
   });
 });

@@ -173,10 +173,12 @@ function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
   const [time, setTime] = useState('');
   const [estimate, setEstimate] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
   const requiredRef = useRef<HTMLInputElement>(null);
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (adding) return;
 
     const trimmedTitle = title.trim();
     if (trimmedTitle === '') {
@@ -212,6 +214,7 @@ function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
     const required = requiredRef.current?.checked ?? true;
 
     setError(null);
+    setAdding(true);
     try {
       await onAdd({
         title: trimmedTitle,
@@ -226,6 +229,8 @@ function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
       console.error('[triage] add task failed', err);
       setError("Couldn't add that task — your text is still here.");
       return;
+    } finally {
+      setAdding(false);
     }
 
     setTitle('');
@@ -274,7 +279,7 @@ function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
         onChange={(e) => setEstimate(e.target.value)}
         className="w-20"
       />
-      <Button type="submit" size="sm">
+      <Button type="submit" size="sm" disabled={adding}>
         Add
       </Button>
       {error ? <p className="w-full text-xs text-destructive">{error}</p> : null}
