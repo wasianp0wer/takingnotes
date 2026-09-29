@@ -1,12 +1,22 @@
+import { useEffect } from 'react';
+
+import { useCaptureEngine } from '@/capture/CaptureContext';
+import { attachPageTurnCapture } from '@/capture/pageTurnCapture';
+import { useHuionDevice } from '@/device/TabletProvider';
+
 /**
- * Phase 0 placeholder for F4 (docs/architecture.md §3.5). Mounted once by
- * `AppShell`, so the wiring exists before the behaviour does.
+ * F4 (docs/architecture.md §3.5). Mounted once by `AppShell`. While the pad is
+ * connected and streaming it keeps the controller's capture running (page-turn
+ * polling, liveness, reconnect) and forwards every page-turn event to
+ * `engine.newPage('device-turn')`. All the logic lives in
+ * `attachPageTurnCapture`; this only ties it to the component's lifetime.
  *
- * F4 fills this in: while the pad is connected it keeps the controller's
- * capture running (`startCapture`/`stopCapture`: page-turn polling, liveness,
- * reconnect) and forwards every `controller.subscribePageTurn` event to
- * `engine.newPage('device-turn')`.
+ * Under StrictMode's double effect a connected pad sees startCapture,
+ * stopCapture, startCapture - never two live subscriptions.
  */
 export function usePageTurnCapture(): void {
-  // No-op until F4.
+  const { controller } = useHuionDevice();
+  const engine = useCaptureEngine();
+
+  useEffect(() => attachPageTurnCapture({ controller, engine }), [controller, engine]);
 }
