@@ -16,6 +16,7 @@ vi.mock('@/storage/recordings', async (importOriginal) => {
   return {
     ...actual,
     listRecordings: vi.fn(actual.listRecordings),
+    deleteRecording: vi.fn(actual.deleteRecording),
   };
 });
 
@@ -291,6 +292,26 @@ describe('RecordingsView', () => {
     expect(container.textContent).toContain('No recordings yet');
     const { getRecording } = await import('@/storage/recordings');
     expect(await getRecording(recording.id)).toBeUndefined();
+  });
+
+  it('keeps the recording and reports the error when the delete fails', async () => {
+    await seed({ title: 'KeepMe' });
+    const { deleteRecording } = await import('@/storage/recordings');
+    vi.mocked(deleteRecording).mockRejectedValueOnce(new Error('Database is closed'));
+
+    const queue = createFakeQueue();
+    render(queue);
+    await flushAll();
+
+    const deleteButton = container.querySelector('[aria-label="Delete recording"]') as HTMLButtonElement;
+    await click(deleteButton);
+    await flushAll();
+
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain('Database is closed');
+    expect(container.textContent).toContain('KeepMe');
+    expect(container.textContent).not.toContain('No recordings yet');
+    vi.mocked(deleteRecording).mockClear();
   });
 
   it('reloads the list when the queue reports a change', async () => {

@@ -133,13 +133,29 @@ export function createWhisperTranscriber(deps: { createWorker: () => WorkerLike 
           if (!pending.delete(id)) {
             return;
           }
-          active.postMessage({ type: 'cancel', id }, []);
+          try {
+            active.postMessage({ type: 'cancel', id }, []);
+          } catch (error) {
+            // A worker the browser already killed throws here. The caller asked to
+            // abort, so it still gets its AbortError: letting this escape would
+            // leave the call unsettled for good.
+            console.error('Could not cancel the Whisper job in the worker:', error);
+          }
           settle(() => reject(abortError()));
         };
         signal.addEventListener('abort', onAbort, { once: true });
       }
 
-      active.postMessage({ type: 'transcribe', id, model, pcm: posted }, [posted.buffer as ArrayBuffer]);
+      try {
+        active.postMessage({ type: 'transcribe', id, model, pcm: posted }, [posted.buffer as ArrayBuffer]);
+      } catch (error) {
+        // A synchronous throw - unclonable pcm, an already-detached buffer, a worker
+        // being torn down - means the worker never saw this id and will never answer
+        // it. Forget the call so nothing is left waiting on a reply.
+        if (pending.delete(id)) {
+          settle(() => reject(error));
+        }
+      }
     });
   }
 

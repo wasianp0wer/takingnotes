@@ -11,11 +11,23 @@ class FakeWorker implements WorkerLike {
   terminated = false;
   /** When true, `postMessage` really detaches the posted buffer, as a real worker hand-off does. */
   detachOnPost = false;
+  /** When set, the next `postMessage` throws it synchronously and posts nothing. */
+  throwOnNextPost: unknown = null;
+  /** When set, every `cancel` post throws it, as posting to a torn-down worker does. */
+  throwOnCancel: unknown = null;
 
   private messageListeners: ((e: MessageEvent<WhisperResponse>) => void)[] = [];
   private errorListeners: ((e: ErrorEvent) => void)[] = [];
 
   postMessage(message: WhisperRequest, transfer: Transferable[]): void {
+    if (this.throwOnNextPost !== null) {
+      const error = this.throwOnNextPost;
+      this.throwOnNextPost = null;
+      throw error;
+    }
+    if (this.throwOnCancel !== null && message.type === 'cancel') {
+      throw this.throwOnCancel;
+    }
     this.posted.push({ message, transfer });
     if (this.detachOnPost && message.type === 'transcribe') {
       const buffer = message.pcm.buffer as ArrayBuffer;
@@ -60,12 +72,15 @@ class FakeWorker implements WorkerLike {
 let workers: FakeWorker[] = [];
 /** Applied to every worker the factory makes, so the very first post can already detach. */
 let detachOnPost = false;
+/** Applied to the worker the factory makes next, so its very first post can already throw. */
+let throwOnFirstPost: unknown = null;
 
 function makeTranscriber() {
   return createWhisperTranscriber({
     createWorker: () => {
       const worker = new FakeWorker();
       worker.detachOnPost = detachOnPost;
+      worker.throwOnNextPost = throwOnFirstPost;
       workers.push(worker);
       return worker;
     },
@@ -75,6 +90,7 @@ function makeTranscriber() {
 beforeEach(() => {
   workers = [];
   detachOnPost = false;
+  throwOnFirstPost = null;
 });
 
 describe('createWhisperTranscriber', () => {
@@ -211,6 +227,64 @@ describe('createWhisperTranscriber', () => {
       }),
     ).rejects.toMatchObject({ name: 'AbortError' });
     expect(workers.flatMap((worker) => worker.posted)).toEqual([]);
+  });
+
+  it('rejects and stays usable when the post to the worker throws', async () => {
+    // A worker being torn down, or pcm that cannot be cloned, makes `postMessage`
+    // throw synchronously: the worker never sees the id, so nothing will ever
+    // answer it and the call must reject instead of waiting for a reply.
+    throwOnFirstPost = new DOMException('Could not be cloned', 'DataCloneError');
+    const transcriber = makeTranscriber();
+
+    await expect(
+      transcriber.transcribe(new Float32Array(16_000), { model: 'Xenova/whisper-base.en' }),
+    ).rejects.toMatchObject({ name: 'DataCloneError' });
+
+    // The failed call left nothing registered, so the transcriber still works.
+    const next = transcriber.transcribe(new Float32Array(16_000), { model: 'Xenova/whisper-base.en' });
+    expect(workers).toHaveLength(1);
+    const request = workers[0].transcribeRequests()[0];
+    workers[0].emit({ type: 'result', id: request.id, text: 'ok', chunks: [] });
+
+    expect((await next).text).toBe('ok');
+  });
+
+  it('drops the abort listener when the post to the worker throws', async () => {
+    throwOnFirstPost = new Error('worker is gone');
+    const transcriber = makeTranscriber();
+    const controller = new AbortController();
+
+    await expect(
+      transcriber.transcribe(new Float32Array(16_000), {
+        model: 'Xenova/whisper-base.en',
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow('worker is gone');
+
+    // A later abort of the same signal must not post a `cancel` for a call that
+    // was never registered, nor throw.
+    expect(() => controller.abort()).not.toThrow();
+    expect(workers[0].posted).toEqual([]);
+  });
+
+  it('still rejects with AbortError when the cancel post throws', async () => {
+    // The `cancel` post is the one that runs against a worker the browser may
+    // already have killed. If its throw escaped, the abort would never settle the
+    // call and the caller would wait for a reply that can never come.
+    const transcriber = makeTranscriber();
+    const controller = new AbortController();
+    const promise = transcriber.transcribe(new Float32Array(16_000), {
+      model: 'Xenova/whisper-base.en',
+      signal: controller.signal,
+    });
+    workers[0].throwOnCancel = new Error('worker is gone');
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    controller.abort();
+
+    await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
   });
 
   it('rejects pending calls on a worker crash and replaces the worker', async () => {

@@ -25,6 +25,7 @@ export function RecordingDetail({
   const audioRef = useRef<HTMLAudioElement>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioMissing, setAudioMissing] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const queueState = useSyncExternalStore(queue.subscribe, queue.getState);
 
   useEffect(() => {
@@ -64,7 +65,15 @@ export function RecordingDetail({
 
   async function handleDelete() {
     if (!window.confirm('Delete this recording?')) return;
-    await deleteRecording(recording.id);
+    setDeleteError(null);
+    try {
+      await deleteRecording(recording.id);
+    } catch (error) {
+      // The row is still there, so say so rather than leaving the click looking
+      // like it did nothing (and the rejection unhandled).
+      setDeleteError(error instanceof Error ? error.message : String(error));
+      return;
+    }
     onDelete(recording.id);
   }
 
@@ -101,6 +110,12 @@ export function RecordingDetail({
           <Trash2 />
         </Button>
       </div>
+
+      {deleteError && (
+        <p role="alert" className="text-sm text-destructive">
+          Could not delete this recording: {deleteError}
+        </p>
+      )}
 
       {audioMissing ? (
         <p className="text-sm text-muted-foreground">Audio is missing</p>

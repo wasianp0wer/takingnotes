@@ -24,6 +24,13 @@ export interface TranscriptionQueueDeps {
   decode: (audio: Blob) => Promise<Float32Array>;
   getModel: () => Promise<string>;
   now?: () => number;
+  /**
+   * How long a job may report no progress at all before it is abandoned; see
+   * `DEFAULT_STALL_TIMEOUT_MS`. Tests pass a stand-in timer pair instead of waiting.
+   */
+  stallTimeoutMs?: number;
+  setTimer?: (fn: () => void, ms: number) => number;
+  clearTimer?: (handle: number) => void;
 }
 
 export interface TranscriptionQueue {
@@ -42,6 +49,24 @@ export interface TranscriptionQueue {
   /** Resolves when nothing is queued or running. For tests and shutdown. */
   whenIdle(): Promise<void>;
 }
+
+/**
+ * A browser that kills the Whisper worker (OOM on a long recording, spec F2-A11)
+ * fires no `error` event, so the only sign of life a job has is its progress
+ * reports. This is the inactivity window after which a job is abandoned so the
+ * serial loop can move on instead of waiting for a reply that will never come.
+ *
+ * It has to be longer than the longest silence a *healthy* job can have. Model
+ * downloads report progress every few hundred kilobytes, but the transcribe pass
+ * itself reports nothing at all between its `transcribing` 0 and its result, so
+ * this window has to cover a whole transcription: on the wasm fallback that is
+ * several minutes for a long recording. Fifteen minutes is generous for that and
+ * still bounds a wedge that used to need a page reload.
+ */
+const DEFAULT_STALL_TIMEOUT_MS = 15 * 60 * 1000;
+
+const STALL_MESSAGE =
+  'Transcription stalled: the transcriber stopped responding, so it was cancelled. Try again.';
 
 const IDLE: TranscriptionQueueState = {
   activeId: null,
@@ -66,6 +91,10 @@ function sameState(a: TranscriptionQueueState, b: TranscriptionQueueState): bool
 
 export function createTranscriptionQueue(deps: TranscriptionQueueDeps): TranscriptionQueue {
   const now = deps.now ?? Date.now;
+  const stallTimeoutMs = deps.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+  // `window.setTimeout`, not the bare global, so the handle is a number here too.
+  const setTimer = deps.setTimer ?? ((fn, ms) => window.setTimeout(fn, ms));
+  const clearTimer = deps.clearTimer ?? ((handle) => window.clearTimeout(handle));
   const queued: string[] = [];
   /**
    * Ids accepted by `enqueue` whose `pending` write has not landed yet. They are
@@ -175,11 +204,37 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       return;
     }
 
+    // Watchdog: a worker killed without an `error` event would otherwise leave this
+    // job - and with it the whole serial loop - waiting for a reply for good. Every
+    // progress report is a sign of life and starts the window again, so a slow but
+    // progressing model download is never cancelled.
+    const controller = new AbortController();
+    let timer: number | null = null;
+    let stalled = false;
+    const disarm = (): void => {
+      if (timer !== null) {
+        clearTimer(timer);
+        timer = null;
+      }
+    };
+    const arm = (): void => {
+      disarm();
+      timer = setTimer(() => {
+        timer = null;
+        stalled = true;
+        controller.abort();
+      }, stallTimeoutMs);
+    };
+
+    arm();
     try {
       const result = await deps.transcriber.transcribe(pcm, {
         model,
+        signal: controller.signal,
         onProgress: (p, reported) => {
-          if (finished || activeId !== id) return;
+          if (finished) return;
+          arm();
+          if (activeId !== id) return;
           progress = p;
           stage = reported;
           emit();
@@ -197,7 +252,10 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       });
     } catch (error) {
       finished = true;
-      await fail(error);
+      await fail(stalled ? new Error(STALL_MESSAGE) : error);
+    } finally {
+      // Every exit path: a watchdog left armed here would abort a later job.
+      disarm();
     }
   }
 

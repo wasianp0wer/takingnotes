@@ -92,14 +92,73 @@ function makeQueue(
     transcribe?: TranscribeBody;
     decode?: (input: Blob) => Promise<Float32Array>;
     getModel?: () => Promise<string>;
+    stallTimeoutMs?: number;
+    setTimer?: (fn: () => void, ms: number) => number;
+    clearTimer?: (handle: number) => void;
   } = {},
 ) {
   const transcribe = vi.fn(overrides.transcribe ?? defaultTranscribe);
   const decode = vi.fn(overrides.decode ?? (async () => new Float32Array(16)));
   const getModel = vi.fn(overrides.getModel ?? (async () => MODEL));
   const transcriber: AudioTranscriber = { transcribe };
-  const queue = createTranscriptionQueue({ transcriber, decode, getModel, now: () => NOW });
+  const queue = createTranscriptionQueue({
+    transcriber,
+    decode,
+    getModel,
+    now: () => NOW,
+    stallTimeoutMs: overrides.stallTimeoutMs,
+    setTimer: overrides.setTimer,
+    clearTimer: overrides.clearTimer,
+  });
   return { queue, transcribe, decode, getModel };
+}
+
+/**
+ * Stand-in timers, so the stall watchdog is driven by the test rather than by a
+ * real clock: `armed()` lists the handles still waiting and `fire()` runs them.
+ */
+function manualTimers() {
+  const waiting = new Map<number, () => void>();
+  const delays: number[] = [];
+  let nextHandle = 1;
+  return {
+    delays,
+    deps: {
+      setTimer: (fn: () => void, ms: number) => {
+        const handle = nextHandle;
+        nextHandle += 1;
+        delays.push(ms);
+        waiting.set(handle, fn);
+        return handle;
+      },
+      clearTimer: (handle: number) => {
+        waiting.delete(handle);
+      },
+    },
+    armed: (): number[] => [...waiting.keys()],
+    fire: (): void => {
+      const callbacks = [...waiting.values()];
+      waiting.clear();
+      for (const fn of callbacks) fn();
+    },
+  };
+}
+
+/**
+ * A transcriber that answers nothing and reports no progress - a worker the
+ * browser killed without an `error` event (spec F2-A11) - but honours `signal`
+ * the way `createWhisperTranscriber` does; the abort path itself is tested there.
+ */
+function silentTranscribe(onCalled: () => void): TranscribeBody {
+  return (_pcm, opts) =>
+    new Promise<AudioTranscriptionResult>((_resolve, reject) => {
+      opts.signal?.addEventListener(
+        'abort',
+        () => reject(new DOMException('Transcription aborted', 'AbortError')),
+        { once: true },
+      );
+      onCalled();
+    });
 }
 
 /**
@@ -176,6 +235,65 @@ describe('transcription queue', () => {
       error: 'model exploded',
       updatedAt: NOW,
     });
+  });
+
+  it('fails a stalled transcription and carries on with the next recording', async () => {
+    const stalled = await makeRecording(1);
+    const next = await makeRecording(2);
+    const timers = manualTimers();
+    let calls = 0;
+    const { queue, transcribe } = makeQueue({
+      ...timers.deps,
+      stallTimeoutMs: 25,
+      transcribe: (pcm, opts) => {
+        calls += 1;
+        if (calls > 1) return defaultTranscribe(pcm, opts);
+        // The job's watchdog is armed by now; fire it as a real timer would.
+        return silentTranscribe(() => timers.fire())(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(stalled);
+    await queue.enqueue(next);
+    await queue.whenIdle();
+
+    const record = (await getRecording(stalled))!.transcript!;
+    expect(record.status).toBe('failed');
+    expect(record.error).toContain('stalled');
+    expect(await statusOf(next)).toBe('done');
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    // The injected window is the one that was armed, not the production default.
+    expect(timers.delays.every((ms) => ms === 25)).toBe(true);
+    // Nothing is left armed to fire against a later job.
+    expect(timers.armed()).toEqual([]);
+  });
+
+  it('re-arms the stall watchdog on every progress report', async () => {
+    const id = await makeRecording();
+    const timers = manualTimers();
+    let armedDuringJob: number[] = [];
+    let armedAtStart: number | undefined;
+    const { queue } = makeQueue({
+      ...timers.deps,
+      transcribe: async (pcm, opts) => {
+        armedAtStart = timers.armed()[0];
+        opts.onProgress?.(0.1, 'loading');
+        opts.onProgress?.(0.2, 'loading');
+        armedDuringJob = timers.armed();
+        return defaultTranscribe(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(armedAtStart).toBeDefined();
+    // One watchdog at a time, and the one from before the reports is gone: a slow
+    // but steadily progressing model download can never time out.
+    expect(armedDuringJob).toHaveLength(1);
+    expect(armedDuringJob[0]).not.toBe(armedAtStart);
+    expect(await statusOf(id)).toBe('done');
+    expect(timers.armed()).toEqual([]);
   });
 
   it('records a decode rejection as failed', async () => {
