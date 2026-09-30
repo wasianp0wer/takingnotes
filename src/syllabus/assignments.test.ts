@@ -218,10 +218,69 @@ describe('dedupeAssignments', () => {
 
   it('keeps two same-titled items with different dates', () => {
     const rows = dedupeAssignments([
-      { title: 'Response paper', dueAt: 1, rawDate: 'Oct 15', estimatedMinutes: null, notes: '' },
-      { title: 'Response paper', dueAt: 2, rawDate: 'Nov 15', estimatedMinutes: null, notes: '' },
+      {
+        title: 'Response paper',
+        dueAt: local(2026, 10, 15),
+        rawDate: 'Oct 15',
+        estimatedMinutes: null,
+        notes: '',
+      },
+      {
+        title: 'Response paper',
+        dueAt: local(2026, 11, 15),
+        rawDate: 'Nov 15',
+        estimatedMinutes: null,
+        notes: '',
+      },
     ]);
     expect(rows).toHaveLength(2);
+  });
+
+  it('collapses one assignment that only one chunk gave a time for', () => {
+    // `sourceRefFor` keys on the local DAY, so these are one event whatever this
+    // function does. Dedupe agrees with it, so the review screen shows one row
+    // rather than hiding the collapse until the write (A26).
+    const rows = dedupeAssignments([
+      {
+        title: 'Essay 1',
+        dueAt: new Date(2026, 9, 15).getTime(),
+        rawDate: 'Oct 15',
+        estimatedMinutes: null,
+        notes: '',
+      },
+      {
+        title: 'Essay 1',
+        dueAt: new Date(2026, 9, 15, 23, 59).getTime(),
+        rawDate: 'Oct 15 11:59pm',
+        estimatedMinutes: 180,
+        notes: '',
+      },
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].rawDate).toBe('Oct 15');
+    expect(rows[0].estimatedMinutes).toBe(180);
+  });
+
+  it('collapses two same-titled items on one day at different times', () => {
+    // Deliberate: `sourceRefFor` would give both the same identity, so they were
+    // always going to be one event. Surfacing that here is the honest outcome.
+    const rows = dedupeAssignments([
+      {
+        title: 'Quiz',
+        dueAt: new Date(2026, 9, 15, 9).getTime(),
+        rawDate: 'Oct 15 9am',
+        estimatedMinutes: null,
+        notes: '',
+      },
+      {
+        title: 'Quiz',
+        dueAt: new Date(2026, 9, 15, 17).getTime(),
+        rawDate: 'Oct 15 5pm',
+        estimatedMinutes: null,
+        notes: '',
+      },
+    ]);
+    expect(rows).toHaveLength(1);
   });
 
   it('separates two undated items only by their raw date text', () => {

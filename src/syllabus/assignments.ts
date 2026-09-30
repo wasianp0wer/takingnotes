@@ -124,15 +124,29 @@ export function parseAssignments(value: unknown, ctx: ResolveContext): Extracted
   return rows;
 }
 
+const pad = (n: number): string => String(n).padStart(2, '0');
+
 /**
- * The identity two chunks must agree on. A resolved `dueAt` already fixes the
- * day, so "Oct 15", "October 15" and "10/15" are one assignment; only an
- * unresolved date leaves `rawDate` as the discriminator.
+ * The local calendar day of an instant - the same notion of identity that
+ * `sourceRefFor` uses (A26), deliberately. Two modules that decide "is this the
+ * same assignment?" must not disagree: keying on the instant here would leave
+ * two review rows for one assignment that the write then collapses into one
+ * event. Duplicated rather than imported because `sourceRef` imports this module.
+ */
+const localDayKey = (at: number): string => {
+  const d = new Date(at);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+
+/**
+ * The identity two chunks must agree on. A resolved date fixes the day, so
+ * "Oct 15", "October 15", "10/15" and "Oct 15 11:59pm" are one assignment; only
+ * an unresolved date leaves `rawDate` as the discriminator.
  */
 const dedupeKey = (row: ExtractedAssignment): string =>
   row.dueAt === null
     ? `${normalizeTitle(row.title)}|raw:${normalizeTitle(row.rawDate)}`
-    : `${normalizeTitle(row.title)}|at:${row.dueAt}`;
+    : `${normalizeTitle(row.title)}|day:${localDayKey(row.dueAt)}`;
 
 /**
  * Chunks overlap, so the same assignment can be reported twice. The first row
