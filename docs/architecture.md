@@ -184,7 +184,7 @@ export interface TaskRecord {
 The scratchpad is a single setting (`triage.scratchpad`, a string), not a
 store.
 
-### 2.3 IndexedDB schema (DB `takingnotes`, version 2)
+### 2.3 IndexedDB schema (DB `takingnotes`, version 2; §6.2 raises it to 3)
 
 The v1 upgrade block is frozen. v2 adds, inside `if (oldVersion < 2)`:
 
@@ -482,6 +482,32 @@ No data migration: `gapAnalysis` absent means never analyzed.
 `createGaps(records)` (one transaction for a batch). `pages.ts` gains
 `setPageGapAnalysis(id, meta)`.
 
+As shipped:
+
+```ts
+export interface CreateGapInput {           // every GapSuggestionRecord field except id,
+  /* …noteId, pageId, recordingId, fromMs, toMs, text, kind, sourceQuote, model, promptVersion… */
+  status?: GapStatus;                       // defaults to 'proposed'
+  summarized?: boolean;                     // defaults to false
+  createdAt?: number;                       // both default to now
+  updatedAt?: number;
+}
+
+createGap(input: CreateGapInput): Promise<GapSuggestionRecord>
+createGaps(inputs: CreateGapInput[]): Promise<GapSuggestionRecord[]>   // [] for an empty batch
+getGap(id): Promise<GapSuggestionRecord | undefined>
+updateGap(id, patch): Promise<GapSuggestionRecord>                     // bumps updatedAt itself
+listGapsByNote(noteId) / listGapsByPage(pageId): Promise<GapSuggestionRecord[]>
+deleteGapsByPage(pageId, status?): Promise<number>                     // how many went
+setPageGapAnalysis(id, meta: GapAnalysisMeta | null): Promise<PageRecord>
+```
+
+Conventions, matching §2.4: `updateGap` maintains `updatedAt` (a caller may pin
+it in the patch), listings are oldest first with `id` breaking a `createdAt` tie
+(a batch shares one timestamp and index order is by random key), and
+`deleteGapsByPage` walks the `by-page` index with a cursor so the read and the
+deletes share one transaction.
+
 ### 6.4 Shared Ollama text client — `src/llm/`
 
 Phase 1's `src/transcription/ollama.ts` speaks to Ollama for vision. P1 and P2
@@ -520,6 +546,30 @@ export function createOllamaTextGenerator(opts: {
 `validate` is mandatory: a model's JSON is untrusted input, so every caller
 states the shape it expects and bad rows are dropped or the call fails, rather
 than being cast.
+
+As shipped, in two files:
+
+- `src/llm/ollamaClient.ts` - `createOllamaClient({ baseUrl, fetchImpl?,
+  timeoutMs?, label? })` returning `{ baseUrl, generate(request, signal?),
+  throwIfAborted(signal) }`, plus `FetchLike`, `DEFAULT_TIMEOUT_MS`,
+  `DegenerateOutputError`, `isDegenerateOutput`, `stripCodeFence` and
+  `listOllamaModels`. `generate` adds `stream: false` and `think: false` (with
+  the one retry without `think` for models that reject it) and throws
+  `Ollama <status>: <error>`. `label` names the operation in the timeout and
+  abort messages the user reads, which is how transcription still says
+  "Transcription timed out after 180s" while text calls say "Generation".
+- `src/llm/ollamaText.ts` - `createOllamaTextGenerator`, `TextGenerator` and
+  `DEFAULT_TEXT_NUM_PREDICT` (2000). Before spending a call on a repair,
+  `generateJson` retries the parse on the outermost `[…]`/`{…}` slice, which
+  costs nothing and handles a model that wrapped its JSON in prose. A `validate`
+  failure is **not** repaired: the JSON parsed, so the shape was wrong rather
+  than the syntax, and the caller's own `validate` already decided whether to
+  drop bad rows or throw.
+
+`src/transcription/ollama.ts` keeps every export it had, re-exporting the four
+that moved, so `createOllamaTranscriber`, `listOllamaModels`, `FetchLike`,
+`DEFAULT_TIMEOUT_MS`, `DEFAULT_NUM_PREDICT`, `DegenerateOutputError` and
+`isDegenerateOutput` all still come from there.
 
 ### 6.5 Module contracts
 
@@ -579,6 +629,16 @@ export function sourceRefFor(importKey: string, a: ExtractedAssignment): string;
 export function importAssignments(rows: ConfirmedAssignment[], importKey: string): Promise<{ created: number; updated: number }>;
 ```
 
+`pdfjs-dist` and its wiring ship with the foundations, in
+`src/syllabus/pdfjs.ts`: `loadPdfjs()` (dynamic import, cached, with
+`GlobalWorkerOptions.workerSrc` already pointed at the locally emitted worker),
+`PDF_WORKER_URL`, and `pdfSupportProbe()`, a trivial open-one-page check.
+`extractPdfText` builds on `loadPdfjs()` and must not import `pdfjs-dist`
+statically - that would move ~1 MB into the entry chunk - nor set `workerSrc`
+itself. The worker is emitted by Vite from a `?url` import and resolved against
+`import.meta.url`, so it is always same-origin (A29) and no `vite.config.ts`
+change is needed.
+
 **P3 sessions — `src/capture/`**
 
 `CaptureEngine` gains two methods; everything else keeps its current
@@ -597,6 +657,13 @@ depend on the recorder, so `SessionControls` calls
 `engine.startSession()` then the recorder, and reports an audio failure
 without unwinding the session.
 
+Both methods are on the interface, and `src/capture/engine.ts` carries the thin
+delegation that satisfies it: `startSession` opens a note (Phase 1's `startNote`
+already creates exactly one session per note) and reports both ids;
+`endSession` closes the note, which already ends its session. Correct for
+today's shape and no behaviour change - P3 replaces it with the real flow, and
+`src/capture/pageTurnTestEngine.ts` (the F4 stub) implements both too.
+
 ### 6.6 Settings additions
 
 | Key | Type | Default | Owner |
@@ -611,7 +678,7 @@ without unwinding the session.
 |------|-------|
 | `src/storage/**`, `src/llm/**`, `src/capture/types.ts`, placeholders | Phase 2 foundations |
 | `src/gaps/**`, `src/notes/GapPanel.tsx` | P1 |
-| `src/syllabus/**` | P2 |
+| `src/syllabus/**` except `pdfjs.ts` (foundations) | P2 |
 | `src/capture/engine.ts`, `src/capture/SessionControls.tsx` | P3 |
 | Everything from Phase 1 not listed | not edited |
 
@@ -621,6 +688,21 @@ Foundations creates placeholders with their final export names:
 `src/syllabus/SyllabusImport.tsx` (mounted in the Triage view, since it feeds
 the calendar). Each feature replaces its own placeholder's body and keeps the
 name, so no feature edits another's mount point.
+
+As shipped, each placeholder renders its block under a stable `aria-label` -
+`Gaps`, `Session`, `Syllabus` - and the three host tests assert that label, so a
+feature that dropped its own mount would be caught. The labels are part of the
+contract; keep them.
+
+- `GapPanel({ noteId, pageId }: GapPanelProps)`. `NotesView` passes
+  `viewedPage.noteId` and `viewedPage.id` and keys it per page, so the panel
+  never shows one page's suggestions against another.
+- `SessionControls()` and `SyllabusImport()` take no props; they read the
+  capture engine and storage themselves.
+- `SyllabusImport`'s placeholder carries one real affordance, a "Check PDF
+  support" button that runs `pdfSupportProbe()`. That is what keeps pdf.js
+  reachable from the entry, and so genuinely built, before P2 exists; P2 is free
+  to drop it once its own PDF path is in.
 
 ## 7. Recorded defect (not fixed in Phase 2)
 
