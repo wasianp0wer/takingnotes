@@ -175,7 +175,7 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
         // running and keeps capturing handwriting.
         if (mounted.current) {
           setAudioError(
-            'The microphone was already recording for an earlier session, so this session has no audio of its own.',
+            'Audio was already recording when this session started, so this session has no recording of its own.',
           );
         }
       }

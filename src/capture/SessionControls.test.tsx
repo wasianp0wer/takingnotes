@@ -270,7 +270,7 @@ describe('SessionPanel', () => {
     await settle();
 
     expect(panel().textContent).toContain(
-      'The microphone was already recording for an earlier session, so this session has no audio of its own.',
+      'Audio was already recording when this session started, so this session has no recording of its own.',
     );
     // The session is nevertheless open, not unwound (A28).
     expect(button('End session')).toBeTruthy();
