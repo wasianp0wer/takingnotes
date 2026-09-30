@@ -68,8 +68,8 @@ asking. Each can be revisited; the ones most worth a second look are marked ⚑.
 ## Phase 2
 
 - A20 Phase 2 is built on branch `phase2`, cut from `notes-app` (the merged
-  Phase 1 result). Feature branches `phase2/p1-gaps`, `phase2/p2-syllabus`,
-  `phase2/p3-sessions` merge back into it in the order P3 → P1 → P2.
+  Phase 1 result). Feature branches `p1-gaps`, `p2-syllabus`, `p3-sessions`
+  (flat names: git cannot nest a branch under the existing `phase2` ref) merge back into it in the order P3 → P1 → P2.
 - A21 ⚑ Gap analysis runs against the *first* recording linked to the note.
   A session has one recording (J4), so this is unambiguous today; a
   multi-recording session would need a choice.
