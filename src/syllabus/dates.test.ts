@@ -55,6 +55,23 @@ describe('resolveDueDate', () => {
     expect(resolveDueDate('13/40', TERM, NOW)).toBeNull();
     expect(resolveDueDate('2026-02-30', TERM, NOW)).toBeNull();
   });
+
+  // Regression: day-first month names used to resolve to the wrong day
+  // because month-first's unbounded day group ate the leading digits of a
+  // following 4-digit year (fix round 1, Critical 1).
+  it('reads a day-first date with a year, not the wrong day the year leaked into', () => {
+    expect(resolveDueDate('15 October 2026', TERM, NOW)).toBe(local(2026, 10, 15));
+    expect(resolveDueDate('15 Oct 26', TERM, NOW)).toBe(local(2026, 10, 15));
+  });
+
+  // Regression: `.` used to be accepted as a numeric date separator, so
+  // ordinary prose with a decimal number resolved to a confident, wrong date
+  // (fix round 1, Critical 3). `/` stays supported (P2-A1).
+  it('does not read a decimal-separated number as a date', () => {
+    expect(resolveDueDate('Reading: section 3.4', TERM, NOW)).toBeNull();
+    expect(resolveDueDate('Essay 2.1 due', TERM, NOW)).toBeNull();
+    expect(resolveDueDate('p. 10.15 of the reader', TERM, NOW)).toBeNull();
+  });
 });
 
 describe('parseSyllabusDate', () => {
@@ -91,6 +108,24 @@ describe('parseSyllabusDate', () => {
     expect(parseSyllabusDate('Oct 15 at 25:99', TERM, NOW)).toEqual({
       at: local(2026, 10, 15),
       hasTime: false,
+    });
+  });
+
+  // Regression: a time right after a date used to have its own digits read
+  // back as the date's two-digit year - the commonest deadline shape on a
+  // real syllabus ("Oct 15, 11:59pm" resolved as 15 Oct *2011*) (fix round 1,
+  // Critical 2).
+  it('does not read a clock time as the date\'s year', () => {
+    expect(parseSyllabusDate('Oct 15, 11:59pm', TERM, NOW)).toEqual({
+      at: local(2026, 10, 15, 23, 59),
+      hasTime: true,
+    });
+  });
+
+  it('keeps scanning past an impossible time to find a real one later in the text', () => {
+    expect(parseSyllabusDate('Oct 15 at 25:99 or 17:00', TERM, NOW)).toEqual({
+      at: local(2026, 10, 15, 17, 0),
+      hasTime: true,
     });
   });
 });

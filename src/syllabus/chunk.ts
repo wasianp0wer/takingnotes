@@ -18,7 +18,9 @@ export interface ChunkOptions {
 
 export function chunkSyllabusText(text: string, opts?: ChunkOptions): string[] {
   const budget = opts?.budget ?? SYLLABUS_DIRECT_CHAR_BUDGET;
-  const chunkChars = opts?.chunkChars ?? SYLLABUS_CHUNK_CHARS;
+  // A floor of 1: chunkChars <= 0 would make every raw chunk empty, and the
+  // empty-chunk filter below would then silently drop the whole syllabus.
+  const chunkChars = Math.max(1, opts?.chunkChars ?? SYLLABUS_CHUNK_CHARS);
   const overlap = Math.min(opts?.overlap ?? SYLLABUS_CHUNK_OVERLAP, Math.floor(chunkChars / 2));
 
   if (text.trim() === '') return [];
@@ -37,12 +39,21 @@ export function chunkSyllabusText(text: string, opts?: ChunkOptions): string[] {
     chunks.push(text.slice(start, end));
     if (end >= text.length) break;
 
-    // Step back by the overlap, then forward to the next line start so the next
-    // chunk begins on a whole line.
-    let next = Math.max(start + 1, end - overlap);
-    const lineStart = text.indexOf('\n', next);
-    if (lineStart !== -1 && lineStart < end) next = lineStart + 1;
-    start = next;
+    // Step back by roughly the overlap, snapped BACKWARDS to a line start, so
+    // the next chunk begins on a whole line. Searching backwards matters
+    // (fix I4): searching forward from `end - overlap` could land back on the
+    // very newline `end` had just snapped to, collapsing the overlap to zero
+    // at every boundary whenever lines are longer than the overlap - exactly
+    // the case the overlap exists to protect (an item straddling a boundary
+    // would then be seen whole by neither chunk). A line start that lies too
+    // far back - one very long line - is ignored in favor of a plain
+    // character step, both to keep the overlap a real size and so the walk
+    // cannot stall advancing by a single character per iteration.
+    const target = end - overlap;
+    const lineStart = text.lastIndexOf('\n', target);
+    let next = lineStart + 1;
+    if (lineStart === -1 || next <= start || end - next > overlap * 2) next = target;
+    start = Math.max(next, start + 1);
   }
   return chunks.filter((chunk) => chunk.trim() !== '');
 }

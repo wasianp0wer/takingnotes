@@ -52,6 +52,26 @@ describe('chunkSyllabusText', () => {
     expect(second.startsWith(tail) || second.includes(tail)).toBe(true);
   });
 
+  // Regression: when a chunk's end snapped forward to a line start, stepping
+  // back by the overlap and then searching FORWARD for the next line start
+  // used to land back on that same newline, collapsing the overlap to zero at
+  // every boundary - invisible on short lines (many newlines within one
+  // overlap's width), but total on lines longer than the overlap, which is
+  // the common case for prose paragraphs (fix round 1, Important 4).
+  it('overlaps consecutive chunks by a real amount even when lines are longer than the overlap', () => {
+    const text = lines(20, 800);
+    const chunks = chunkSyllabusText(text);
+    expect(chunks.length).toBeGreaterThan(1);
+
+    const [first, second] = chunks;
+    const secondStart = text.indexOf(second);
+    expect(secondStart).toBeGreaterThanOrEqual(0);
+    const overlapChars = first.length - secondStart;
+    // A real minimum, not just "at least one shared character": the old
+    // forward search produced an overlap of ~0 in exactly this shape.
+    expect(overlapChars).toBeGreaterThanOrEqual(SYLLABUS_CHUNK_OVERLAP / 2);
+  });
+
   it('prefers a newline boundary, so a deadline row is not cut in half', () => {
     const chunks = chunkSyllabusText(lines(400));
     // Every chunk after the first starts at the beginning of a line.
