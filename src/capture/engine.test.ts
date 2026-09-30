@@ -14,7 +14,23 @@ import { resetDatabase } from '@/test/resetDb';
  * on the engine's op chain, well after the call that armed it, so a test cannot
  * disarm it by hand without racing the op it is trying to break.
  */
-const hooks = vi.hoisted(() => ({ failSessionWrites: 0 }));
+const hooks = vi.hoisted(() => ({ failSessionWrites: 0, failNoteWrites: 0 }));
+
+vi.mock('@/storage/notes', async () => {
+  const actual = await vi.importActual<typeof import('@/storage/notes')>('@/storage/notes');
+  return {
+    ...actual,
+    // Same countdown shape and same reason as `failSessionWrites`: it lets a test
+    // fail the note write *after* the session write has already landed.
+    createNote: (input: Parameters<typeof actual.createNote>[0]) => {
+      if (hooks.failNoteWrites > 0) {
+        hooks.failNoteWrites -= 1;
+        return Promise.reject(new Error('note write failed'));
+      }
+      return actual.createNote(input);
+    },
+  };
+});
 
 vi.mock('@/storage/sessions', async () => {
   const actual = await vi.importActual<typeof import('@/storage/sessions')>('@/storage/sessions');
@@ -53,6 +69,7 @@ let engine: LiveCaptureEngine;
 
 beforeEach(async () => {
   hooks.failSessionWrites = 0;
+  hooks.failNoteWrites = 0;
   await resetDatabase();
   fake = createFakeDeviceController();
   engine = createCaptureEngine({ controller: fake });
@@ -589,6 +606,25 @@ describe('capture engine', () => {
     ]);
     await engine.flush();
     expect(await listNotes()).toHaveLength(1);
+    logged.mockRestore();
+  });
+
+  it('ends the session it created when the note write fails', async () => {
+    await engine.start();
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    hooks.failNoteWrites = 1;
+
+    await expect(engine.startSession()).rejects.toThrow('note write failed');
+
+    // The session row landed before the note write failed. Leaving it `active`
+    // with no note would misreport a session in progress until the next startup
+    // recovery swept it - and P1 reads sessions.
+    const sessions = await listSessions();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toMatchObject({ status: 'ended' });
+    expect(sessions[0].endedAt).not.toBeNull();
+    expect(await listNotes()).toEqual([]);
+    expect(engine.getState()).toEqual(IDLE);
     logged.mockRestore();
   });
 
