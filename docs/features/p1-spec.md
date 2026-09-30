@@ -75,10 +75,21 @@ export function speechTextOf(segments: TranscriptSegment[]): string;
   stroke's `startedAt` / `endedAt` when present, else the first / last point's
   `t`. Points and strokes without timestamps (ROM and legacy pages) contribute
   nothing.
+- Only **finite** numbers count as timestamps, on the stroke's `startedAt` /
+  `endedAt` exactly as on a point's `t`. A `NaN` reaching the window would make
+  it `{ NaN, NaN }`, which eligibility reads as `ok` and every segment
+  comparison misses — the page would be told the recording said nothing in its
+  window when the truth is that it carries no time to align against.
+- Each end falls back to the **other** after that check: a stroke carrying
+  exactly one of `startedAt` / `endedAt` and no point `t` still says when it was
+  written, and a zero-length span at that instant is the honest reading of it.
 - `toMs` uses `page.finalizedAt` when it is a number (the page was closed:
   writing may have stopped well before the turn, and the speech in between is
   exactly what a gap analysis wants), else the last stroke time. An **absent**
-  `finalizedAt` (a v1 row) is not a timestamp, so it falls back the same way.
+  `finalizedAt` (a v1 row) is not a timestamp, so it falls back the same way. It
+  is taken as `max(finalizedAt, last stroke time)`, never the bare
+  `finalizedAt`: a `finalizedAt` that predates the last stroke (a clock
+  adjustment, a repaired row) would otherwise truncate or invert the window.
 - Then widen: `fromMs = start - leadMs`, `toMs = end + trailMs`. Speech precedes
   writing, so the lead is the larger margin (60 s vs 30 s).
 - `null` when the page has no strokes at all, or no stroke carries a usable
@@ -219,8 +230,15 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer;
    that was never compared would tell the UI it had been (A22, P1-A1).
 4. `setPageGapAnalysis(pageId, { status: 'running', … })`.
 5. `segmentsInWindow` → `speechTextOf`. No speech in the window is a real
-   result, not a skip: the page's `proposed` suggestions are cleared and the
-   analysis is recorded `done` with zero suggestions.
+   result, not a skip: the run happened and honestly found no overlap, so the
+   analysis is recorded `done` (`error: null`, `summarized: false`) with zero
+   suggestions and **no model call**. The page's `proposed` suggestions are
+   **kept**: this run compared nothing, and deleting what an earlier run that
+   did compare speech found would lose the user's work with no way back
+   (P1-A12). An empty window is a wrongly linked recording, a device clock that
+   disagrees or a legacy import — not "your notes are complete" — so the panel
+   says the window matched no speech in its own words rather than "no gaps
+   found".
 6. If the speech fits `directCharBudget`, one `compare` call against
    `page.transcript.markdown`; `summarized = false`. Otherwise `chunkSpeech`,
    one `summarize` call per chunk **serially** (Ollama serves one model; a
@@ -269,8 +287,12 @@ Loads, on mount and after every action: the page (`getPage`, for
 `gapAnalysis`), its suggestions (`listGapsByPage`) and the note's recording
 (for eligibility). Renders, under the label:
 
-- A heading `Gaps`, and a one-line source note naming the recording window when
-  there is one.
+- A heading `Gaps`, and a one-line source note naming the recording window —
+  only when the page is genuinely **comparable** (the eligibility result is
+  `ok`, which already implies a recording and a window). A page with a stroke
+  window but no usable recording has nothing to compare, so the present-tense
+  "Comparing against the recording from … to …" would state a falsehood and read
+  as a contradiction beside the skip sentence below it.
 - Buttons `Find gaps` (this page) and `Find gaps in note`. Disabled while a run
   is in flight; `Find gaps` also disabled when the page is not eligible.
 - The ineligible case in plain words: "This page has no writing on it.", "This
@@ -281,6 +303,16 @@ Loads, on mount and after every action: the page (`getPage`, for
   "Waiting to analyze…"; `running` → "Looking for gaps…"; `failed` → the error,
   in destructive text, with the buttons still available; `done` → when it found
   nothing, "No gaps found in the recording for this page."
+- `done` on a page whose window matched **no speech** gets its own sentence
+  instead: "The recording has no speech in this page's time window." Only that
+  one is true — "no gaps found" would claim the notes are complete when nothing
+  was compared. The panel derives it the way the analyzer did, from the page and
+  the recording it already holds (`segmentsInWindow` → `speechTextOf`); it is
+  not stored, because `GapAnalysisMeta` has no field for it and
+  `src/storage/types.ts` is not P1's to extend. It is checked before the "found
+  nothing" line and shown however many suggestions are listed: the analyzer
+  keeps the page's proposals on that path, so this line is the only thing that
+  explains a run which changed nothing.
 - When `summarized` is true: "The speech was too long to compare directly, so
   it was summarized first — some detail may be lost." This is the lossy-source
   statement J5 asks for, and it shows both on the analysis status and on each
@@ -309,6 +341,11 @@ Errors from a run are caught and shown; the panel never throws into React.
    stroke time.
 5. `null` for a page with no strokes, for strokes with no points, and for
    strokes whose points carry no `t`.
+   - also `null` for a stroke whose `startedAt`/`endedAt` are `NaN` (or
+     infinite) with no usable point times — a non-finite window must never look
+     comparable.
+   - but a stroke carrying only `startedAt`, or only `endedAt`, and no point `t`
+     yields the zero-length span at that instant rather than `null`.
 6. strokes out of chronological order still give the min/max span.
 7. `segmentsInWindow` includes a segment that starts before and ends inside the
    window, one wholly inside, one that starts inside and ends after, and one
@@ -402,9 +439,11 @@ Errors from a run are caught and shown; the panel never throws into React.
 48. a note with no linked recording is skipped, likewise silently.
 49. a page whose transcript is not `done`, and a recording whose transcript is
     not `done`, are skipped.
-50. no speech in the window: no model call is needed for a decision — the
-    `proposed` suggestions are cleared, nothing is written and `gapAnalysis` is
-    `done` with `summarized: false`.
+50. no speech in the window: no model call is needed for a decision — nothing is
+    written, the page's existing `proposed` suggestions **survive** (the run
+    compared nothing and must not destroy what a run that compared something
+    found) and `gapAnalysis` is `done` with `error: null` and
+    `summarized: false`.
 51. a generator failure records `gapAnalysis` `failed` with the error message,
     leaves the existing suggestions untouched, and rethrows.
 52. an already-aborted signal aborts before any model call and records the
@@ -435,12 +474,22 @@ Errors from a run are caught and shown; the panel never throws into React.
     waiting line.
 66. `gapAnalysis` `failed` shows its error and still offers `Find gaps`.
 67. an analyzer that rejects shows the error and leaves the panel usable.
-68. `gapAnalysis` `done` with no suggestions says so plainly.
+68. `gapAnalysis` `done` with no suggestions says so plainly — and only when
+    there was speech to compare:
+    - an eligible page whose recording's segments all fall outside its window,
+      with a `done` meta, says "The recording has no speech in this page's time
+      window." and not "No gaps found"; it says it with a surviving `proposed`
+      suggestion listed too.
+    - a page whose window did hold speech still says "No gaps found in the
+      recording for this page.", including when only an already-reviewed
+      suggestion is on the page.
 69. `summarized: true` says the speech was summarized and detail may be lost;
     `summarized: false` does not.
 70. an ineligible page (no strokes) explains why and disables `Find gaps`, while
     `Find gaps in note` stays available.
-71. a note with no recording says so and disables both find actions.
+71. a note with no recording says so, disables both find actions, and renders
+    **no** source note — the page still has a stroke window, and the comparison
+    sentence would be false beside it.
 72. accepted suggestions never render an editable control and the panel never
     calls `setPageTranscript` (asserted by rendering with an accepted
     suggestion and checking the page's transcript is unchanged).
@@ -488,3 +537,17 @@ Existing `src/notes/NotesView.test.tsx` must keep passing unmodified.
 - **P1-A11** Suggestion text and quotes are capped at 2000 characters in
   `validate`. A degenerate row that slipped past the client's own guard is
   truncated rather than allowed to fill the panel and the store.
+- **P1-A12** An empty window is destructive to nothing. A run that compared no
+  speech records `done` but leaves every existing suggestion in place, including
+  `proposed` ones, so "look again" can never lose work; the only thing it
+  changes is the status line. The cost is a page that may list proposals from a
+  window that no longer matches the recording — visible and re-runnable, unlike
+  a silent deletion.
+- **P1-A13** "The window matched no speech" is derived in the panel, not stored:
+  `GapAnalysisMeta` has no field for it and `src/storage/types.ts` is not P1's
+  to extend. The panel recomputes it from the page and the recording it already
+  loads, with the same helpers the analyzer uses, so the two cannot disagree
+  about what was compared.
+- **P1-A14** The panel's source note is gated on the eligibility result rather
+  than on the stroke window, so every sentence that speaks in the present tense
+  about "the recording" is only shown when there is one to compare against.
