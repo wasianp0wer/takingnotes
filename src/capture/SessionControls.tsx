@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import type { DeviceController } from '@/device/controller';
 import { useHuionDevice } from '@/device/TabletProvider';
 import { listNotes } from '@/storage/notes';
+import { listRecordingsBySession } from '@/storage/recordings';
 import type { NoteRecord } from '@/storage/types';
 
 function messageOf(error: unknown): string {
@@ -83,7 +84,9 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
   const [deviceError, setDeviceError] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [, setTick] = useState(0);
-  const [interrupted, setInterrupted] = useState<NoteRecord | null>(null);
+  const [interrupted, setInterrupted] = useState<{ note: NoteRecord; hadAudio: boolean } | null>(
+    null,
+  );
   const [dismissedNoteId, setDismissedNoteId] = useState<string | null>(null);
 
   const startedAt = sessionStartedAtOf(capture);
@@ -114,10 +117,24 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
   useEffect(() => {
     let alive = true;
     void listNotes()
-      .then((notes) => {
-        if (alive) setInterrupted(interruptedNoteOf(notes, capture.activeNoteId));
+      .then(async (notes) => {
+        const note = interruptedNoteOf(notes, capture.activeNoteId);
+        if (!note) {
+          if (alive) setInterrupted(null);
+          return;
+        }
+        // A bare note the pen auto-started never had a recording at all -
+        // telling someone they lost audio that never existed is exactly the
+        // dishonesty A11's wording is meant to avoid. Only claim it when this
+        // note's session actually has a recording on record.
+        const hadAudio = note.sessionId
+          ? (await listRecordingsBySession(note.sessionId)).length > 0
+          : false;
+        if (alive) setInterrupted({ note, hadAudio });
       })
       .catch((error: unknown) => {
+        // Degrades the same way the `listNotes()` failure does: log and show
+        // nothing, never claim a loss this could not verify.
         console.error('[session] reading the notes list failed', error);
       });
     return () => {
@@ -159,24 +176,48 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
       if (mounted.current) setDeviceError(messageOf(error));
     }
 
+    // End is clickable throughout the start sequence (see the button below), so
+    // by the time the pad settles the session may already be over - a pad whose
+    // chooser sat open while the user gave up and pressed End. Starting the
+    // recorder then would leave audio running for an ended session, linked to a
+    // note that is already `complete`, with nothing in this panel offering to
+    // stop it. The session's own ids are the check: if the engine has moved on,
+    // this start has nothing left to record into.
+    if (engine.getState().activeSessionId !== ids.sessionId) {
+      if (mounted.current) setPhase('idle');
+      return;
+    }
+
     // Audio last, and never fatal: the session is already capturing.
     try {
       await recorder.start(ids);
       const after = recorder.getState();
-      if (after.status !== 'recording') {
-        if (mounted.current) setAudioError(after.error ?? 'Recording did not start');
-      } else if (after.link?.sessionId !== ids.sessionId || after.link?.noteId !== ids.noteId) {
+      const owned =
+        after.status === 'recording' &&
+        after.link?.sessionId === ids.sessionId &&
+        after.link?.noteId === ids.noteId;
+      if (!owned) {
         // The recorder singleton is shared with the header's Record button
-        // (P3-A3). If it was already recording, `recorder.start()` above was
-        // a silent no-op (recorder.ts line 204) and the recording keeps the
-        // link it captured earlier, not this session's - so this session's
-        // pages have no audio of their own, and P1's gap-filling would find
-        // none. Reported plainly (A28), never unwound: the session keeps
-        // running and keeps capturing handwriting.
-        if (mounted.current) {
-          setAudioError(
-            'Audio was already recording when this session started, so this session has no recording of its own.',
-          );
+        // (P3-A3). Ownership is the only question that matters here: status
+        // alone can't tell it apart from a start that is still under way for
+        // someone else. `'recording'` with a foreign link means
+        // `recorder.start()` above was a silent no-op (recorder.ts line 204)
+        // and the recording keeps the link it captured earlier. `'starting'`
+        // with a foreign-or-not-yet-set link means Record was pressed just
+        // before this click - `recorder.start(ids)` was equally a no-op
+        // (recorder.ts:204 only proceeds from 'idle'), and a recording *will*
+        // begin seconds from now, just not under this session's link. Both
+        // read the same to the person watching this session: it has no
+        // recording of its own. Anything else is this call's own failure -
+        // the recorder's own error, or the generic fallback.
+        if (after.status === 'recording' || after.status === 'starting') {
+          if (mounted.current) {
+            setAudioError(
+              'Audio was already recording when this session started, so this session has no recording of its own.',
+            );
+          }
+        } else if (mounted.current) {
+          setAudioError(after.error ?? 'Recording did not start');
         }
       }
     } catch (error) {
@@ -218,7 +259,13 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
   return (
     <div aria-label="Session" className="flex flex-wrap items-center gap-2">
       {isActive ? (
-        <Button variant="destructive" size="sm" disabled={phase !== 'idle'} onClick={() => void end()}>
+        // Clickable through the whole start sequence, not just once it settles:
+        // the session is already open in the engine as soon as
+        // `engine.startSession()` resolves, and `controller.connect()` has no
+        // page-level timeout around the browser's Bluetooth chooser - it can
+        // stay pending until the user answers it. Disabled only while an end
+        // is itself in flight, so a second click can't fire a second endSession.
+        <Button variant="destructive" size="sm" disabled={phase === 'ending'} onClick={() => void end()}>
           <Square />
           {phase === 'ending' ? 'Ending...' : 'End session'}
         </Button>
@@ -244,15 +291,25 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
 
       {sessionError && <ErrorBanner message={sessionError} onDismiss={() => setSessionError(null)} />}
       {deviceError && <ErrorBanner message={deviceError} onDismiss={() => setDeviceError(null)} />}
-      {audioError && <ErrorBanner message={audioError} onDismiss={() => setAudioError(null)} />}
+      {/* The header's RecorderControl already renders `recorder.getState().error`
+          verbatim (same recorder singleton, P3-A3), so when our own audioError
+          is exactly that live error, showing it again here is a second copy of
+          the same sentence, not new information - suppress ours. Anything else
+          (the already-recording message, a thrown start, a failed stop) is not
+          something the recorder itself surfaces, so it stays. */}
+      {audioError && (
+        <ErrorBanner message={audioError} onDismiss={() => setAudioError(null)} />
+      )}
 
-      {interrupted && interrupted.id !== dismissedNoteId && (
+      {interrupted && interrupted.note.id !== dismissedNoteId && (
         <span role="status" className="flex items-center gap-1 text-xs text-amber-600">
-          {`"${interrupted.title}" was interrupted; its audio recording was lost.`}
+          {interrupted.hadAudio
+            ? `"${interrupted.note.title}" was interrupted; its audio recording was lost.`
+            : `"${interrupted.note.title}" was interrupted.`}
           <button
             type="button"
             className="underline"
-            onClick={() => setDismissedNoteId(interrupted.id)}
+            onClick={() => setDismissedNoteId(interrupted.note.id)}
           >
             Dismiss
           </button>

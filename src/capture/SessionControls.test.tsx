@@ -3,11 +3,14 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Recorder, RecorderLink, RecorderState } from '@/audio/recorder';
+import { RecorderControl } from '@/audio/RecorderControl';
+import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine, type LiveCaptureEngine } from '@/capture/engine';
 import { interruptedNoteOf, SessionPanel } from '@/capture/SessionControls';
 import { createNote, listNotes } from '@/storage/notes';
 import { countPoints, listPages } from '@/storage/pages';
-import { listSessions } from '@/storage/sessions';
+import { createRecording } from '@/storage/recordings';
+import { createSession, listSessions } from '@/storage/sessions';
 import { createFakeDeviceController, type FakeDeviceController } from '@/test/fakeDeviceController';
 import { resetDatabase } from '@/test/resetDb';
 
@@ -294,6 +297,68 @@ describe('SessionPanel', () => {
     expect(countPoints(pagesAfter[0].strokes)).toBeGreaterThan(0);
   });
 
+  it('reports a mislinked recording when the header just pressed Record', async () => {
+    // Record was pressed moments before Start session: the recorder is still
+    // 'starting' (awaiting getUserMedia), so `recorder.start(ids)` here is a
+    // silent no-op (recorder.ts line 204 only proceeds from 'idle') - a
+    // recording begins seconds from now, but under the other link, not this
+    // session's. That must read the same as the already-'recording' case,
+    // not as "Recording did not start".
+    recorder.setState({
+      status: 'starting',
+      startedAt: null,
+      elapsedMs: 0,
+      link: null,
+      error: null,
+    });
+    recorder.startImpl = async () => {};
+    render();
+
+    await click(button('Start session'));
+    await settle();
+
+    expect(panel().textContent).toContain(
+      'Audio was already recording when this session started, so this session has no recording of its own.',
+    );
+    expect(panel().textContent).not.toContain('Recording did not start');
+    expect(button('End session')).toBeTruthy();
+    expect(engine.getState().activeNoteId).not.toBeNull();
+  });
+
+  it('says why this session has no audio even with the header mounted alongside it', async () => {
+    // The already-recording message is P3's own diagnosis - the recorder's own
+    // state carries no error for this case - so this panel is the only surface
+    // that can explain it, whether or not `RecorderControl` is mounted beside
+    // it on the same singleton (P3-A3, the real arrangement in AppShell).
+    recorder.setState({
+      status: 'recording',
+      startedAt: 0,
+      elapsedMs: 0,
+      link: { sessionId: null, noteId: null },
+      error: null,
+    });
+    recorder.startImpl = async () => {};
+    act(() => {
+      root.render(
+        <CaptureProvider engine={engine}>
+          <RecorderControl recorder={recorder} />
+          <SessionPanel engine={engine} controller={fake} recorder={recorder} now={() => clock} />
+        </CaptureProvider>,
+      );
+    });
+
+    await click(button('Start session'));
+    await settle();
+
+    const alerts = [...container.querySelectorAll('[role="alert"]')].filter((el) =>
+      el.textContent?.includes('Audio was already recording'),
+    );
+    expect(alerts).toHaveLength(1);
+    expect(panel().textContent).toContain(
+      'Audio was already recording when this session started, so this session has no recording of its own.',
+    );
+  });
+
   it('reports a session that cannot start and touches neither pad nor microphone', async () => {
     const broken = {
       ...engine,
@@ -327,7 +392,18 @@ describe('SessionPanel', () => {
     expect(panel().textContent).toContain('1:05');
   });
 
-  it('disables the control while a start is in flight', async () => {
+  it('offers only End while a start is in flight, so the UI cannot fire a second Start', async () => {
+    // Renamed from "disables the control while a start is in flight": that
+    // name and its old assertions described a button being disabled, but by
+    // the point this test reaches, the session is already open, so the only
+    // button on screen is End session, never Start - there never was a
+    // second Start button to click, disabled or not. Fix 2 makes End itself
+    // clickable during this same window (see "lets End close a session..."
+    // above), so what actually prevents a double `startSession()` here is
+    // structural: no Start button is rendered once `isActive` is true. That
+    // is what this test now proves, plus that the interrupted-looking start
+    // still completes normally (one session, one linked recording) once the
+    // pad comes back.
     let release: (() => void) | null = null;
     fake.connect = () =>
       new Promise<void>((resolve) => {
@@ -344,12 +420,11 @@ describe('SessionPanel', () => {
     // resolving it, since `flush()` only awaits the engine's own chain.
     await settle();
 
-    // The pad has not come back yet, so the start is still running and the
-    // button is disabled. An impatient second click on it must neither start a
-    // second session nor end the one that just opened.
-    const busy = [...container.querySelectorAll('button')].find((el) => el.disabled);
-    expect(busy).toBeTruthy();
-    await click(busy as HTMLButtonElement);
+    // The pad has not come back yet, so the start is still running - and yet
+    // no Start button exists to click a second time.
+    expect(() => button('Start session')).toThrow();
+    expect(button('End session')).toBeTruthy();
+
     // Cast: TS's control-flow analysis narrows `release` to `never` here -
     // it does not track the async reassignment inside `fake.connect`'s
     // executor, run via a closure it never sees called from this scope.
@@ -359,6 +434,66 @@ describe('SessionPanel', () => {
     expect(await listSessions()).toHaveLength(1);
     expect(recorder.links).toHaveLength(1);
     expect(engine.getState().activeNoteId).not.toBeNull();
+  });
+
+  it('lets End close a session while the start sequence is still awaiting the pad', async () => {
+    // The session is already open in the engine as soon as `startSession()`
+    // resolves, but `controller.connect()` has no page-level timeout around
+    // the browser's Bluetooth chooser - it can hang indefinitely. The person
+    // must still be able to end the session they can see is running.
+    let release: (() => void) | null = null;
+    fake.connect = () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    render();
+
+    await click(button('Start session'));
+    await settle();
+    const noteId = engine.getState().activeNoteId;
+    expect(noteId).not.toBeNull();
+
+    const endButton = button('End session');
+    expect(endButton.disabled).toBe(false);
+    await click(endButton);
+    await settle();
+
+    const notes = await listNotes();
+    expect(notes.find((n) => n.id === noteId)).toMatchObject({ status: 'complete' });
+    expect((await listSessions())[0]).toMatchObject({ status: 'ended' });
+    expect(recorder.stops).toBe(1);
+    expect(button('Start session')).toBeTruthy();
+
+    // Release the hung connect so nothing is left pending past the test.
+    (release as (() => void) | null)?.();
+    await settle();
+  });
+
+  it('does not start audio for a session that was ended while the pad hung', async () => {
+    // The other side of End being clickable mid-start: when the chooser finally
+    // answers, the start sequence resumes - but its session is already over.
+    // Starting the recorder then would leave audio running against a note that
+    // is `complete`, with nothing in this panel offering to stop it.
+    let release: (() => void) | null = null;
+    fake.connect = () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    render();
+
+    await click(button('Start session'));
+    await settle();
+    await click(button('End session'));
+    await settle();
+    expect(recorder.links).toHaveLength(0);
+
+    // The chooser answers only now, after the session is gone.
+    (release as (() => void) | null)?.();
+    await settle();
+
+    expect(recorder.links).toHaveLength(0);
+    expect(recorder.getState().status).toBe('idle');
+    expect(button('Start session')).toBeTruthy();
   });
 
   it('shows a mid-session reconnect without ending the session', async () => {
@@ -495,13 +630,20 @@ describe('SessionPanel', () => {
   });
 
   it('says a session was interrupted and its recording lost', async () => {
+    const session = await createSession({ title: 'Interrupted seminar', startedAt: 5_000 });
     await createNote({
       title: 'Interrupted seminar',
       deviceId: 'huion',
       pageBaseline: 0,
       status: 'interrupted',
       startedAt: 5_000,
+      sessionId: session.id,
     });
+    // Only claim the audio is lost when the session actually has a recording.
+    await createRecording(
+      { title: 'Interrupted seminar', durationMs: 1000, sessionId: session.id, startedAt: 5_000 },
+      new Blob(['audio'], { type: 'audio/webm' }),
+    );
     render();
     await settle();
 
@@ -509,6 +651,26 @@ describe('SessionPanel', () => {
     expect(panel().textContent).toContain('recording was lost');
 
     await click(button('Dismiss'));
+    expect(panel().textContent).not.toContain('recording was lost');
+  });
+
+  it('says only that the note was interrupted when its session has no recording', async () => {
+    // A bare note the pen auto-started still gets its own session (A10), but
+    // never had a recording at all - claiming its audio was lost would be
+    // exactly the dishonesty A11's wording is meant to avoid.
+    const session = await createSession({ title: 'Bare note', startedAt: 5_000 });
+    await createNote({
+      title: 'Bare note',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      startedAt: 5_000,
+      sessionId: session.id,
+    });
+    render();
+    await settle();
+
+    expect(panel().textContent).toContain('interrupted');
     expect(panel().textContent).not.toContain('recording was lost');
   });
 
@@ -527,13 +689,19 @@ describe('SessionPanel', () => {
   });
 
   it('clears the notice once a new session starts', async () => {
+    const session = await createSession({ title: 'Interrupted seminar', startedAt: 5_000 });
     await createNote({
       title: 'Interrupted seminar',
       deviceId: 'huion',
       pageBaseline: 0,
       status: 'interrupted',
       startedAt: 5_000,
+      sessionId: session.id,
     });
+    await createRecording(
+      { title: 'Interrupted seminar', durationMs: 1000, sessionId: session.id, startedAt: 5_000 },
+      new Blob(['audio'], { type: 'audio/webm' }),
+    );
     render();
     await settle();
     expect(panel().textContent).toContain('recording was lost');
