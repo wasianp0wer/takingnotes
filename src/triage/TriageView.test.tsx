@@ -44,15 +44,17 @@ function buttonWithLabel(container: HTMLElement, label: string): HTMLButtonEleme
 }
 
 describe('TriageView', () => {
-  it('renders the three sections and shows a stored deadline event in Tasks and the Agenda', async () => {
+  it('renders the panels and shows a stored deadline event in Tasks and the Agenda', async () => {
     await createEvent({ title: 'Submit report', kind: 'deadline', startsAt: Date.now() + 24 * HOUR });
 
     const m = mount(<TriageView />);
 
-    // All three panels exist immediately, before the async load resolves.
+    // Every panel exists immediately, before the async load resolves.
     expect(section(m.container, 'Tasks')).toBeTruthy();
     expect(section(m.container, 'Calendar')).toBeTruthy();
     expect(section(m.container, 'Scratchpad')).toBeTruthy();
+    // P2's mount point (docs/architecture.md §6.7).
+    expect(section(m.container, 'Syllabus')).toBeTruthy();
 
     await waitFor(() => {
       expect(section(m.container, 'Tasks').textContent).toContain('Submit report');

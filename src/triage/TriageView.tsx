@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 
+import { SyllabusImport } from '@/syllabus/SyllabusImport';
 import { CalendarPanel } from '@/triage/CalendarPanel';
 import { Scratchpad } from '@/triage/Scratchpad';
 import { TaskList } from '@/triage/TaskList';
@@ -11,8 +12,11 @@ import { useTriageData } from '@/triage/useTriageData';
  * F3's triage center: the task list (ranked by priority score, synced from
  * calendar deadlines), the calendar (month grid plus a 7-day agenda) and an
  * autosaved scratchpad whose lines can be promoted into tasks. On narrow
- * screens the three panels stack (tasks, then calendar, then scratchpad);
- * `lg` and up shows tasks beside a calendar+scratchpad column.
+ * screens the panels stack (tasks, then calendar, then scratchpad, then the
+ * syllabus import); `lg` and up shows tasks beside the other column.
+ *
+ * P2's syllabus import mounts here (docs/architecture.md §6.7): it writes
+ * calendar events, which the task sync already turns into tasks.
  */
 export function TriageView() {
   const now = useNow();
@@ -63,6 +67,9 @@ export function TriageView() {
             onPromote={(title) => data.addTask({ title, source: 'scratchpad' }, { rethrow: true })}
           />
         </section>
+        {/* P2's only mount point (docs/architecture.md §6.7): it writes calendar
+            events, which the task sync already turns into tasks. */}
+        <SyllabusImport />
       </div>
     </div>
   );

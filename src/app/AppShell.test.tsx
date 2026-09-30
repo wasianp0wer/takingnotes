@@ -67,6 +67,9 @@ describe('AppShell', () => {
     expect(container.textContent).toContain('Not connected');
     expect(container.textContent).toContain('Record');
     expect(container.querySelector('[aria-label="Settings"]')).toBeTruthy();
+    // P3's mount point (docs/architecture.md §6.7): the header is the only
+    // place session controls appear, so nothing else may claim it.
+    expect(container.querySelector('[aria-label="Session"]')).toBeTruthy();
   });
 
   it('opens on Notes, which mounts F4\'s page-turn controls', () => {

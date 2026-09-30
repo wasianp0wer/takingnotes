@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import type { NoteRecord } from '@/storage/types';
 import { ensureTranscriptionQueue } from '@/transcription/startTranscription';
 import type { TranscriptionQueue } from '@/transcription/queue';
+import { GapPanel } from '@/notes/GapPanel';
 import { InkCanvas } from '@/notes/InkCanvas';
 import { TranscriptPanel } from '@/notes/TranscriptPanel';
 import { useNotesData } from '@/notes/useNotesData';
@@ -217,14 +218,25 @@ export function NotesView(props?: NotesViewProps) {
           </div>
           <div className="w-96 shrink-0 overflow-auto border-l border-border">
             {viewedPage && (
-              <TranscriptPanel
-                // Remounts per page, so a "Already queued." notice from one
-                // page's Retry never shows up against another page.
-                key={viewedPage.id}
-                page={viewedPage}
-                isActivePage={viewedPage.id === state.activePageId}
-                onRetry={(pageId) => queue.retry(pageId)}
-              />
+              <>
+                <TranscriptPanel
+                  // Remounts per page, so a "Already queued." notice from one
+                  // page's Retry never shows up against another page.
+                  key={viewedPage.id}
+                  page={viewedPage}
+                  isActivePage={viewedPage.id === state.activePageId}
+                  onRetry={(pageId) => queue.retry(pageId)}
+                />
+                {/* P1's only mount point (docs/architecture.md §6.7). The note
+                    id comes off the page itself, so it is never out of step with
+                    the page being shown. Keyed per page for the same reason as
+                    the transcript panel. */}
+                <GapPanel
+                  key={`gaps-${viewedPage.id}`}
+                  noteId={viewedPage.noteId}
+                  pageId={viewedPage.id}
+                />
+              </>
             )}
           </div>
         </div>

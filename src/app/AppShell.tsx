@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { DeviceStatus } from '@/app/DeviceStatus';
 import { SettingsDialog } from '@/app/SettingsDialog';
 import { RecorderControl } from '@/audio/RecorderControl';
+import { SessionControls } from '@/capture/SessionControls';
 import { usePageTurnCapture } from '@/capture/usePageTurnCapture';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useHuionDevice } from '@/device/TabletProvider';
@@ -55,6 +56,8 @@ export function AppShell() {
           <TabsTrigger value="triage">Triage</TabsTrigger>
         </TabsList>
         <div className="ml-auto flex items-center gap-2">
+          {/* P3's only mount point (docs/architecture.md §6.7). */}
+          <SessionControls />
           <RecorderControl />
           <SettingsDialog />
         </div>

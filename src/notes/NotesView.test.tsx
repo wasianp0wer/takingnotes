@@ -251,6 +251,20 @@ describe('NotesView', () => {
     expect(queue.retry).toHaveBeenCalledWith(page2.id);
   });
 
+  it('mounts the gap panel for the viewed page, beside the transcript', async () => {
+    // P1's mount point (docs/architecture.md §6.7): the notes view is the only
+    // place it appears, so nothing else may claim it.
+    const note = await seedNote({ title: 'Lecture 4' });
+    const page = await seedPage(note.id, 0);
+    await setPageTranscript(page.id, transcript('done', { markdown: 'Kepler' }));
+
+    await render();
+
+    const gaps = container.querySelector('[aria-label="Gaps"]');
+    expect(gaps?.getAttribute('data-note-id')).toBe(note.id);
+    expect(gaps?.getAttribute('data-page-id')).toBe(page.id);
+  });
+
   it('offers Transcribe for a finalized page with no transcript', async () => {
     const note = await seedNote({ title: 'Untranscribed' });
     const page = await seedPage(note.id, 0);
