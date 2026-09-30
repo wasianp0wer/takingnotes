@@ -20,6 +20,9 @@ describe('setting keys', () => {
       'whisper.model': 'Xenova/whisper-base.en',
       'triage.lookaheadDays': 7,
       'triage.scratchpad': '',
+      'gaps.leadMs': 60_000,
+      'gaps.trailMs': 30_000,
+      'syllabus.termStart': null,
     });
   });
 
@@ -27,6 +30,9 @@ describe('setting keys', () => {
     expect(await getSettingValue('ollama.model')).toBe('gemma4:12b');
     expect(await getSettingValue('triage.lookaheadDays')).toBe(7);
     expect(await getSettingValue('triage.scratchpad')).toBe('');
+    expect(await getSettingValue('gaps.leadMs')).toBe(60_000);
+    expect(await getSettingValue('gaps.trailMs')).toBe(30_000);
+    expect(await getSettingValue('syllabus.termStart')).toBeNull();
   });
 
   it('round-trips a stored value', async () => {
@@ -49,5 +55,24 @@ describe('setting keys', () => {
     // number belongs must not reach the rasterizer.
     await setSetting('transcription.renderLongEdge', 'big');
     expect(await getSettingValue('transcription.renderLongEdge')).toBe(1024);
+  });
+  it('round-trips a nullable key both ways', async () => {
+    // `syllabus.termStart` defaults to null, so `typeof default` says nothing
+    // about what a real value looks like - a stored number must still read back.
+    await setSettingValue('syllabus.termStart', 1_757_000_000_000);
+    expect(await getSettingValue('syllabus.termStart')).toBe(1_757_000_000_000);
+
+    await setSettingValue('syllabus.termStart', null);
+    expect(await getSettingValue('syllabus.termStart')).toBeNull();
+  });
+
+  it('ignores a nullable key stored with the wrong type', async () => {
+    await setSetting('syllabus.termStart', 'September');
+    expect(await getSettingValue('syllabus.termStart')).toBeNull();
+  });
+
+  it('ignores a gap margin stored with the wrong type', async () => {
+    await setSetting('gaps.leadMs', '60s');
+    expect(await getSettingValue('gaps.leadMs')).toBe(60_000);
   });
 });

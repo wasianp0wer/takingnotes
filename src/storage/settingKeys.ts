@@ -19,6 +19,15 @@ export interface SettingValues {
   'triage.lookaheadDays': number;
   /** F3: the scratchpad is a single setting, not a store. */
   'triage.scratchpad': string;
+  /** P1: how far before a page's first stroke its speech window starts (speech precedes writing). */
+  'gaps.leadMs': number;
+  /** P1: how far past a page's `finalizedAt` its speech window runs. */
+  'gaps.trailMs': number;
+  /**
+   * P2: epoch ms of the term start, used to resolve a syllabus date with no
+   * year. `null` until the user sets one, which means "resolve against today".
+   */
+  'syllabus.termStart': number | null;
 }
 
 export type SettingKey = keyof SettingValues;
@@ -30,10 +39,22 @@ export const SETTING_DEFAULTS: SettingValues = {
   'whisper.model': 'Xenova/whisper-base.en',
   'triage.lookaheadDays': 7,
   'triage.scratchpad': '',
+  'gaps.leadMs': 60_000,
+  'gaps.trailMs': 30_000,
+  'syllabus.termStart': null,
 };
 
 /** Transcription findings F1-F4: below this the handwriting stops being legible. */
 export const MIN_RENDER_LONG_EDGE = 768;
+
+/**
+ * Keys whose type is `T | null` and whose default is `null`, naming the type a
+ * non-null value must have. `typeof null` is `'object'`, so for these the
+ * default carries no usable type to compare a stored value against.
+ */
+const NULLABLE_KEYS: Partial<Record<SettingKey, 'number' | 'string'>> = {
+  'syllabus.termStart': 'number',
+};
 
 /**
  * Reads a known setting, falling back to its default. A stored value of the
@@ -46,6 +67,13 @@ export async function getSettingValue<K extends SettingKey>(
 ): Promise<SettingValues[K]> {
   const fallback = SETTING_DEFAULTS[key];
   const stored = await getSetting<unknown>(key, fallback);
+
+  const nullable = NULLABLE_KEYS[key];
+  if (nullable !== undefined) {
+    const ok = stored === null || typeof stored === nullable;
+    return (ok ? stored : fallback) as SettingValues[K];
+  }
+
   const value = (typeof stored === typeof fallback ? stored : fallback) as SettingValues[K];
 
   if (key === 'transcription.renderLongEdge') {
