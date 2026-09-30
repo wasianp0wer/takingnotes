@@ -53,7 +53,25 @@ export function chunkSyllabusText(text: string, opts?: ChunkOptions): string[] {
     const lineStart = text.lastIndexOf('\n', target);
     let next = lineStart + 1;
     if (lineStart === -1 || next <= start || end - next > overlap * 2) next = target;
+    // Never let the next start exceed `end` (fix I4 round 2): with a zero
+    // effective overlap, `target` equals `end`, and when the text has a `\n`
+    // exactly at `end` the backward search finds that same index and would
+    // push `next` to `end + 1` - dropping the character at `end` (never
+    // covered by this chunk, which stops before it, nor the next, which
+    // would start after it). Clamping keeps `next` at most at `end`, so that
+    // character is always picked up by the next chunk instead.
+    next = Math.min(next, end);
     start = Math.max(next, start + 1);
   }
-  return chunks.filter((chunk) => chunk.trim() !== '');
+
+  // Drop an empty chunk only at the very start or end. A *middle* chunk can
+  // legitimately be pure whitespace - a blank line recovered by the clamp
+  // above, when the overlap is small enough that the recovered span is
+  // nothing but that blank line - and dropping it would silently reopen the
+  // same "a character goes uncovered" gap the clamp exists to close.
+  let lo = 0;
+  let hi = chunks.length;
+  while (lo < hi && chunks[lo].trim() === '') lo++;
+  while (hi > lo && chunks[hi - 1].trim() === '') hi--;
+  return chunks.slice(lo, hi);
 }

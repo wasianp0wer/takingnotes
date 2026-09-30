@@ -49,7 +49,7 @@ describe('chunkSyllabusText', () => {
     const text = lines(400);
     const [first, second] = chunkSyllabusText(text);
     const tail = first.slice(-40);
-    expect(second.startsWith(tail) || second.includes(tail)).toBe(true);
+    expect(second.includes(tail)).toBe(true);
   });
 
   // Regression: when a chunk's end snapped forward to a line start, stepping
@@ -70,6 +70,40 @@ describe('chunkSyllabusText', () => {
     // A real minimum, not just "at least one shared character": the old
     // forward search produced an overlap of ~0 in exactly this shape.
     expect(overlapChars).toBeGreaterThanOrEqual(SYLLABUS_CHUNK_OVERLAP / 2);
+  });
+
+  // Regression (fix round 2, Important): with a zero effective overlap, the
+  // next chunk's start could land one past `end` when the text has a `\n`
+  // exactly there (a blank line right after a line-boundary snap), silently
+  // dropping that character. Exercised both ways a zero effective overlap
+  // arises: an explicit `overlap: 0`, and `chunkChars: 1`, which clamps the
+  // overlap to `floor(1 / 2) = 0` regardless of what was asked for. Both
+  // fixtures and their expected output below were hand-traced against the
+  // algorithm; the pre-fix code produces a *different*, shorter-covering
+  // array for each (silently dropping the blank line's second newline).
+  it('covers every character when the effective overlap is zero (explicit overlap: 0)', () => {
+    // Indices: 0-3 "AAAA", 4 "\n", 5 "\n" (blank line), 6-9 "BBBB", 10 "\n", 11-14 "CCCC".
+    // Hand-traced against the algorithm (and checked against the running
+    // implementation): the pre-fix code instead produces
+    // ["AAAA\n", "BBBB\n", "CCCC"], silently dropping the blank line's second
+    // newline at index 5. Exact equality, not a generic indexOf coverage
+    // walk, because "CCCC" contains a repeated "CC" - the same reason the
+    // single-long-line test below does not use a coverage walk either.
+    const text = 'AAAA\n\nBBBB\nCCCC';
+    const chunks = chunkSyllabusText(text, { budget: 1, chunkChars: 4, overlap: 0 });
+    expect(chunks).toEqual(['AAAA\n', '\nBBB', 'B\nCC', 'CC']);
+  });
+
+  it('covers every character when chunkChars: 1 clamps the overlap to zero', () => {
+    // Indices: 0 "A", 1 "\n", 2 "\n" (blank line), 3 "B". With chunkChars: 1
+    // the recovered span is never more than the blank line's own newline, so
+    // this also exercises that a middle chunk of pure whitespace is kept
+    // rather than silently dropped by the empty-chunk trim (which would
+    // reopen the same gap one character over).
+    const text = 'A\n\nB';
+    const chunks = chunkSyllabusText(text, { budget: 1, chunkChars: 1, overlap: 300 });
+    expect(chunks).toEqual(['A\n', '\n', 'B']);
+    expect(chunks.join('')).toBe(text);
   });
 
   it('prefers a newline boundary, so a deadline row is not cut in half', () => {
