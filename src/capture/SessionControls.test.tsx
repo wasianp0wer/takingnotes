@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Recorder, RecorderLink, RecorderState } from '@/audio/recorder';
 import { createCaptureEngine, type LiveCaptureEngine } from '@/capture/engine';
-import { SessionPanel } from '@/capture/SessionControls';
-import { listNotes } from '@/storage/notes';
+import { interruptedNoteOf, SessionPanel } from '@/capture/SessionControls';
+import { createNote, listNotes } from '@/storage/notes';
 import { countPoints, listPages } from '@/storage/pages';
 import { listSessions } from '@/storage/sessions';
 import { createFakeDeviceController, type FakeDeviceController } from '@/test/fakeDeviceController';
@@ -369,5 +369,129 @@ describe('SessionPanel', () => {
     logged.mockRestore();
     // A fresh root, so afterEach's unmount has something to unmount.
     root = createRoot(container);
+  });
+
+  it('ends the session and the recording together', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+    const noteId = engine.getState().activeNoteId;
+
+    await click(button('End session'));
+    await settle();
+
+    expect(recorder.stops).toBe(1);
+    const notes = await listNotes();
+    expect(notes[0]).toMatchObject({ id: noteId, status: 'complete' });
+    expect((await listSessions())[0]).toMatchObject({ status: 'ended' });
+    expect(button('Start session')).toBeTruthy();
+  });
+
+  it('still stops the recording when ending the note fails', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    render();
+    await click(button('Start session'));
+    await settle();
+    // Same state and the same subscription (spread keeps both), only the close
+    // path fails - a note write that rejects mid-session.
+    const broken = {
+      ...engine,
+      endSession: () => Promise.reject(new Error('note write failed')),
+    } as unknown as LiveCaptureEngine;
+    render({ engine: broken });
+
+    await click(button('End session'));
+    await settle();
+
+    // The audio is in memory until stop() saves it (A11), so it is stopped
+    // whatever the note did.
+    expect(recorder.stops).toBe(1);
+    expect(panel().textContent).toContain('note write failed');
+    logged.mockRestore();
+  });
+
+  it('survives the recorder being stopped from elsewhere', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+
+    // The header's own Record/Stop drives the same recorder singleton (P3-A3).
+    await act(async () => {
+      await recorder.stop();
+    });
+
+    expect(panel().textContent).toContain('No audio');
+    expect(button('End session')).toBeTruthy();
+
+    await click(button('End session'));
+    await settle();
+    expect(button('Start session')).toBeTruthy();
+  });
+
+  it('starting over a pen-started bare note completes it', async () => {
+    render();
+    // The student writes before pressing Start: the pen auto-starts a bare note.
+    fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
+    fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+    await settle();
+    const bare = engine.getState().activeNoteId;
+    expect(bare).not.toBeNull();
+    // A bare note is not a session, so the control still offers Start.
+    expect(button('Start session')).toBeTruthy();
+
+    clock += 5000;
+    await click(button('Start session'));
+    await settle();
+
+    const notes = await listNotes();
+    expect(notes.find((n) => n.id === bare)).toMatchObject({ status: 'complete' });
+    expect(engine.getState().activeNoteId).not.toBe(bare);
+    // The clock runs from the session, not from the bare note.
+    expect(panel().textContent).toContain('0:00');
+  });
+
+  it('says a session was interrupted and its recording lost', async () => {
+    await createNote({
+      title: 'Interrupted seminar',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      startedAt: 5_000,
+    });
+    render();
+    await settle();
+
+    expect(panel().textContent).toContain('interrupted');
+    expect(panel().textContent).toContain('recording was lost');
+
+    await click(button('Dismiss'));
+    expect(panel().textContent).not.toContain('recording was lost');
+  });
+
+  it('says nothing when the newest note finished cleanly', async () => {
+    await createNote({
+      title: 'Finished',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'complete',
+      startedAt: 5_000,
+    });
+    render();
+    await settle();
+
+    expect(panel().textContent).not.toContain('interrupted');
+  });
+
+  it('reads an interrupted session from the newest note only', () => {
+    const note = (id: string, status: 'active' | 'complete' | 'interrupted', startedAt: number) =>
+      ({ id, status, startedAt, legacy: false }) as never;
+
+    // Newest first, as `listNotes()` returns them.
+    expect(interruptedNoteOf([note('b', 'interrupted', 2), note('a', 'complete', 1)], null)?.id).toBe('b');
+    expect(interruptedNoteOf([note('b', 'complete', 2), note('a', 'interrupted', 1)], null)).toBeNull();
+    // Still `active` because recovery has not run yet: the same situation.
+    expect(interruptedNoteOf([note('b', 'active', 2)], null)?.id).toBe('b');
+    // Unless it is the note being written right now.
+    expect(interruptedNoteOf([note('b', 'active', 2)], 'b')).toBeNull();
   });
 });

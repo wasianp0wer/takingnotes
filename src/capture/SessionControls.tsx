@@ -10,6 +10,8 @@ import type { CaptureEngine } from '@/capture/types';
 import { Button } from '@/components/ui/button';
 import type { DeviceController } from '@/device/controller';
 import { useHuionDevice } from '@/device/TabletProvider';
+import { listNotes } from '@/storage/notes';
+import type { NoteRecord } from '@/storage/types';
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -25,6 +27,25 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
       </button>
     </span>
   );
+}
+
+/**
+ * The note whose session was interrupted by a reload or crash, or null. Only the
+ * newest note counts: once a later session has run, the old notice is stale.
+ *
+ * `active` counts as interrupted when it is not the note being written now -
+ * the engine's startup recovery may not have flipped it to `interrupted` yet,
+ * and it means the same thing to the person reading the header (P3-A4). One
+ * session is one note (J4), so an interrupted note is an interrupted session.
+ */
+export function interruptedNoteOf(
+  notes: NoteRecord[],
+  activeNoteId: string | null,
+): NoteRecord | null {
+  const newest = notes.find((note) => !note.legacy);
+  if (!newest || newest.id === activeNoteId) return null;
+  if (newest.status === 'interrupted' || newest.status === 'active') return newest;
+  return null;
 }
 
 export interface SessionPanelProps {
@@ -62,6 +83,8 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
   const [deviceError, setDeviceError] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [, setTick] = useState(0);
+  const [interrupted, setInterrupted] = useState<NoteRecord | null>(null);
+  const [dismissedNoteId, setDismissedNoteId] = useState<string | null>(null);
 
   const startedAt = sessionStartedAtOf(capture);
   const isActive = startedAt !== null;
@@ -84,6 +107,23 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
     const handle = setInterval(() => setTick((n) => n + 1), 1000);
     return () => clearInterval(handle);
   }, [isActive]);
+
+  // Re-read when the active note changes: that covers the first render (where
+  // the engine's startup recovery may still be in flight), a note the pen
+  // auto-starts, and a session that just ended.
+  useEffect(() => {
+    let alive = true;
+    void listNotes()
+      .then((notes) => {
+        if (alive) setInterrupted(interruptedNoteOf(notes, capture.activeNoteId));
+      })
+      .catch((error: unknown) => {
+        console.error('[session] reading the notes list failed', error);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [capture.activeNoteId]);
 
   const start = useCallback(async () => {
     setPhase('starting');
@@ -192,6 +232,19 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
       {sessionError && <ErrorBanner message={sessionError} onDismiss={() => setSessionError(null)} />}
       {deviceError && <ErrorBanner message={deviceError} onDismiss={() => setDeviceError(null)} />}
       {audioError && <ErrorBanner message={audioError} onDismiss={() => setAudioError(null)} />}
+
+      {interrupted && interrupted.id !== dismissedNoteId && (
+        <span role="status" className="flex items-center gap-1 text-xs text-amber-600">
+          {`"${interrupted.title}" was interrupted; its audio recording was lost.`}
+          <button
+            type="button"
+            className="underline"
+            onClick={() => setDismissedNoteId(interrupted.id)}
+          >
+            Dismiss
+          </button>
+        </span>
+      )}
     </div>
   );
 }
