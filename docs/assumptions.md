@@ -64,3 +64,33 @@ asking. Each can be revisited; the ones most worth a second look are marked ⚑.
   The old `DownloadedMemoryPage` UI is removed with the studio.
 - A19 ROM page download is not exposed in the Phase 1 UI (D9: manual last
   resort). The probe (`probe.html`) keeps that capability.
+
+## Phase 2
+
+- A20 Phase 2 is built on branch `phase2`, cut from `notes-app` (the merged
+  Phase 1 result). Feature branches `phase2/p1-gaps`, `phase2/p2-syllabus`,
+  `phase2/p3-sessions` merge back into it in the order P3 → P1 → P2.
+- A21 ⚑ Gap analysis runs against the *first* recording linked to the note.
+  A session has one recording (J4), so this is unambiguous today; a
+  multi-recording session would need a choice.
+- A22 A page with no strokes, or a note with no linked recording, is skipped
+  by gap analysis rather than failing.
+- A23 A re-run of gap analysis replaces `proposed` suggestions and leaves
+  `accepted` and `rejected` ones alone, so rejected points do not come back.
+- A24 Accepted gap text is displayed as recording-derived content attached to
+  the page. It is not editable in Phase 2 and never enters
+  `TranscriptRecord.markdown`.
+- A25 The syllabus review table always appears; nothing is written to the
+  calendar without confirmation, even when every row parsed cleanly.
+- A26 `sourceRef` is derived from an import key (the file name, or `pasted`
+  plus a hash of the text) plus the assignment title and resolved date. Editing
+  a title on the review screen therefore creates a new event rather than
+  updating the old one.
+- A27 Assignments whose date cannot be resolved are shown with an empty date
+  for manual entry and are excluded until one is given.
+- A28 ⚑ Starting a session requests the microphone. If that is refused the
+  session continues without audio; handwriting capture is never blocked.
+- A29 `pdfjs-dist` is added for PDF text extraction. Its worker is bundled
+  locally rather than loaded from a CDN, so the app keeps working offline.
+- A30 Gap analysis and syllabus extraction use the same Ollama model setting as
+  page transcription (`ollama.model`). No separate model picker in Phase 2.

@@ -405,3 +405,226 @@ feature replaces its own placeholders' bodies and keeps their export names.
   `src/app/DeviceStatus.test.tsx`.
 - happy-dom has no real canvas; rasterization is tested at the geometry level
   (scaling, aspect ratio, stroke widths) against a recorded 2D-context mock.
+
+---
+
+## 6. Phase 2 additions
+
+Product decisions are in `docs/spec-phase2.md`. Sections 1–5 above still
+describe the app; this section adds what Phase 2 introduces. Same rules apply:
+the code wins where it disagrees, and this file gets updated to match.
+
+### 6.1 Data model additions
+
+```ts
+export type GapStatus = 'proposed' | 'accepted' | 'rejected';
+
+export type GapKind =
+  | 'claim' | 'definition' | 'name-or-date' | 'example' | 'argument-step' | 'other';
+
+export interface GapSuggestionRecord {
+  id: string;
+  noteId: string;
+  pageId: string;
+  /** Recording the speech came from. */
+  recordingId: string;
+  /** Absolute epoch ms window of speech compared for this page. */
+  fromMs: number;
+  toMs: number;
+  /** The missing point, as the model stated it. */
+  text: string;
+  kind: GapKind;
+  /** Verbatim speech supporting it, so a claim can be checked against the audio. */
+  sourceQuote: string;
+  status: GapStatus;
+  model: string;
+  promptVersion: string;
+  /** True when the speech was summarized into bullets before comparison (J5), so the UI can say the source was lossy. */
+  summarized: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type GapAnalysisStatus = 'pending' | 'running' | 'done' | 'failed';
+
+/** Per-page record of the last gap analysis. Added to PageRecord as an optional field. */
+export interface GapAnalysisMeta {
+  status: GapAnalysisStatus;
+  at: number;
+  model: string;
+  promptVersion: string;
+  error: string | null;
+  summarized: boolean;
+}
+
+export interface PageRecord {
+  // ...all existing fields unchanged...
+  /** Absent means never analyzed. */
+  gapAnalysis?: GapAnalysisMeta | null;
+}
+```
+
+### 6.2 IndexedDB schema (version 3)
+
+The v1 and v2 upgrade blocks are frozen. v3 adds, inside `if (oldVersion < 3)`:
+
+| Store | keyPath | Indexes |
+|-------|---------|---------|
+| `gaps` | `id` | `by-note` → `noteId`, `by-page` → `pageId` |
+
+No data migration: `gapAnalysis` absent means never analyzed.
+
+### 6.3 Repositories
+
+`src/storage/gaps.ts`, in the established style: `createGap`, `getGap`,
+`updateGap(id, patch)`, `listGapsByNote(noteId)`, `listGapsByPage(pageId)`,
+`deleteGapsByPage(pageId, status?)` (a re-run deletes only `proposed`),
+`createGaps(records)` (one transaction for a batch). `pages.ts` gains
+`setPageGapAnalysis(id, meta)`.
+
+### 6.4 Shared Ollama text client — `src/llm/`
+
+Phase 1's `src/transcription/ollama.ts` speaks to Ollama for vision. P1 and P2
+need text generation with the same guards, so the low-level request, error
+naming and degenerate-output detection move to `src/llm/ollamaClient.ts` and
+transcription imports them. Transcription's public API
+(`createOllamaTranscriber`, `listOllamaModels`, `PageTranscriber`) must not
+change, and its tests must keep passing unmodified.
+
+```ts
+export interface TextGenerator {
+  /** One completion. Applies think:false, a num_predict cap, a timeout and degenerate-output rejection. */
+  generate(prompt: string, opts: {
+    model: string;
+    system?: string;
+    numPredict?: number;
+    signal?: AbortSignal;
+  }): Promise<string>;
+  /** As generate, but parses JSON, with one repair attempt before failing. */
+  generateJson<T>(prompt: string, opts: {
+    model: string;
+    system?: string;
+    numPredict?: number;
+    signal?: AbortSignal;
+    validate: (value: unknown) => T;
+  }): Promise<T>;
+}
+
+export function createOllamaTextGenerator(opts: {
+  baseUrl: string;
+  fetchImpl?: FetchLike;
+  timeoutMs?: number;
+}): TextGenerator;
+```
+
+`validate` is mandatory: a model's JSON is untrusted input, so every caller
+states the shape it expects and bad rows are dropped or the call fails, rather
+than being cast.
+
+### 6.5 Module contracts
+
+**P1 gap filling — `src/gaps/`**
+
+```ts
+/** Pure: which speech belongs to a page. */
+export function speechWindowForPage(page: PageRecord, opts?: { leadMs?: number; trailMs?: number }):
+  { fromMs: number; toMs: number } | null;
+
+/** Pure: segments overlapping a window, in order, as absolute-time text. */
+export function segmentsInWindow(recording: RecordingRecord, fromMs: number, toMs: number): TranscriptSegment[];
+
+/** Pure: split speech text for summarization when it exceeds the budget. */
+export function chunkSpeech(text: string, opts?: { budget?: number; overlap?: number }): string[];
+
+export interface GapAnalyzer {
+  /** Analyzes one page. Replaces its `proposed` suggestions; keeps accepted and rejected ones. */
+  analyzePage(pageId: string, opts?: { signal?: AbortSignal }): Promise<GapSuggestionRecord[]>;
+  /** Analyzes every eligible page of a note, serially. */
+  analyzeNote(noteId: string, opts?: { signal?: AbortSignal }): Promise<void>;
+}
+```
+
+Constants with defaults: `GAP_LEAD_MS` 60_000, `GAP_TRAIL_MS` 30_000,
+`GAP_DIRECT_CHAR_BUDGET` 6000, `GAP_CHUNK_CHARS` 3000, `GAP_CHUNK_OVERLAP` 300.
+Prompts live in a registry with versions, as in Phase 1 (D8a).
+
+**P2 syllabus import — `src/syllabus/`**
+
+```ts
+export interface ExtractedAssignment {
+  title: string;
+  /** Epoch ms, or null when the text gave no resolvable date. */
+  dueAt: number | null;
+  /** What the model read, kept for the review table when dueAt is null. */
+  rawDate: string;
+  estimatedMinutes: number | null;
+  notes: string;
+}
+
+/** Pure: text of a PDF, page by page. Pages with no usable text layer come back empty. */
+export function extractPdfText(data: ArrayBuffer): Promise<string[]>;
+
+/** Pure: resolve a date string against a term start. */
+export function resolveDueDate(raw: string, termStart: number, now: number): number | null;
+
+export interface SyllabusExtractor {
+  fromText(text: string, opts: { model: string; signal?: AbortSignal }): Promise<ExtractedAssignment[]>;
+  fromPdf(data: ArrayBuffer, opts: { model: string; signal?: AbortSignal }): Promise<ExtractedAssignment[]>;
+}
+
+/** Pure: stable sourceRef for idempotent re-import. */
+export function sourceRefFor(importKey: string, a: ExtractedAssignment): string;
+
+/** Writes confirmed rows as `kind: 'deadline'`, `source: 'syllabus'` events; updates on matching sourceRef. */
+export function importAssignments(rows: ConfirmedAssignment[], importKey: string): Promise<{ created: number; updated: number }>;
+```
+
+**P3 sessions — `src/capture/`**
+
+`CaptureEngine` gains two methods; everything else keeps its current
+behaviour:
+
+```ts
+  /** Creates a Session, opens a Note in it, and reports the ids. Ends any active note first. */
+  startSession(opts?: { title?: string }): Promise<{ sessionId: string; noteId: string }>;
+  /** Finalizes the page, completes the note, ends the session. No-op when idle. */
+  endSession(): Promise<void>;
+```
+
+`startNote()` keeps working for bare notes (and for pen-input auto-start).
+A session's audio is started by the UI, not the engine: the engine must not
+depend on the recorder, so `SessionControls` calls
+`engine.startSession()` then the recorder, and reports an audio failure
+without unwinding the session.
+
+### 6.6 Settings additions
+
+| Key | Type | Default | Owner |
+|-----|------|---------|-------|
+| `gaps.leadMs` | number | `60000` | P1 |
+| `gaps.trailMs` | number | `30000` | P1 |
+| `syllabus.termStart` | number \| null | `null` | P2 |
+
+### 6.7 File ownership (Phase 2)
+
+| Path | Owner |
+|------|-------|
+| `src/storage/**`, `src/llm/**`, `src/capture/types.ts`, placeholders | Phase 2 foundations |
+| `src/gaps/**`, `src/notes/GapPanel.tsx` | P1 |
+| `src/syllabus/**` | P2 |
+| `src/capture/engine.ts`, `src/capture/SessionControls.tsx` | P3 |
+| Everything from Phase 1 not listed | not edited |
+
+Foundations creates placeholders with their final export names:
+`src/notes/GapPanel.tsx` (mounted by `NotesView` beside the transcript panel),
+`src/capture/SessionControls.tsx` (mounted in the `AppShell` header),
+`src/syllabus/SyllabusImport.tsx` (mounted in the Triage view, since it feeds
+the calendar). Each feature replaces its own placeholder's body and keeps the
+name, so no feature edits another's mount point.
+
+## 7. Recorded defect (not fixed in Phase 2)
+
+`huionBLE.reconnect()` swallows the error when a reconnect succeeds but
+restoring the pen stream fails. The pad then reports connected while sending no
+pen input, and nothing retries; page turns still create empty pages. Found by
+F4, out of scope for Phase 1 and 2, recorded here so it is not rediscovered.
