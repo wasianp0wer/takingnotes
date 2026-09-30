@@ -10,21 +10,26 @@ export interface SyllabusPromptSpec {
   prompt: string;
 }
 
-const TEXT_RULES = `You are reading a course syllabus. List every assignment the student must hand in or sit.
+const TEXT_RULES = `You are reading a course syllabus. List every assignment the student must hand in, submit, or take (including exams and quizzes).
 
 Return a JSON array. Each element is an object:
 - "title": the assignment as the syllabus names it, e.g. "Essay 1", "Midterm exam", "Response paper 3".
-- "dueDate": the due date exactly as the syllabus writes it ("Oct 15", "10/15", "Week 5", "TBD"). Copy it verbatim; do not reformat it and do not work out a year.
+- "dueDate": the date text the syllabus gives for that item, copied verbatim - "Oct 15", "10/15", "Week 5" and "TBD" are all copied exactly as written. Do not reformat it and do not work out a year. Use "" only when the syllabus gives no date text at all for that item.
 - "kind": always the string "deadline".
-- "estimatedMinutes": a whole number of minutes of work, only if the syllabus states one. Omit it otherwise.
-- "notes": a short detail the syllabus gives (length, weighting, format). Omit it if there is none.
+- "estimatedMinutes": a whole number of minutes of work, only if the syllabus states one. Omit it, or use null, otherwise.
+- "notes": a short detail the syllabus gives (length, weighting, format). Omit it, or use null, if there is none.
 
 Rules:
 - Assignments and exams only. Skip class meetings, lectures, readings with no submission, office hours and policies.
-- Do not invent anything. If an item has no date in the text, use an empty string for "dueDate". Never guess a date, a year or an estimate.
-- One element per assignment. If the same assignment appears twice, list it once.
+- Do not invent anything. Never guess a date, a year, an estimate or an assignment the text does not state.
+- List each dated occurrence of a recurring item as its own element: twelve weekly response papers with twelve dates are twelve elements, not one. If the syllabus gives no dates for a recurring item, list it once with "" for "dueDate". Never work out a recurrence's dates yourself.
+- Do not list the same assignment twice from the same passage.
 - If there are no assignments, return [].
-- Output JSON only: no commentary, no explanation, no code fences.`;
+- Return the array itself, not an object containing it. The first character of your reply must be [ and the last must be ]. Never wrap it as {"assignments": [...]}.
+- Output JSON only: no commentary, no explanation, no code fences.
+
+The shape, for one assignment:
+[{"title": "Essay 1", "dueDate": "Oct 15", "kind": "deadline", "estimatedMinutes": 180, "notes": "5 pages"}]`;
 
 const GEMMA_TEXT = `${TEXT_RULES}
 
