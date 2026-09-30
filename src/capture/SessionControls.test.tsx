@@ -482,6 +482,29 @@ describe('SessionPanel', () => {
     expect(panel().textContent).not.toContain('interrupted');
   });
 
+  it('clears the notice once a new session starts', async () => {
+    await createNote({
+      title: 'Interrupted seminar',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      startedAt: 5_000,
+    });
+    render();
+    await settle();
+    expect(panel().textContent).toContain('recording was lost');
+
+    // Starting a session changes `activeNoteId`: the effect must re-read the
+    // notes list off that change, not just on mount. The new session's note
+    // is now the newest, and it is the engine's current note, so
+    // `interruptedNoteOf` excludes it - the notice should clear on its own,
+    // with no Dismiss click.
+    await click(button('Start session'));
+    await settle();
+
+    expect(panel().textContent).not.toContain('recording was lost');
+  });
+
   it('reads an interrupted session from the newest note only', () => {
     const note = (id: string, status: 'active' | 'complete' | 'interrupted', startedAt: number) =>
       ({ id, status, startedAt, legacy: false }) as never;
@@ -493,5 +516,17 @@ describe('SessionPanel', () => {
     expect(interruptedNoteOf([note('b', 'active', 2)], null)?.id).toBe('b');
     // Unless it is the note being written right now.
     expect(interruptedNoteOf([note('b', 'active', 2)], 'b')).toBeNull();
+    // A legacy header row is skipped entirely, even one whose status would
+    // otherwise look interrupted - the next-newest, clean note is the real
+    // newest as far as the notice is concerned.
+    expect(
+      interruptedNoteOf(
+        [
+          { id: 'legacy', status: 'interrupted', startedAt: 3, legacy: true } as never,
+          { id: 'a', status: 'complete', startedAt: 1, legacy: false } as never,
+        ],
+        null,
+      ),
+    ).toBeNull();
   });
 });
