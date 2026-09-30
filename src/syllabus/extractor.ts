@@ -45,6 +45,14 @@ const abortError = (): Error => {
   return err;
 };
 
+/**
+ * One notion of "this page has no text", used both to decide what goes to the
+ * vision reader and to decide what is worth sending to the model. Two different
+ * predicates would let a whitespace-only page fall between them: neither
+ * recovered nor included, and gone with nothing said about it.
+ */
+const isBlankPage = (text: string): boolean => text.trim() === '';
+
 export function createSyllabusExtractor(opts: SyllabusExtractorOptions): SyllabusExtractor {
   const now = opts.now ?? (() => Date.now());
   const extractText = opts.extractText ?? extractPdfText;
@@ -82,11 +90,19 @@ export function createSyllabusExtractor(opts: SyllabusExtractorOptions): Syllabu
   }
 
   async function fromPdf(data: ArrayBuffer, o: ExtractOptions): Promise<ExtractedAssignment[]> {
-    const pages = await extractText(data);
+    // Before the read, not after: extracting the text of a long PDF (and, for an
+    // all-scanned one, rendering every page) is the expensive part, and an import
+    // cancelled before it started should spend none of it.
+    if (o.signal?.aborted) throw abortError();
+
+    // A copy: the vision pass writes recovered text back into this array, and an
+    // `extractText` that cached its result would otherwise hand that text out as
+    // page text on the next import.
+    const pages = [...(await extractText(data))];
     o.onProgress?.({ phase: 'reading-pdf', page: pages.length, pages: pages.length });
 
     // Pages with no usable text layer are scanned: render and OCR them (P2-A5).
-    const scanned = pages.map((text, i) => (text === '' ? i + 1 : 0)).filter((n) => n > 0);
+    const scanned = pages.map((text, i) => (isBlankPage(text) ? i + 1 : 0)).filter((n) => n > 0);
     if (scanned.length > 0 && opts.pageReader) {
       const images = await renderPages(data, scanned);
       for (let i = 0; i < scanned.length; i += 1) {
@@ -104,7 +120,7 @@ export function createSyllabusExtractor(opts: SyllabusExtractorOptions): Syllabu
       }
     }
 
-    return fromText(pages.filter((text) => text.trim() !== '').join('\n\n'), o);
+    return fromText(pages.filter((text) => !isBlankPage(text)).join('\n\n'), o);
   }
 
   return { fromText, fromPdf };
