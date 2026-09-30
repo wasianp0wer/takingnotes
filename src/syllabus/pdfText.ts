@@ -47,6 +47,7 @@ async function withDocument<T>(
 ): Promise<T> {
   const pdfjs = await loadPdfjs();
   const task = pdfjs.getDocument({ data: copy(data) });
+  let result: T;
   try {
     let doc;
     try {
@@ -55,36 +56,115 @@ async function withDocument<T>(
       // A wrong or corrupt file is the most likely failure and reaches the user.
       throw unreadable(err);
     }
-    return await run(doc as never);
-  } finally {
-    await task.destroy();
+    result = await run(doc as never);
+  } catch (err) {
+    // Still release the worker - without it each call leaks one - but why the call
+    // failed is what the user needs to see, so a destroy that also fails must not
+    // replace the cause on its way out.
+    await task.destroy().catch(() => {});
+    throw err;
   }
+  // Nothing else went wrong, so a failure to release the worker is worth reporting.
+  await task.destroy();
+  return result;
+}
+
+/** A pdf.js text item. `transform[4]`/`[5]` are the item's x/y on the page. */
+interface TextItem {
+  str?: string;
+  hasEOL?: boolean;
+  transform?: number[];
+  width?: number;
+  height?: number;
+}
+
+/** Where an item sits, once we know it reported usable geometry. */
+interface Placed {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** A y shift of more than half a line height means pdf.js moved to the next line. */
+const LINE_BREAK_FRACTION = 0.5;
+
+/** A horizontal gap wider than this share of the line height is a word break. */
+const WORD_GAP_FRACTION = 0.2;
+
+function placementOf(item: TextItem): Placed | null {
+  const t = item.transform;
+  if (!Array.isArray(t) || typeof t[4] !== 'number' || typeof t[5] !== 'number') return null;
+  if (typeof item.width !== 'number' || typeof item.height !== 'number') return null;
+  if (!(item.height > 0)) return null;
+  return { x: t[4], y: t[5], width: item.width, height: item.height };
 }
 
 /**
- * The text of a PDF, page by page (architecture §6.5). A page whose text layer
- * is empty or near-empty comes back as `''` - a scanned page, not an error.
+ * What goes between two text items.
+ *
+ * `hasEOL` alone is not enough: pdf.js does not set it reliably, so a deadline
+ * table can arrive as one run of items and collapse into a single line, which puts
+ * one row's date next to another row's assignment. Geometry is the authoritative
+ * signal - a y change ends a line - and it also stops the opposite error: pdf.js
+ * splits a run mid-word on a font change or kerning, and a blanket space between
+ * items would turn "Sept" + "ember 15" into "Sept ember 15", a date that matches
+ * nothing and a deadline silently lost. Items with no usable geometry fall back to
+ * `hasEOL`, then a space.
+ */
+function separatorBetween(
+  prev: { placed: Placed | null; hasEOL: boolean },
+  next: Placed | null,
+): string {
+  const here = prev.placed;
+  if (here === null || next === null) return prev.hasEOL ? '\n' : ' ';
+
+  const lineHeight = Math.max(here.height, next.height);
+  if (prev.hasEOL) return '\n';
+  if (Math.abs(next.y - here.y) > lineHeight * LINE_BREAK_FRACTION) return '\n';
+
+  // Same line: a space only where the glyphs really are apart.
+  const gap = next.x - (here.x + here.width);
+  return gap > lineHeight * WORD_GAP_FRACTION ? ' ' : '';
+}
+
+function assemblePageText(items: TextItem[]): string {
+  let text = '';
+  let prev: { placed: Placed | null; hasEOL: boolean } | null = null;
+  for (const item of items) {
+    if (typeof item.str !== 'string') continue;
+    const placed = placementOf(item);
+    if (prev !== null) text += separatorBetween(prev, placed);
+    text += item.str;
+    prev = { placed, hasEOL: item.hasEOL === true };
+  }
+  return text
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+    .join('\n')
+    .trim();
+}
+
+/**
+ * The text of a PDF, page by page (architecture §6.5), with lines and words taken
+ * from item geometry (see `separatorBetween`) so a deadline table keeps each row on
+ * its own line. A page whose text layer is empty or near-empty comes back as `''` -
+ * a scanned page, not an error.
  */
 export function extractPdfText(data: ArrayBuffer): Promise<string[]> {
   return withDocument(data, async (doc) => {
     const pages: string[] = [];
     for (let n = 1; n <= doc.numPages; n += 1) {
       const page = (await doc.getPage(n)) as {
-        getTextContent(): Promise<{ items: Array<{ str?: string; hasEOL?: boolean }> }>;
+        getTextContent(): Promise<{ items: TextItem[] }>;
+        cleanup?(): unknown;
       };
       const { items } = await page.getTextContent();
-      let text = '';
-      for (const item of items) {
-        if (typeof item.str !== 'string') continue;
-        text += item.str;
-        text += item.hasEOL === true ? '\n' : ' ';
-      }
-      const tidy = text
-        .split('\n')
-        .map((line) => line.replace(/[ \t]+/g, ' ').trim())
-        .join('\n')
-        .trim();
+      const tidy = assemblePageText(items);
       pages.push(tidy.replace(/\s/g, '').length >= PAGE_TEXT_MIN_CHARS ? tidy : '');
+      // pdf.js keeps each page proxy's parsed content on the document until destroy,
+      // so a 60-page scan would hold 60 pages of it for nothing.
+      page.cleanup?.();
     }
     return pages;
   });
@@ -137,6 +217,7 @@ export function renderPdfPages(
         render(o: { canvasContext: unknown; viewport: unknown; canvas?: unknown }): {
           promise: Promise<void>;
         };
+        cleanup?(): unknown;
       };
       const base = page.getViewport({ scale: 1 });
       const scale = longEdge / Math.max(base.width, base.height);
@@ -148,6 +229,9 @@ export function renderPdfPages(
         viewport,
       }).promise;
       blobs.push(await surface.toBlob());
+      // Drops the page's parsed content, which pdf.js would otherwise hold until
+      // destroy - a whole scanned syllabus' worth of it by the last page.
+      page.cleanup?.();
     }
     return blobs;
   });
