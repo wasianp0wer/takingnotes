@@ -403,6 +403,9 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
 
     return enqueue(async () => {
       let ids: { sessionId: string; noteId: string };
+      // Declared out here so the rollback below can end a session whose note or
+      // page write never landed.
+      let createdSessionId: string | null = null;
       try {
         const startedAt = now();
         const stamp = new Date(startedAt).toLocaleString();
@@ -410,6 +413,7 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
         const device = controller.getState();
 
         const session = await createSession({ title, startedAt });
+        createdSessionId = session.id;
         const note = await createNote({
           title,
           deviceId: device.deviceName || 'huion',
@@ -454,6 +458,19 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
         // later opener has already claimed the flag, whose own op has not run
         // yet (or has already succeeded).
         if (openerSeq === opener) noteOpen = false;
+        // The session write landed but the note or page did not: without this the
+        // row would sit `active` with no note for the rest of the run, and only
+        // the next startup recovery would end it. Sessions are user-visible in
+        // Phase 2, and P1 reads them, so storage stays self-consistent now.
+        // Deliberately after the flag rollback and reported rather than thrown:
+        // the caller must see the original failure, not this cleanup's.
+        if (createdSessionId !== null) {
+          try {
+            await updateSession(createdSessionId, { status: 'ended', endedAt: now() });
+          } catch (cleanupError) {
+            console.error('[capture] ending a half-created session failed', cleanupError);
+          }
+        }
         throw error;
       }
       // Outside the `try`: the records are written and the state published, so a
@@ -484,7 +501,10 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
       const finalizedId = await closeOldPage(old);
       const noteId = state.activeNoteId;
       // Only reachable if the note's own creation failed; there is nothing to
-      // add a page to.
+      // add a page to. `old`'s strokes are dropped with it, deliberately: this
+      // turn queued behind a creation that never produced a note, so there is no
+      // page anywhere to attach them to. Needs a storage write failure and a page
+      // turn in the same window.
       if (noteId === null) return null;
 
       const pageIndex = state.pageIndex + 1;
