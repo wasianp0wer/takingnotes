@@ -123,9 +123,13 @@ function separatorBetween(
   if (prev.hasEOL) return '\n';
   if (Math.abs(next.y - here.y) > lineHeight * LINE_BREAK_FRACTION) return '\n';
 
-  // Same line: a space only where the glyphs really are apart.
+  // Same line: no separator only for a gap that is small AND non-negative, which is
+  // exactly the mid-word split. A NEGATIVE gap means the next item starts before the
+  // previous one ended, so the two are not in reading order relative to each other;
+  // reading that as "no gap" fused words inside the line ("2026October 15assignment
+  // due"), which silently deletes a word boundary. A space is the safe reading.
   const gap = next.x - (here.x + here.width);
-  return gap > lineHeight * WORD_GAP_FRACTION ? ' ' : '';
+  return gap < 0 || gap > lineHeight * WORD_GAP_FRACTION ? ' ' : '';
 }
 
 function assemblePageText(items: TextItem[]): string {
@@ -133,6 +137,19 @@ function assemblePageText(items: TextItem[]): string {
   let prev: { placed: Placed | null; hasEOL: boolean } | null = null;
   for (const item of items) {
     if (typeof item.str !== 'string') continue;
+    // An item with no glyphs of its own - a ligature marker, a notdef glyph, a
+    // marked-content anchor - can still report geometry, and pdf.js sometimes puts it
+    // at a y nowhere near the surrounding text. Letting that become the position the
+    // NEXT item is measured against inserted a line break between an assignment and
+    // its own date. So it contributes no geometry: the next real item is compared
+    // against the last real one. Its whitespace still reaches the text, because it may
+    // be the only thing between two flush runs, and an EOL marker it carries still
+    // ends the line - pdf.js writes those as an item with no string and no transform.
+    if (item.str.trim() === '') {
+      text += item.str;
+      if (prev !== null && item.hasEOL === true) prev = { placed: prev.placed, hasEOL: true };
+      continue;
+    }
     const placed = placementOf(item);
     if (prev !== null) text += separatorBetween(prev, placed);
     text += item.str;

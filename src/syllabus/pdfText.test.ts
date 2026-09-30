@@ -150,6 +150,73 @@ describe('extractPdfText', () => {
     expect(page).toBe('Essay 1 due Oct 15\nEssay 2 due Nov 1');
   });
 
+  it('ignores an empty item’s geometry, so a date stays on its assignment’s line', async () => {
+    // pdf.js emits items with no glyphs of their own - ligature markers, notdef
+    // glyphs, marked-content anchors - and such an item can carry artifact geometry
+    // at a y nowhere near the surrounding text. Measuring the next item against THAT
+    // instead of the last real item put a blank line between an assignment and its
+    // own date, on what pdf.js reported as a single line.
+    fakeDoc([
+      [
+        at('Essay 1 assignment due', 50, 700, 120),
+        at('', 500, 900, 0),
+        at('October 15 2026', 200, 700, 80),
+      ],
+    ]);
+    const [page] = await extractPdfText(bytes());
+    expect(page).toBe('Essay 1 assignment due October 15 2026');
+    // One line: the date must not be cut off from the assignment it belongs to.
+    expect(page.split('\n')).toHaveLength(1);
+  });
+
+  it('keeps a whitespace-only item’s space, so two adjacent words do not fuse', async () => {
+    // The space between these two runs exists only as its own item - the runs
+    // themselves are flush (50 + 40 = 90) - so dropping such an item outright, rather
+    // than only its geometry, would give 'assignmentdue'.
+    fakeDoc([
+      [
+        at('Essay 1 assignment', 50, 700, 40),
+        at(' ', 500, 900, 0),
+        at('due October 15', 90, 700, 60),
+      ],
+    ]);
+    const [page] = await extractPdfText(bytes());
+    expect(page).toBe('Essay 1 assignment due October 15');
+  });
+
+  it('still ends the line on a pdf.js EOL marker that has no geometry', async () => {
+    // pdf.js marks an end of line with an item that has no string and no transform.
+    // Both real items sit at the same y here, so the marker is the only thing that
+    // can break the line: ignoring it along with the artifact items would run one
+    // row's assignment into the next row's date.
+    fakeDoc([
+      [
+        at('Essay 1 due Oct 15', 50, 700, 90),
+        { str: '', hasEOL: true },
+        at('Essay 2 due Nov 1', 50, 700, 90),
+      ],
+    ]);
+    const [page] = await extractPdfText(bytes());
+    expect(page).toBe('Essay 1 due Oct 15\nEssay 2 due Nov 1');
+  });
+
+  it('spaces items that arrive with decreasing x, rather than fusing them', async () => {
+    // Every gap here is negative, which means these items are not in reading order
+    // relative to each other. Treating that like the mid-word case deleted the word
+    // boundaries WITHIN the line: '2026October 15assignment due'.
+    fakeDoc([
+      [
+        at('2026', 300, 700, 30),
+        at('October 15', 200, 700, 70),
+        at('assignment due', 60, 700, 100),
+      ],
+    ]);
+    const [page] = await extractPdfText(bytes());
+    expect(page).toBe('2026 October 15 assignment due');
+    expect(page).not.toContain('2026October');
+    expect(page).not.toContain('15assignment');
+  });
+
   it('releases each page’s parsed content as it goes', async () => {
     fakeDoc([[{ str: 'Essay 1 is due on October 15' }], [{ str: 'Midterm is November 2' }]]);
     await extractPdfText(bytes());
