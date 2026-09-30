@@ -165,6 +165,19 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
       const after = recorder.getState();
       if (after.status !== 'recording') {
         if (mounted.current) setAudioError(after.error ?? 'Recording did not start');
+      } else if (after.link?.sessionId !== ids.sessionId || after.link?.noteId !== ids.noteId) {
+        // The recorder singleton is shared with the header's Record button
+        // (P3-A3). If it was already recording, `recorder.start()` above was
+        // a silent no-op (recorder.ts line 204) and the recording keeps the
+        // link it captured earlier, not this session's - so this session's
+        // pages have no audio of their own, and P1's gap-filling would find
+        // none. Reported plainly (A28), never unwound: the session keeps
+        // running and keeps capturing handwriting.
+        if (mounted.current) {
+          setAudioError(
+            'The microphone was already recording for an earlier session, so this session has no audio of its own.',
+          );
+        }
       }
     } catch (error) {
       console.error('[session] recording could not start', error);

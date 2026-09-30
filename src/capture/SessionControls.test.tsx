@@ -250,6 +250,50 @@ describe('SessionPanel', () => {
     expect(button('End session')).toBeTruthy();
   });
 
+  it('reports a mislinked recording and keeps capturing handwriting', async () => {
+    // The header's Record button already has the recorder going (P3-A3) when
+    // Start session is pressed. The real recorder's start() is then a silent
+    // no-op (recorder.ts line 204) and the existing recording keeps the link
+    // it captured earlier - here, the standalone case from A10 - not this
+    // session's. `startImpl` mirrors that: it leaves the state untouched.
+    recorder.setState({
+      status: 'recording',
+      startedAt: 0,
+      elapsedMs: 0,
+      link: { sessionId: null, noteId: null },
+      error: null,
+    });
+    recorder.startImpl = async () => {};
+    render();
+
+    await click(button('Start session'));
+    await settle();
+
+    expect(panel().textContent).toContain(
+      'The microphone was already recording for an earlier session, so this session has no audio of its own.',
+    );
+    // The session is nevertheless open, not unwound (A28).
+    expect(button('End session')).toBeTruthy();
+    expect(engine.getState().activeNoteId).not.toBeNull();
+
+    const notesBefore = await listNotes();
+    expect(notesBefore).toHaveLength(1);
+    const noteId = notesBefore[0].id;
+    const pagesBefore = await listPages(noteId);
+    expect(pagesBefore).toHaveLength(1);
+    expect(countPoints(pagesBefore[0].strokes)).toBe(0);
+
+    // Handwriting still lands on the session's own note despite the mislink.
+    fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
+    fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+    await settle();
+
+    expect(engine.getState().activeNoteId).toBe(noteId);
+    const pagesAfter = await listPages(noteId);
+    expect(pagesAfter).toHaveLength(1);
+    expect(countPoints(pagesAfter[0].strokes)).toBeGreaterThan(0);
+  });
+
   it('reports a session that cannot start and touches neither pad nor microphone', async () => {
     const broken = {
       ...engine,
