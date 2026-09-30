@@ -591,4 +591,69 @@ describe('capture engine', () => {
     expect(await listNotes()).toHaveLength(1);
     logged.mockRestore();
   });
+
+  it('keeps writing on the session note when the pen comes down', async () => {
+    await engine.start();
+    const { sessionId, noteId } = await engine.startSession();
+
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await engine.flush();
+
+    // No second note and no second session: the pen's auto-start only fires
+    // when nothing is open.
+    expect(await listNotes()).toHaveLength(1);
+    expect(await listSessions()).toHaveLength(1);
+    expect(engine.getState().activeNoteId).toBe(noteId);
+    expect(engine.getState().activeSessionId).toBe(sessionId);
+    const pages = await listPages(noteId);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].strokes).toHaveLength(1);
+  });
+
+  it('serializes a session start, a page turn and a session end fired together', async () => {
+    await engine.start();
+
+    const starting = engine.startSession({ title: 'Seminar' });
+    const turning = engine.newPage('device-turn');
+    const ending = engine.endSession();
+    const [{ sessionId, noteId }] = await Promise.all([starting, turning, ending]);
+
+    // Queued, never interleaved: one note, pages 0 and 1, both finalized.
+    expect(await listNotes()).toHaveLength(1);
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => p.pageIndex)).toEqual([0, 1]);
+    for (const page of pages) expect(page.finalizedAt).not.toBeNull();
+    expect(await getNote(noteId)).toMatchObject({ status: 'complete' });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'ended' });
+    expect(engine.getState()).toEqual(IDLE);
+  });
+
+  it('recovers a session interrupted by a reload', async () => {
+    await engine.start();
+    const { sessionId, noteId } = await engine.startSession();
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await engine.flush();
+    // A reload or crash: nothing ended the session.
+    engine.dispose();
+
+    const next = createCaptureEngine({ controller: fake });
+    const finalized = vi.fn();
+    next.subscribePageFinalized(finalized);
+    await next.start();
+
+    expect(await getNote(noteId)).toMatchObject({ status: 'interrupted' });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'ended' });
+    const pages = await listPages(noteId);
+    expect(pages[0].finalizedAt).not.toBeNull();
+    // The recovered page still queues for transcription.
+    expect(finalized).toHaveBeenCalledWith(pages[0].id);
+    expect(next.getState()).toEqual(IDLE);
+    next.dispose();
+  });
 });
