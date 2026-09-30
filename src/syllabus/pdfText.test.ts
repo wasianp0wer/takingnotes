@@ -48,8 +48,11 @@ beforeEach(() => {
 
 describe('extractPdfText', () => {
   it('returns one string per page, in page order', async () => {
-    fakeDoc([[{ str: 'Page one' }], [{ str: 'Page two' }]]);
-    await expect(extractPdfText(bytes())).resolves.toEqual(['Page one', 'Page two']);
+    fakeDoc([[{ str: 'Essay 1 is due on October 15' }], [{ str: 'Midterm exam is on November 2' }]]);
+    await expect(extractPdfText(bytes())).resolves.toEqual([
+      'Essay 1 is due on October 15',
+      'Midterm exam is on November 2',
+    ]);
   });
 
   it('joins a page’s items and turns EOL markers into newlines', async () => {
@@ -69,6 +72,22 @@ describe('extractPdfText', () => {
     const pages = await extractPdfText(bytes());
     expect(pages).toEqual(['', '']);
     expect(PAGE_TEXT_MIN_CHARS).toBeGreaterThan(1);
+  });
+
+  it('treats a scan whose only text layer is a running footer as scanned', async () => {
+    // The reason the floor is where it is (P2-A4): counting this as a text layer
+    // would keep the page from the vision model and lose its assignments.
+    fakeDoc([[{ str: 'Page 3 of 9' }]]);
+    await expect(extractPdfText(bytes())).resolves.toEqual(['']);
+  });
+
+  it('pins the floor: one character short blanks, the floor itself survives', async () => {
+    // P2-A4 fixes the floor at 16; the pages either side of it are built from it.
+    expect(PAGE_TEXT_MIN_CHARS).toBe(16);
+    const short = 'x'.repeat(PAGE_TEXT_MIN_CHARS - 1);
+    const exact = 'y'.repeat(PAGE_TEXT_MIN_CHARS);
+    fakeDoc([[{ str: short }], [{ str: exact }]]);
+    await expect(extractPdfText(bytes())).resolves.toEqual(['', exact]);
   });
 
   it('destroys the document even when a page rejects', async () => {
@@ -143,6 +162,22 @@ describe('renderPdfPages', () => {
     expect(blobs).toHaveLength(2);
     // 600x800 at a long edge of 400 → scale 0.5.
     expect(sizes).toEqual([[300, 400], [300, 400]]);
+  });
+
+  it('throws on a page the document does not have, rather than skipping it', async () => {
+    // A skip would shorten the array and misalign it with `pageNumbers`, pairing
+    // one page's image with another page's text.
+    fakeDoc([[{ str: 'a' }], [{ str: 'b' }]]);
+    await expect(
+      renderPdfPages(bytes(), [1, 5], {
+        makeCanvas: () => ({
+          canvas: {},
+          context: {},
+          toBlob: () => Promise.resolve(new Blob(['png'], { type: 'image/png' })),
+        }),
+      }),
+    ).rejects.toThrow(/page 5.*2 pages/i);
+    expect(hooks.destroy).toHaveBeenCalledTimes(1);
   });
 
   it('destroys the document when rendering fails', async () => {

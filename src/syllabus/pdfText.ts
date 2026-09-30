@@ -2,12 +2,12 @@ import { loadPdfjs } from '@/syllabus/pdfjs';
 
 /**
  * Below this many non-whitespace characters a page has nothing to extract and is
- * treated as scanned (P2-A4): it goes through the vision path instead. A scanned
- * page's stray text layer is a page number or a mark, not a line of prose, so the
- * floor sits just above that: `pdfText.test.ts` pins a short real line ("Page
- * one", 7 characters) as text and a lone character as scanned.
+ * treated as scanned (P2-A4): it goes through the vision path instead. The floor
+ * is high enough to clear a scan whose only text layer is a running footer such
+ * as "Page 3 of 9" - counting that as text would keep the page away from the
+ * vision model and silently lose its assignments.
  */
-export const PAGE_TEXT_MIN_CHARS = 6;
+export const PAGE_TEXT_MIN_CHARS = 16;
 
 /** Long edge in px for a scanned page render. Above Phase 1's 768 legibility floor. */
 export const DEFAULT_PAGE_LONG_EDGE = 1400;
@@ -109,7 +109,13 @@ const defaultMakeCanvas: MakeCanvas = (width, height) => {
   };
 };
 
-/** Renders 1-based `pageNumbers` to PNGs, for the pages with no usable text layer. */
+/**
+ * Renders 1-based `pageNumbers` to PNGs, for the pages with no usable text layer.
+ * The result is index-aligned with `pageNumbers`, so a caller can pair `images[i]`
+ * with the i-th page it asked for. A page number the document does not have throws
+ * rather than being skipped: skipping would shorten the array and shift every
+ * later pairing, attaching one page's image to another page's text.
+ */
 export function renderPdfPages(
   data: ArrayBuffer,
   pageNumbers: number[],
@@ -121,7 +127,11 @@ export function renderPdfPages(
   return withDocument(data, async (doc) => {
     const blobs: Blob[] = [];
     for (const n of pageNumbers) {
-      if (n < 1 || n > doc.numPages) continue;
+      if (n < 1 || n > doc.numPages) {
+        throw new Error(
+          `Cannot render page ${n}: this PDF has ${doc.numPages} page${doc.numPages === 1 ? '' : 's'}`,
+        );
+      }
       const page = (await doc.getPage(n)) as {
         getViewport(o: { scale: number }): { width: number; height: number };
         render(o: { canvasContext: unknown; viewport: unknown; canvas?: unknown }): {
