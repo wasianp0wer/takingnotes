@@ -22,6 +22,12 @@ export type NewPageReason = 'device-turn' | 'manual';
  * carry `startedAt`/`endedAt`; `newPage` and `endNote` are serialized; and on
  * startup, notes left `active` become `interrupted`, their sessions `ended`, and
  * their unfinalized pages finalized.
+ *
+ * Phase 2 (docs/architecture.md §6.5) adds `startSession`/`endSession`. A
+ * session's audio is started by the UI, not the engine: the engine must not
+ * depend on the recorder, so `SessionControls` calls `startSession()` and then
+ * the recorder, and reports an audio failure without unwinding the session.
+ * `startNote()` keeps working for bare notes and for pen-input auto-start.
  */
 export interface CaptureEngine {
   getState(): CaptureState;
@@ -31,6 +37,10 @@ export interface CaptureEngine {
   startNote(opts?: { title?: string }): Promise<string>;
   /** Finalizes the active page, marks the note complete and the session ended. No-op when idle. */
   endNote(): Promise<void>;
+  /** Creates a Session, opens a Note in it, and reports the ids. Ends any active note first. */
+  startSession(opts?: { title?: string }): Promise<{ sessionId: string; noteId: string }>;
+  /** Finalizes the page, completes the note, ends the session. No-op when idle. */
+  endSession(): Promise<void>;
   /**
    * Finalizes the active page and makes a new one the active page.
    * No active note → no-op, resolves null.

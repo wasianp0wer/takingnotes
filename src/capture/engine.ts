@@ -469,6 +469,28 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
       return closeNote();
     },
 
+    // Phase 2's session flow belongs to P3 (docs/architecture.md §6.7). What is
+    // here is the thin delegation the interface needs to compile, and it is
+    // already correct for Phase 1's shape - `startNote` creates exactly one
+    // session per note and `endNote` ends it - so the tree stays green and
+    // behaviour does not change until P3 implements the real thing.
+    async startSession(opts = {}) {
+      const noteId = await startNote(opts);
+      const sessionId = state.activeSessionId;
+      if (sessionId === null) {
+        // Unreachable while `startNote` creates the session it opens the note
+        // in; asserted rather than fudged so a future divergence is loud.
+        throw new Error('Session started without a session id');
+      }
+      return { sessionId, noteId };
+    },
+
+    endSession() {
+      void start();
+      if (!noteOpen) return Promise.resolve();
+      return closeNote();
+    },
+
     async flush() {
       void start();
       await flushBuffer(buffer);

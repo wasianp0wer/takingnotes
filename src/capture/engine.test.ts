@@ -456,4 +456,52 @@ describe('capture engine', () => {
     expect(await listNotes()).toEqual([]);
     expect(engine.getState()).toEqual(IDLE);
   });
+  // P3 owns the real session flow (docs/architecture.md §6.7). These pin the
+  // interface's contract against the thin delegation shipped with the
+  // foundations, so P3 has a failing/passing line to build on.
+  it('startSession opens a session with a note in it and reports both ids', async () => {
+    await engine.start();
+
+    const { sessionId, noteId } = await engine.startSession({ title: 'Seminar' });
+
+    expect(engine.getState()).toMatchObject({
+      activeSessionId: sessionId,
+      activeNoteId: noteId,
+      pageIndex: 0,
+    });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'active', title: 'Seminar' });
+    expect(await getNote(noteId)).toMatchObject({ status: 'active', sessionId });
+    expect(await listPages(noteId)).toHaveLength(1);
+  });
+
+  it('endSession finalizes the page, completes the note and ends the session', async () => {
+    await engine.start();
+    const { sessionId, noteId } = await engine.startSession();
+    const pageId = engine.getState().activePageId;
+
+    await engine.endSession();
+
+    expect(engine.getState()).toEqual(IDLE);
+    expect(await getNote(noteId)).toMatchObject({ status: 'complete' });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'ended' });
+    const page = await getPage(pageId as string);
+    expect(page?.finalizedAt).not.toBeNull();
+  });
+
+  it('endSession is a no-op when idle', async () => {
+    await engine.start();
+    await expect(engine.endSession()).resolves.toBeUndefined();
+    expect(engine.getState()).toEqual(IDLE);
+    expect(await listSessions()).toEqual([]);
+  });
+
+  it('startSession ends an already-open note first', async () => {
+    await engine.start();
+    const firstNote = await engine.startNote({ title: 'Bare' });
+
+    const { noteId } = await engine.startSession({ title: 'Seminar' });
+
+    expect(noteId).not.toBe(firstNote);
+    expect(await getNote(firstNote)).toMatchObject({ status: 'complete' });
+  });
 });

@@ -40,6 +40,22 @@ export function createStubCaptureEngine(initial: Partial<CaptureState> = {}): St
     stateEmitter.emit(state);
   }
 
+  /**
+   * What both `startNote` and `startSession` do here: Phase 1 opens exactly one
+   * session per note, and the stub only has to satisfy the interface.
+   */
+  function open(): { sessionId: string; noteId: string } {
+    const sessionId = nextId('session');
+    const noteId = nextId('note');
+    setState({
+      activeSessionId: sessionId,
+      activeNoteId: noteId,
+      activePageId: nextId('page'),
+      pageIndex: 0,
+    });
+    return { sessionId, noteId };
+  }
+
   const engine: StubCaptureEngine = {
     newPageCalls,
     setState,
@@ -52,16 +68,15 @@ export function createStubCaptureEngine(initial: Partial<CaptureState> = {}): St
     getState: () => state,
     subscribe: (fn) => stateEmitter.subscribe(fn),
     async startNote() {
-      const noteId = nextId('note');
-      setState({
-        activeSessionId: nextId('session'),
-        activeNoteId: noteId,
-        activePageId: nextId('page'),
-        pageIndex: 0,
-      });
-      return noteId;
+      return open().noteId;
     },
     async endNote() {
+      setState({ ...IDLE });
+    },
+    async startSession() {
+      return open();
+    },
+    async endSession() {
       setState({ ...IDLE });
     },
     newPage(reason) {
