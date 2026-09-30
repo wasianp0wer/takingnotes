@@ -16,6 +16,7 @@ import type {
   GapAnalysisStatus,
   GapSuggestionRecord,
   PageStroke,
+  TranscriptSegment,
   TranscriptStatus,
 } from '@/storage/types';
 import { resetDatabase } from '@/test/resetDb';
@@ -70,6 +71,8 @@ async function seedPage(
     withRecording?: boolean;
     recordingTranscriptStatus?: TranscriptStatus;
     finalizedAt?: number | null;
+    /** The recording's transcript segments; the default overlaps the page's window. */
+    segments?: TranscriptSegment[];
   } = {},
 ) {
   const startedAt = 1_000_000;
@@ -114,7 +117,9 @@ async function seedPage(
     recordingId = recording.id;
     await setRecordingTranscript(recording.id, {
       text: 'speech',
-      segments: [{ startMs: 5_000, endMs: 26_000, text: 'The treaty was signed in 1919.' }],
+      segments: opts.segments ?? [
+        { startMs: 5_000, endMs: 26_000, text: 'The treaty was signed in 1919.' },
+      ],
       model: 'Xenova/whisper-base.en',
       language: 'en',
       status: opts.recordingTranscriptStatus ?? 'done',
@@ -584,7 +589,47 @@ describe('GapPanel', () => {
     await render({ noteId, pageId });
 
     expect(container.textContent).toContain(describeGapSkip('no-recording'));
+    // The page still has timestamped strokes, so it still has a stroke window -
+    // but there is no recording to compare it against, and a present-tense
+    // "Comparing against the recording from … to …" beside "This note has no
+    // linked recording." is a falsehood next to a contradiction.
+    expect(container.textContent).not.toContain('Comparing against the recording');
     expect(buttonByText('Find gaps').disabled).toBe(true);
     expect(buttonByText('Find gaps in note').disabled).toBe(true);
+  });
+
+  it('says the window matched no speech rather than that no gaps were found', async () => {
+    // The page is comparable and the analysis ran, but every segment of the
+    // recording falls outside the page's window: nothing was compared, which is
+    // not the same as the notes being complete.
+    const { noteId, pageId } = await seedPage({
+      segments: [{ startMs: 500_000, endMs: 520_000, text: 'Much later in the lecture.' }],
+    });
+    await setPageGapAnalysis(pageId, gapAnalysisMeta('done'));
+
+    await render({ noteId, pageId });
+
+    expect(container.textContent).toContain(
+      "The recording has no speech in this page's time window.",
+    );
+    expect(container.textContent).not.toContain('No gaps found');
+  });
+
+  it('says the window matched no speech even when earlier proposals survive', async () => {
+    // The analyzer now keeps the page's proposals when the window matched no
+    // speech, so this is the common shape of that run: the list is unchanged and
+    // the only thing that explains why is this line.
+    const { noteId, pageId, recordingId } = await seedPage({
+      segments: [{ startMs: 500_000, endMs: 520_000, text: 'Much later in the lecture.' }],
+    });
+    await createGap(gapInput(pageId, noteId, recordingId!));
+    await setPageGapAnalysis(pageId, gapAnalysisMeta('done'));
+
+    await render({ noteId, pageId });
+
+    expect(container.textContent).toContain(
+      "The recording has no speech in this page's time window.",
+    );
+    expect(container.textContent).toContain('The treaty was the Treaty of Versailles.');
   });
 });

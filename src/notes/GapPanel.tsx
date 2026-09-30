@@ -4,7 +4,7 @@ import type { GapAnalyzer } from '@/gaps/analyzer';
 import { recordingForNote } from '@/gaps/analyzer';
 import { describeGapSkip, gapEligibility } from '@/gaps/eligibility';
 import { createConfiguredGapAnalyzer } from '@/gaps/startGaps';
-import { speechWindowForPage } from '@/gaps/window';
+import { segmentsInWindow, speechTextOf, speechWindowForPage } from '@/gaps/window';
 import { Button } from '@/components/ui/button';
 import { listGapsByPage, updateGap } from '@/storage/gaps';
 import { getPage } from '@/storage/pages';
@@ -170,6 +170,23 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
   const findGapsDisabled = running !== null || eligible?.ok !== true;
   const findGapsInNoteDisabled = running !== null || recording === null;
 
+  // Only a page that is genuinely comparable may claim a recording comparison.
+  // A page with a stroke window but no recording (or one still transcribing)
+  // has nothing to compare, so the present-tense source note would state a
+  // falsehood - and read as a contradiction beside the skip sentence below it.
+  const sourceWindow = eligible?.ok === true ? speechWindow : null;
+
+  // The speech the analyzer would have compared, derived exactly as the
+  // analyzer derives it. `''` means the window overlapped no speech at all: a
+  // wrongly linked recording, a device clock that disagrees, a legacy import.
+  // That is "nothing was compared", not "your notes are complete", and the two
+  // must not share a sentence. `GapAnalysisMeta` has no field for it and
+  // `src/storage/types.ts` is not P1's to extend, so it is derived, not stored.
+  const windowSpeech =
+    sourceWindow !== null && recording !== null
+      ? speechTextOf(segmentsInWindow(recording, sourceWindow.fromMs, sourceWindow.toMs))
+      : null;
+
   const meta = page?.gapAnalysis;
   // The lossy-source statement on the status line describes *this*
   // analysis, so it is gated on the analysis meta alone - not on whether any
@@ -190,10 +207,16 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
   } else if (meta.status === 'failed') {
     statusLine = `Gap analysis failed: ${meta.error ?? 'unknown error'}`;
     statusIsError = true;
+  } else if (meta.status === 'done' && windowSpeech === '') {
+    // Checked before the "found nothing" line and regardless of how many
+    // suggestions are listed: the analyzer keeps the page's proposals when the
+    // window matched no speech, so this line is the only thing that explains a
+    // run which changed nothing.
+    statusLine = "The recording has no speech in this page's time window.";
   } else if (meta.status === 'done' && proposed.length === 0) {
     // "found nothing" means no *proposed* suggestions from this analysis -
     // an accepted or rejected leftover from an earlier run must not swallow
-    // the line.
+    // the line. It is only true because there was speech to compare.
     statusLine = 'No gaps found in the recording for this page.';
   }
 
@@ -205,8 +228,8 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
       className="border-t border-border p-4"
     >
       <h3 className="text-sm font-medium">Gaps</h3>
-      {speechWindow && (
-        <p className="text-xs text-muted-foreground">{formatSourceWindow(speechWindow)}</p>
+      {sourceWindow && (
+        <p className="text-xs text-muted-foreground">{formatSourceWindow(sourceWindow)}</p>
       )}
       {loadError && <p className="mt-1 text-sm text-destructive">{loadError}</p>}
 
