@@ -1,9 +1,24 @@
 import { describe, expect, it } from 'vitest';
 
-import { dedupeAssignments, normalizeTitle, parseAssignments } from '@/syllabus/assignments';
+import {
+  dedupeAssignments,
+  MAX_ESTIMATED_MINUTES,
+  normalizeTitle,
+  parseAssignments,
+} from '@/syllabus/assignments';
+import { MAX_ESTIMATED_MINUTES as MAX_ESTIMATED_MINUTES_REVIEW } from '@/syllabus/reviewRows';
 
 const local = (y: number, m: number, d: number) => new Date(y, m - 1, d).getTime();
 const ctx = { termStart: local(2026, 9, 1), now: local(2026, 9, 30) };
+
+/**
+ * The real `String.prototype.isWellFormed`, reached through `unknown` rather
+ * than a direct call: this project's `lib` predates ES2024, so a direct call
+ * would not type-check, but the runtime method itself is what should decide
+ * whether truncation left a lone surrogate half behind.
+ */
+const isWellFormed = (s: string): boolean =>
+  (s as unknown as { isWellFormed(): boolean }).isWellFormed();
 
 describe('parseAssignments', () => {
   it('maps a well-formed array, resolving each date', () => {
@@ -126,6 +141,17 @@ describe('parseAssignments', () => {
     expect(rows.map((r) => r.estimatedMinutes)).toEqual([null, null, null, 2880]);
   });
 
+  it('accepts a model-stated estimate of 3000 (between the old 2880 cap and the current one)', () => {
+    // The old cap here (2880) disagreed with the cap the review screen let a
+    // user type by hand (100,000): a model stating 3000 was silently nulled
+    // and shown as the 60-minute default, a number the user could type but
+    // the model could not state. 2880 and huge/infinite values behave
+    // identically under either cap, so only a value in this gap would catch
+    // a regression back to the old one.
+    const rows = parseAssignments([{ title: 'A', dueDate: 'Oct 15', estimatedMinutes: 3000 }], ctx);
+    expect(rows[0].estimatedMinutes).toBe(3000);
+  });
+
   it('caps the length of every text field it keeps', () => {
     const rows = parseAssignments(
       [{ title: 'a'.repeat(200_000), dueDate: 'x'.repeat(5_000), notes: 'n'.repeat(5_000) }],
@@ -134,6 +160,19 @@ describe('parseAssignments', () => {
     expect(rows[0].title.length).toBe(200);
     expect(rows[0].rawDate.length).toBe(100);
     expect(rows[0].notes.length).toBe(500);
+  });
+
+  it('truncates by code point, never splitting a surrogate pair in half', () => {
+    // ASCII text ('a'.repeat(...), above) truncates identically whether the
+    // cap counts code points or code units, so it would not catch a
+    // regression to a plain `.slice()`. This title is exactly MAX_TITLE
+    // (200) code points, its last one an astral-plane emoji that is two
+    // UTF-16 code units - the case a naive code-unit slice would cut through.
+    const title = `${'a'.repeat(199)}😀`;
+    const rows = parseAssignments([{ title, dueDate: 'Oct 15' }], ctx);
+    expect(isWellFormed(rows[0].title)).toBe(true);
+    expect(rows[0].title.endsWith('😀')).toBe(true);
+    expect(rows[0].title).toBe(title);
   });
 
   it('refuses a resolved date that cannot belong to this term', () => {
@@ -176,6 +215,12 @@ describe('normalizeTitle', () => {
   it('keeps internal punctuation, which may distinguish two real items', () => {
     expect(normalizeTitle('Essay #1')).not.toBe(normalizeTitle('Essay 1'));
     expect(normalizeTitle('Essay one')).not.toBe(normalizeTitle('Essay 1'));
+  });
+});
+
+describe('MAX_ESTIMATED_MINUTES', () => {
+  it('is the one constant reviewRows.ts re-exports rather than declaring its own', () => {
+    expect(MAX_ESTIMATED_MINUTES_REVIEW).toBe(MAX_ESTIMATED_MINUTES);
   });
 });
 
@@ -290,6 +335,18 @@ describe('dedupeAssignments', () => {
       { title: 'Final paper', dueAt: null, rawDate: 'Week 14', estimatedMinutes: null, notes: '' },
     ]);
     expect(rows.map((r) => r.rawDate)).toEqual(['TBD', 'Week 14']);
+  });
+
+  it('escapes the separator inside an unresolved title/raw-date, so two different rows cannot collide', () => {
+    // Unescaped, the key is `${title}|raw:${rawDate}`, and both rows below
+    // produce the identical string 'a|raw:b|raw:c': row 1 from
+    // title='a|raw:b' + rawDate='c', row 2 from title='a' +
+    // rawDate='b|raw:c'. Escaping the '|' must keep them apart.
+    const rows = dedupeAssignments([
+      { title: 'A|raw:B', dueAt: null, rawDate: 'C', estimatedMinutes: null, notes: '' },
+      { title: 'A', dueAt: null, rawDate: 'B|raw:C', estimatedMinutes: null, notes: '' },
+    ]);
+    expect(rows).toHaveLength(2);
   });
 
   it('does not mutate the rows it was given', () => {

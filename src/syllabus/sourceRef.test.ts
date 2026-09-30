@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { dedupeAssignments } from '@/syllabus/assignments';
 import { importKeyForFile, importKeyForPastedText, sourceRefFor } from '@/syllabus/sourceRef';
 
 const local = (y: number, m: number, d: number, h = 0) => new Date(y, m - 1, d, h).getTime();
@@ -66,6 +67,51 @@ describe('sourceRefFor', () => {
     expect(dots).not.toBe(dashes);
     expect(dots).toBe(sourceRefFor(KEY, { title: '...', dueAt: d }));
     expect(dashes).toBe(sourceRefFor(KEY, { title: '---', dueAt: d }));
+  });
+});
+
+describe('agreement with dedupeAssignments on "the same day" (day.ts)', () => {
+  // sourceRefFor and dedupeAssignments both decide "same day" via the shared
+  // day.ts, on purpose (A26): a second, independent notion of "same day" in
+  // either module would let them drift apart and reopen that bug silently.
+  // These instants sit close to local midnight, where a UTC-based day (e.g.
+  // `toISOString()`) would disagree with a local one - the exact drift the
+  // shared module exists to prevent.
+
+  it('agree that two instants sharing a local day, but not a UTC day, are the same day', () => {
+    const lateAtNight = new Date(2026, 9, 15, 23, 30).getTime(); // 11:30pm, 15 Oct local
+    const justAfterMidnight = new Date(2026, 9, 15, 0, 30).getTime(); // 12:30am, 15 Oct local
+
+    const rows = dedupeAssignments([
+      { title: 'Essay 1', dueAt: lateAtNight, rawDate: 'a', estimatedMinutes: null, notes: '' },
+      {
+        title: 'Essay 1',
+        dueAt: justAfterMidnight,
+        rawDate: 'b',
+        estimatedMinutes: null,
+        notes: '',
+      },
+    ]);
+    expect(rows).toHaveLength(1);
+
+    expect(sourceRefFor(KEY, { title: 'Essay 1', dueAt: lateAtNight })).toBe(
+      sourceRefFor(KEY, { title: 'Essay 1', dueAt: justAfterMidnight }),
+    );
+  });
+
+  it('agree that two instants on different local days are different days', () => {
+    const endOfDay = new Date(2026, 9, 15, 23, 59).getTime();
+    const startOfNextDay = new Date(2026, 9, 16, 0, 1).getTime();
+
+    const rows = dedupeAssignments([
+      { title: 'Essay 1', dueAt: endOfDay, rawDate: 'a', estimatedMinutes: null, notes: '' },
+      { title: 'Essay 1', dueAt: startOfNextDay, rawDate: 'b', estimatedMinutes: null, notes: '' },
+    ]);
+    expect(rows).toHaveLength(2);
+
+    expect(sourceRefFor(KEY, { title: 'Essay 1', dueAt: endOfDay })).not.toBe(
+      sourceRefFor(KEY, { title: 'Essay 1', dueAt: startOfNextDay }),
+    );
   });
 });
 
