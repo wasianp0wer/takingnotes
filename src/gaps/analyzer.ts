@@ -122,6 +122,15 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
     }
   }
 
+  /** Puts a page back to never-analyzed, with the same guard as `writeMeta`. */
+  async function clearMeta(pageId: string): Promise<void> {
+    try {
+      await setPageGapAnalysis(pageId, null);
+    } catch (storageError) {
+      console.error('[gaps] could not clear analysis state', pageId, storageError);
+    }
+  }
+
   /**
    * One summarize call per chunk, serially: Ollama serves one model at a time,
    * so a parallel fan-out would only queue, and it would turn one slow call into
@@ -158,16 +167,28 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
     });
   }
 
-  async function analyzePage(
+  /**
+   * One page, reporting whether it was skipped as well as what it created -
+   * `analyzeNote` needs to tell a skip from an analysis that found nothing, and
+   * both return no records.
+   *
+   * `resolvedRecording` is the note's recording when the caller has already found
+   * it; `undefined` means nobody has. `recordingForNote` scans every recording's
+   * metadata, so a note-wide run passes its one answer down rather than repeating
+   * the scan per page.
+   */
+  async function runPage(
     pageId: string,
-    opts: { signal?: AbortSignal } = {},
-  ): Promise<GapSuggestionRecord[]> {
+    opts: { signal?: AbortSignal },
+    resolvedRecording?: RecordingRecord | null,
+  ): Promise<{ skipped: boolean; created: GapSuggestionRecord[] }> {
     const page = await getPage(pageId);
     // A missing page is a programming error, not a skip: the caller passed an id
     // that never existed or has been deleted under it.
     if (!page) throw new Error(`Page not found: ${pageId}`);
 
-    const recording = await recordingForNote(page.noteId);
+    const recording =
+      resolvedRecording === undefined ? await recordingForNote(page.noteId) : resolvedRecording;
     const window = speechWindowForPage(page, { leadMs, trailMs });
 
     // Not eligible is a skip that writes **no** `gapAnalysis` at all (A22,
@@ -175,7 +196,9 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
     // panel it had been. The two null checks restate what `gapEligibility`
     // already guarantees, so TypeScript can see it below.
     const eligible = gapEligibility(page, recording, window);
-    if (!eligible.ok || recording === null || window === null) return [];
+    if (!eligible.ok || recording === null || window === null) {
+      return { skipped: true, created: [] };
+    }
 
     // Eligibility has established the page's transcript is `done`.
     const notes = page.transcript?.markdown ?? '';
@@ -197,7 +220,7 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
         // stale proposals go and the analysis is recorded with zero findings.
         await deleteGapsByPage(pageId, 'proposed');
         await writeMeta(pageId, 'done', promptVersionDirect, false, null);
-        return [];
+        return { skipped: false, created: [] };
       }
 
       summarized = speech.length > directCharBudget;
@@ -239,7 +262,7 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
       );
 
       await writeMeta(pageId, 'done', promptVersion, summarized, null);
-      return created;
+      return { skipped: false, created };
     } catch (error) {
       await writeMeta(
         pageId,
@@ -250,6 +273,13 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
       );
       throw error;
     }
+  }
+
+  async function analyzePage(
+    pageId: string,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<GapSuggestionRecord[]> {
+    return (await runPage(pageId, opts)).created;
   }
 
   /**
@@ -266,20 +296,29 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
     if (pages.length === 0) return;
 
     // One recording lookup for the whole note: it reads every recording's
-    // metadata, and the answer is the same for every page.
+    // metadata, and the answer is the same for every page, so it is passed down
+    // to each page rather than looked up again per page.
     const recording = await recordingForNote(noteId);
-    const eligible = pages.filter(
-      (page) =>
-        gapEligibility(page, recording, speechWindowForPage(page, { leadMs, trailMs })).ok,
-    );
+    const marked = new Set<string>();
     const promptVersion = gapPromptVersion(deps.model, false);
-    for (const page of eligible) {
+    for (const page of pages) {
+      if (!gapEligibility(page, recording, speechWindowForPage(page, { leadMs, trailMs })).ok) {
+        continue;
+      }
       await writeMeta(page.id, 'pending', promptVersion, false, null);
+      marked.add(page.id);
     }
 
     for (const page of pages) {
       try {
-        await analyzePage(page.id, opts);
+        const run = await runPage(page.id, opts, recording);
+        // A page that was eligible during the scan but not by the time its turn
+        // came - its transcript re-run, its strokes trimmed - must not keep the
+        // `pending` mark: a skipped page carries no `gapAnalysis` (P1-A1), and a
+        // stale `pending` would leave the panel saying "Waiting to analyze..."
+        // for good. Only marks this run wrote are cleared, so a page that was
+        // already ineligible keeps whatever an earlier run recorded.
+        if (run.skipped && marked.has(page.id)) await clearMeta(page.id);
       } catch (error) {
         if (isAbort(error)) throw error;
         console.error('[gaps] page analysis failed', page.id, error);

@@ -7,6 +7,7 @@ import {
   type FakeGeneratorCall,
   type FakeTextGenerator,
 } from '@/gaps/fakeTextGenerator';
+import { getGapPrompt } from '@/gaps/prompts';
 import { createGaps, listGapsByPage } from '@/storage/gaps';
 import { createNote } from '@/storage/notes';
 import { createPage, getPage, setPageTranscript } from '@/storage/pages';
@@ -224,6 +225,9 @@ describe('createGapAnalyzer', () => {
     expect(lastCall(generator).prompt).toContain(NOTES);
     expect(lastCall(generator).prompt).toContain(SPEECH);
     expect(lastCall(generator).model).toBe(MODEL);
+    // The system prompt carries the whole "JSON only, substance only" ruleset, so
+    // a call that dropped it would ask the model for something else entirely.
+    expect(lastCall(generator).system).toBe(getGapPrompt('compare', MODEL).system);
 
     expect(created).toHaveLength(1);
     const records = await listGapsByPage(pageId);
@@ -283,7 +287,9 @@ describe('createGapAnalyzer', () => {
 
     expect(generator.calls).toHaveLength(chunks.length + 1);
     expect(generator.calls.slice(0, chunks.length).every((call) => !call.json)).toBe(true);
+    expect(generator.calls[0].system).toBe(getGapPrompt('summarize', MODEL).system);
     expect(lastCall(generator).json).toBe(true);
+    expect(lastCall(generator).system).toBe(getGapPrompt('compare', MODEL).system);
     expect(lastCall(generator).prompt).toContain('- bullet 0');
     expect(lastCall(generator).prompt).not.toContain(speech);
 
@@ -307,8 +313,10 @@ describe('createGapAnalyzer', () => {
     });
     const chunks = chunkSpeech(speech, { budget: 100, overlap: 20 });
     expect(chunks.length).toBeGreaterThanOrEqual(3);
-    // The first chunk summarizes to nothing; the rest to one bullet each.
-    const summaries = chunks.map((_, index) => (index === 0 ? '' : `- bullet ${index}`));
+    // The empty summary sits in the middle on purpose. At either end, joining it
+    // in instead of skipping it would only add a newline that `buildCompare`
+    // trims off again, and no assertion could tell the two apart.
+    const summaries = chunks.map((_, index) => (index === 1 ? '' : `- bullet ${index}`));
     const generator = createFakeTextGenerator([...summaries, ONE_POINT]);
 
     await analyzerFor(generator, {
@@ -318,11 +326,46 @@ describe('createGapAnalyzer', () => {
     }).analyzePage(pageId);
 
     expect(generator.calls).toHaveLength(chunks.length + 1);
-    // The empty summary is left out of the comparison rather than joined in as a
-    // blank line, so the surviving bullets are consecutive.
-    expect(lastCall(generator).prompt).toContain(summaries.slice(1).join('\n'));
+    // The bullets either side of the skipped chunk are consecutive: no blank line
+    // where its empty summary would have been.
+    const comparePrompt = lastCall(generator).prompt;
+    expect(comparePrompt).toContain('- bullet 0\n- bullet 2');
+    expect(comparePrompt).not.toMatch(/- bullet 0\n\s*\n/);
     expect(await listGapsByPage(pageId)).toHaveLength(1);
     expect(await gapAnalysisOf(pageId)).toMatchObject({ status: 'done', error: null });
+  });
+
+  it('compares the raw speech when every chunk summarizes to nothing', async () => {
+    const speech = distinctWords(250);
+    const { pageId } = await seed({
+      segments: [{ startMs: 5_000, endMs: 26_000, text: speech }],
+    });
+    const chunks = chunkSpeech(speech, { budget: 100, overlap: 20 });
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    const generator = createFakeTextGenerator([...chunks.map(() => ''), ONE_POINT]);
+
+    await analyzerFor(generator, {
+      directCharBudget: 200,
+      chunkChars: 100,
+      chunkOverlap: 20,
+    }).analyzePage(pageId);
+
+    // A summarizer that produced nothing must not be read as a lecture that said
+    // nothing: the raw speech is compared instead, still flagged as the lossy path.
+    expect(generator.calls).toHaveLength(chunks.length + 1);
+    expect(lastCall(generator).prompt).toContain(speech);
+    const records = await listGapsByPage(pageId);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      summarized: true,
+      promptVersion: 'gap-summarize-gemma-v1+gap-compare-gemma-v1',
+    });
+    expect(await gapAnalysisOf(pageId)).toMatchObject({
+      status: 'done',
+      error: null,
+      summarized: true,
+      promptVersion: 'gap-summarize-gemma-v1+gap-compare-gemma-v1',
+    });
   });
 
   it('drops the bad rows of a response and still reports done', async () => {
@@ -642,6 +685,37 @@ describe('createGapAnalyzer', () => {
     expect(await gapAnalysisOf(pageIds[0])).toMatchObject({ status: 'done' });
     expect(await gapAnalysisOf(pageIds[1])).toBeUndefined();
     expect(await listGapsByPage(pageIds[1])).toEqual([]);
+  });
+
+  it('analyzeNote clears the pending mark of a page that turns out ineligible', async () => {
+    const markdowns = ['Page one notes.', 'Page two notes.'];
+    const { noteId, pageIds } = await seedNote(markdowns);
+    const generator = createFakeTextGenerator([ONE_POINT]);
+
+    // While page one is being compared, page two's handwriting transcript is
+    // re-run, so by the time its turn comes it is no longer eligible.
+    let markBefore: GapAnalysisStatus | undefined;
+    generator.onGenerate = async (call) => {
+      if (!call.prompt.includes(markdowns[0])) return;
+      markBefore = (await gapAnalysisOf(pageIds[1]))?.status;
+      await setPageTranscript(pageIds[1], {
+        markdown: markdowns[1],
+        model: MODEL,
+        promptVersion: 'gemma-v1',
+        status: 'running',
+        error: null,
+        updatedAt: 0,
+      });
+    };
+
+    await analyzerFor(generator).analyzeNote(noteId);
+
+    expect(markBefore).toBe('pending');
+    expect(generator.calls).toHaveLength(1);
+    expect(await gapAnalysisOf(pageIds[0])).toMatchObject({ status: 'done', error: null });
+    // Skipped, so it carries no analysis at all - not a `pending` the panel would
+    // show as "Waiting to analyze…" for ever (P1-A1).
+    expect(await gapAnalysisOf(pageIds[1])).toBeNull();
   });
 
   it('analyzeNote continues past a page that fails', async () => {
