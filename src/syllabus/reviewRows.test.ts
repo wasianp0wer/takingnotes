@@ -70,6 +70,24 @@ describe('rowsFromExtracted', () => {
     expect(row).toMatchObject({ dueDate: '', dueTime: '', include: false, rawDate: 'TBD' });
   });
 
+  it('does not resurrect an implausible year from rawDate (P2-A2)', () => {
+    // `parseAssignments` nulls a fabricated year; re-reading `rawDate` here must
+    // not undo that, or the invented date arrives pre-ticked for the write.
+    for (const rawDate of ['Oct 15, 1823', 'Oct 15, 2099']) {
+      const [row] = rowsFromExtracted([extracted({ dueAt: null, rawDate })], TERM, NOW);
+      expect(row).toMatchObject({ dueDate: '', dueTime: '', include: false, rawDate });
+    }
+  });
+
+  it('still resolves a plausible year from rawDate', () => {
+    const [row] = rowsFromExtracted(
+      [extracted({ dueAt: null, rawDate: 'Feb 3, 2027' })],
+      TERM,
+      NOW,
+    );
+    expect(row).toMatchObject({ dueDate: '2027-02-03', include: true });
+  });
+
   it('leaves an unstated estimate empty rather than inventing one', () => {
     const [row] = rowsFromExtracted([extracted({ estimatedMinutes: null })], TERM, NOW);
     expect(row.estimatedMinutes).toBe('');

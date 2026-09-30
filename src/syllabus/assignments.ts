@@ -1,3 +1,4 @@
+import { localDayKey } from '@/syllabus/day';
 import { resolveDueDate } from '@/syllabus/dates';
 
 /** One assignment as extraction understood it (architecture §6.5). */
@@ -25,8 +26,14 @@ const MAX_TITLE = 200;
 const MAX_RAW_DATE = 100;
 const MAX_NOTES = 500;
 
-/** Two days of work. Beyond this the model is not reporting a stated estimate. */
-const MAX_ESTIMATE_MINUTES = 2 * 24 * 60;
+/**
+ * The ceiling on any estimate, however it arrives - stated by the model here, or
+ * typed by the user on the review screen, which imports this. One constant for
+ * both: a number the user may type by hand must not be one the model is
+ * forbidden to state, and this guard exists to reject nonsense (non-finite,
+ * zero, negative, absurd), not to second-guess a plausibly large thesis.
+ */
+export const MAX_ESTIMATED_MINUTES = 100_000;
 
 const YEAR_MS = 365.2425 * 24 * 60 * 60 * 1000;
 /** How far from the term start a resolved date may plausibly fall (P2-A2). */
@@ -50,8 +57,16 @@ export function normalizeTitle(title: string): string {
     .trim();
 }
 
+/**
+ * Truncation by code POINT, not code unit, so a cap can never cut a surrogate
+ * pair in half and leave a lone surrogate in a title. (`String.toWellFormed` is
+ * ES2024, past this project's lib.)
+ */
+const clamp = (text: string, limit: number): string =>
+  text.length <= limit ? text : [...text].slice(0, limit).join('');
+
 const str = (value: unknown, limit: number): string =>
-  typeof value === 'string' ? value.trim().slice(0, limit).trim() : '';
+  typeof value === 'string' ? clamp(value.trim(), limit).trim() : '';
 
 /**
  * A stated estimate, or null. Rounded FIRST and only then required to be
@@ -61,22 +76,30 @@ const str = (value: unknown, limit: number): string =>
 const estimate = (value: unknown): number | null => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   const minutes = Math.round(value);
-  if (minutes <= 0 || minutes > MAX_ESTIMATE_MINUTES) return null;
+  if (minutes <= 0 || minutes > MAX_ESTIMATED_MINUTES) return null;
   return minutes;
 };
 
 /**
- * A date the model resolved but that cannot belong to this term is treated as
- * unreadable, not written: a fabricated year ("due Oct 15, 1823") on a real
- * calendar is the worst failure this feature has. Null sends it to the review
- * table as undated, which is the designed remedy (A27).
+ * Whether a resolved instant could belong to the term that starts at `termStart`.
+ *
+ * Exported because the guard is worthless if only one place applies it: the
+ * review screen re-reads `rawDate` whenever a row has no date, so it must reject
+ * the same dates this does, or a year the model fabricated ("due Oct 15, 1823")
+ * reappears there pre-ticked for the calendar write.
  */
-const plausible = (at: number | null, termStart: number): number | null => {
-  if (at === null) return null;
-  if (at < termStart - EARLIEST_BEFORE_TERM) return null;
-  if (at > termStart + LATEST_AFTER_TERM) return null;
-  return at;
-};
+export function isPlausibleDueAt(at: number, termStart: number): boolean {
+  return at >= termStart - EARLIEST_BEFORE_TERM && at <= termStart + LATEST_AFTER_TERM;
+}
+
+/**
+ * A date the model resolved but that cannot belong to this term is treated as
+ * unreadable, not written: a fabricated year on a real calendar is the worst
+ * failure this feature has. Null sends it to the review table as undated, which
+ * is the designed remedy (A27).
+ */
+const plausible = (at: number | null, termStart: number): number | null =>
+  at !== null && isPlausibleDueAt(at, termStart) ? at : null;
 
 /**
  * J7: this import creates assignment deadlines only. The label is trimmed and
@@ -124,29 +147,27 @@ export function parseAssignments(value: unknown, ctx: ResolveContext): Extracted
   return rows;
 }
 
-const pad = (n: number): string => String(n).padStart(2, '0');
-
 /**
- * The local calendar day of an instant - the same notion of identity that
- * `sourceRefFor` uses (A26), deliberately. Two modules that decide "is this the
- * same assignment?" must not disagree: keying on the instant here would leave
- * two review rows for one assignment that the write then collapses into one
- * event. Duplicated rather than imported because `sourceRef` imports this module.
+ * Escapes `%` first, then the `|` that separates the key's parts, so a title
+ * containing the literal `|raw:` cannot be read as a part boundary and collide
+ * with a different row. Same reasoning as `sourceRef`'s own escaping.
  */
-const localDayKey = (at: number): string => {
-  const d = new Date(at);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-};
+const escapeKeyPart = (part: string): string => part.replace(/%/g, '%25').replace(/\|/g, '%7C');
 
 /**
- * The identity two chunks must agree on. A resolved date fixes the day, so
+ * The identity two chunks must agree on, and the same notion of "the same day"
+ * that `sourceRefFor` uses (A26) - deliberately shared via `day.ts`, because
+ * keying on the instant here would leave two review rows for one assignment that
+ * the write then collapses into one event. A resolved date fixes the day, so
  * "Oct 15", "October 15", "10/15" and "Oct 15 11:59pm" are one assignment; only
  * an unresolved date leaves `rawDate` as the discriminator.
  */
-const dedupeKey = (row: ExtractedAssignment): string =>
-  row.dueAt === null
-    ? `${normalizeTitle(row.title)}|raw:${normalizeTitle(row.rawDate)}`
-    : `${normalizeTitle(row.title)}|day:${localDayKey(row.dueAt)}`;
+const dedupeKey = (row: ExtractedAssignment): string => {
+  const title = escapeKeyPart(normalizeTitle(row.title));
+  return row.dueAt === null
+    ? `${title}|raw:${escapeKeyPart(normalizeTitle(row.rawDate))}`
+    : `${title}|day:${localDayKey(row.dueAt)}`;
+};
 
 /**
  * Chunks overlap, so the same assignment can be reported twice. The first row

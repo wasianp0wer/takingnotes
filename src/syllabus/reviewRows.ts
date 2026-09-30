@@ -4,7 +4,11 @@ import {
   toDateInputValue,
   toTimeInputValue,
 } from '@/triage/dates';
-import type { ExtractedAssignment } from '@/syllabus/assignments';
+import {
+  isPlausibleDueAt,
+  MAX_ESTIMATED_MINUTES,
+  type ExtractedAssignment,
+} from '@/syllabus/assignments';
 import { parseSyllabusDate } from '@/syllabus/dates';
 import type { ConfirmedAssignment } from '@/syllabus/importAssignments';
 import { sourceRefFor } from '@/syllabus/sourceRef';
@@ -36,12 +40,21 @@ export interface ReviewRow {
 /** A14: an unset estimate is 60 minutes. */
 export const DEFAULT_ESTIMATED_MINUTES = 60;
 
-/** A guard against a typo of many digits becoming a priority-warping estimate. */
-export const MAX_ESTIMATED_MINUTES = 100_000;
+/**
+ * A guard against a typo of many digits becoming a priority-warping estimate.
+ * Re-exported from `assignments`, which is the one definition: the cap a user may
+ * type and the cap a model may state have to be the same number.
+ */
+export { MAX_ESTIMATED_MINUTES };
 
 function fields(raw: string, termStart: number, now: number): { dueDate: string; dueTime: string } {
   const parsed = raw.trim() === '' ? null : parseSyllabusDate(raw, termStart, now);
-  if (parsed === null) return { dueDate: '', dueTime: '' };
+  // The same plausibility window `parseAssignments` applies (P2-A2). Without it
+  // the guard would be undone here: re-reading `rawDate` would resurrect a year
+  // the model invented, and hand it to the table pre-ticked for the write.
+  if (parsed === null || !isPlausibleDueAt(parsed.at, termStart)) {
+    return { dueDate: '', dueTime: '' };
+  }
   return {
     dueDate: toDateInputValue(parsed.at),
     dueTime: parsed.hasTime ? toTimeInputValue(parsed.at) : '',

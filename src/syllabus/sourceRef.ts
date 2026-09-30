@@ -1,4 +1,5 @@
 import { normalizeTitle, type ExtractedAssignment } from '@/syllabus/assignments';
+import { localDayKey } from '@/syllabus/day';
 
 /**
  * The stable identity of an imported assignment (A26): the import it came from,
@@ -9,13 +10,8 @@ import { normalizeTitle, type ExtractedAssignment } from '@/syllabus/assignments
  * The *day* rather than the instant, so correcting only a due time still updates
  * the event it belongs to.
  */
-const pad = (n: number): string => String(n).padStart(2, '0');
-
-const localDayKey = (at: number | null): string => {
-  if (at === null) return 'none';
-  const d = new Date(at);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-};
+/** `day.ts` holds the day itself, shared with `dedupeAssignments` so the two agree. */
+const dayPart = (at: number | null): string => (at === null ? 'none' : localDayKey(at));
 
 /** FNV-1a: small, dependency-free and stable across builds, which is all this needs. */
 function fnv1a(text: string): string {
@@ -47,7 +43,7 @@ export function sourceRefFor(
   // would otherwise collide with every other such title on the same day and
   // import. Fall back to a hash of the raw title so those stay distinct.
   const titleKey = normalized === '' ? `empty-${fnv1a(a.title)}` : normalized;
-  return `${escapePart(importKey)}#${escapePart(titleKey)}@${localDayKey(a.dueAt)}`;
+  return `${escapePart(importKey)}#${escapePart(titleKey)}@${dayPart(a.dueAt)}`;
 }
 
 export function importKeyForFile(name: string): string {
