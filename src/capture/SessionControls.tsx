@@ -15,6 +15,18 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** One session/device/audio error line, dismissible on its own so one failure never hides another. */
+function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  return (
+    <span role="alert" className="flex items-center gap-1 text-xs text-destructive">
+      {message}
+      <button type="button" className="underline" onClick={onDismiss}>
+        Dismiss
+      </button>
+    </span>
+  );
+}
+
 export interface SessionPanelProps {
   engine: CaptureEngine;
   controller: DeviceController;
@@ -177,30 +189,9 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
         </>
       )}
 
-      {sessionError && (
-        <span role="alert" className="flex items-center gap-1 text-xs text-destructive">
-          {sessionError}
-          <button type="button" className="underline" onClick={() => setSessionError(null)}>
-            Dismiss
-          </button>
-        </span>
-      )}
-      {deviceError && (
-        <span role="alert" className="flex items-center gap-1 text-xs text-destructive">
-          {deviceError}
-          <button type="button" className="underline" onClick={() => setDeviceError(null)}>
-            Dismiss
-          </button>
-        </span>
-      )}
-      {audioError && (
-        <span role="alert" className="flex items-center gap-1 text-xs text-destructive">
-          {audioError}
-          <button type="button" className="underline" onClick={() => setAudioError(null)}>
-            Dismiss
-          </button>
-        </span>
-      )}
+      {sessionError && <ErrorBanner message={sessionError} onDismiss={() => setSessionError(null)} />}
+      {deviceError && <ErrorBanner message={deviceError} onDismiss={() => setDeviceError(null)} />}
+      {audioError && <ErrorBanner message={audioError} onDismiss={() => setAudioError(null)} />}
     </div>
   );
 }

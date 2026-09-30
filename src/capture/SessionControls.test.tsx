@@ -6,6 +6,7 @@ import type { Recorder, RecorderLink, RecorderState } from '@/audio/recorder';
 import { createCaptureEngine, type LiveCaptureEngine } from '@/capture/engine';
 import { SessionPanel } from '@/capture/SessionControls';
 import { listNotes } from '@/storage/notes';
+import { countPoints, listPages } from '@/storage/pages';
 import { listSessions } from '@/storage/sessions';
 import { createFakeDeviceController, type FakeDeviceController } from '@/test/fakeDeviceController';
 import { resetDatabase } from '@/test/resetDb';
@@ -215,13 +216,27 @@ describe('SessionPanel', () => {
     expect(panel().textContent).toContain('No audio');
     expect(button('End session')).toBeTruthy();
 
+    const notesBefore = await listNotes();
+    expect(notesBefore).toHaveLength(1);
+    const noteId = notesBefore[0].id;
+    const pagesBefore = await listPages(noteId);
+    expect(pagesBefore).toHaveLength(1);
+    expect(countPoints(pagesBefore[0].strokes)).toBe(0);
+
     // A28: writing is never blocked. The stroke lands on the session's note.
     fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
     fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
     await settle();
+
     const notes = await listNotes();
     expect(notes).toHaveLength(1);
     expect(engine.getState().activeNoteId).toBe(notes[0].id);
+    // The point above the "one note exists" check: the stroke itself actually
+    // landed on that note's page, not just that starting a session created a
+    // note before any pen input arrived.
+    const pagesAfter = await listPages(noteId);
+    expect(pagesAfter).toHaveLength(1);
+    expect(countPoints(pagesAfter[0].strokes)).toBeGreaterThan(0);
   });
 
   it('reports a recorder that throws and keeps the session', async () => {
@@ -317,7 +332,17 @@ describe('SessionPanel', () => {
     expect(engine.getState().activeNoteId).not.toBeNull();
   });
 
-  it('unmounting mid-start is quiet', async () => {
+  it('unmounting mid-start does not derail the session or the recording', async () => {
+    // React 19 no longer warns on a `setState` after unmount, so a spy that
+    // only checks for a logged "Warning" can never fail here regardless of
+    // whether the `mounted` ref guard in SessionControls.tsx exists - it
+    // proves nothing about that guard. What *is* genuinely testable from
+    // outside is that unmounting mid-start does not derail the start itself:
+    // the session the click opened is still open, the recorder still got
+    // going, and the component's own error-reporting path logged nothing.
+    // Whether the guard's specific job - suppressing a `setState` call on the
+    // unmounted panel - actually ran is not observable from here either way;
+    // that part of the guard's effect stays unverified by this test.
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     let release: (() => void) | null = null;
     fake.connect = () =>
@@ -327,12 +352,20 @@ describe('SessionPanel', () => {
     render();
 
     await click(button('Start session'));
+    // As in "disables the control..." above: the session write needs real
+    // IndexedDB ticks, so draining the engine's chain here is what actually
+    // gets the component past `engine.startSession()` and into the pending,
+    // deliberately-hung `controller.connect()` - the thing we're about to
+    // unmount out from under.
+    await settle();
     act(() => root.unmount());
     // Same TS narrowing quirk as above.
     (release as (() => void) | null)?.();
     await settle();
 
-    expect(logged.mock.calls.filter(([m]) => String(m).includes('Warning'))).toEqual([]);
+    expect(engine.getState().activeNoteId).not.toBeNull();
+    expect(recorder.links).toHaveLength(1);
+    expect(logged.mock.calls.filter(([m]) => String(m).includes('[session]'))).toEqual([]);
     logged.mockRestore();
     // A fresh root, so afterEach's unmount has something to unmount.
     root = createRoot(container);
