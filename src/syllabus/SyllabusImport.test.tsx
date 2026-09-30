@@ -1,4 +1,4 @@
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { CalendarEventRecord } from '@/storage/types';
@@ -6,7 +6,7 @@ import type { ExtractedAssignment } from '@/syllabus/assignments';
 import type { SyllabusExtractor } from '@/syllabus/extractor';
 import { SyllabusImport, type SyllabusImportDeps } from '@/syllabus/SyllabusImport';
 import { importKeyForPastedText, sourceRefFor } from '@/syllabus/sourceRef';
-import { click, flush, mount, typeInto, type Mounted } from '@/triage/testing';
+import { click, flush, mount, typeInto, waitFor, type Mounted } from '@/triage/testing';
 
 const local = (y: number, m: number, d: number) => new Date(y, m - 1, d).getTime();
 const NOW = local(2026, 9, 30);
@@ -27,6 +27,7 @@ interface Harness {
   settings: Record<string, unknown>;
   fromText: ReturnType<typeof vi.fn>;
   fromPdf: ReturnType<typeof vi.fn>;
+  extractorFor: ReturnType<typeof vi.fn>;
 }
 
 function harness(opts?: {
@@ -48,6 +49,12 @@ function harness(opts?: {
     return rows;
   });
   const extractor: SyllabusExtractor = { fromText, fromPdf } as unknown as SyllabusExtractor;
+  // A spy, not a plain stub: findings 2, 5 and 7 all live in exactly which
+  // arguments this receives (the term start in particular), so tests assert
+  // on them directly rather than only on visible side effects. `vi.fn`
+  // records every call's actual arguments regardless of this implementation's
+  // own (zero) declared arity.
+  const extractorFor = vi.fn(() => extractor);
 
   const h: Harness = {
     imported,
@@ -57,8 +64,9 @@ function harness(opts?: {
     settings,
     fromText,
     fromPdf,
+    extractorFor,
     deps: {
-      extractorFor: () => extractor,
+      extractorFor,
       importAssignments: async (confirmed, importKey) => {
         imported.push({ rows: confirmed, importKey });
         return { created: confirmed.length, updated: 0 };
@@ -112,6 +120,11 @@ describe('SyllabusImport', () => {
     await extractPasted(m);
 
     expect(m.container.textContent).toContain('Essay 1');
+    // The pasted textarea's own value also contains "Essay 1" as a real text
+    // node, so the assertion above alone would still pass with the review
+    // table entirely absent. Assert on something only the table produces.
+    expect(m.container.querySelector('table')).toBeTruthy();
+    expect(byLabel<HTMLInputElement>(m.container, 'Include Essay 1')).toBeTruthy();
     expect(h.imported).toEqual([]);
     expect(h.syncs).toBe(0);
     m.unmount();
@@ -138,6 +151,8 @@ describe('SyllabusImport', () => {
     expect(h.imported[0].importKey).toMatch(/^pasted:/);
     expect(h.syncs).toBe(1);
     expect(m.container.textContent).toMatch(/created 1/i);
+    // A screen-reader user must be told the result too, not just see it.
+    expect(m.container.querySelector('[role="status"]')?.textContent).toMatch(/created 1/i);
     m.unmount();
   });
 
@@ -170,19 +185,38 @@ describe('SyllabusImport', () => {
     m.unmount();
   });
 
-  it('includes that row once it is given a date', async () => {
+  it('includes that row once it is given a date, without a separate tick (finding 4)', async () => {
     const h = harness({ rows: [assignment({ dueAt: null, rawDate: 'TBD' })] });
     const m = mount(<SyllabusImport deps={h.deps} />);
     await extractPasted(m);
 
     typeInto(byLabel<HTMLInputElement>(m.container, 'Due date for Essay 1'), '2026-12-01');
-    await click(byLabel<HTMLInputElement>(m.container, 'Include Essay 1'));
+    // The "enter one to include it" message would be a lie if the row still
+    // needed a second, separate tick after that.
+    expect(byLabel<HTMLInputElement>(m.container, 'Include Essay 1').checked).toBe(true);
+
     await click(buttonNamed(m.container, 'Add'));
     await flush();
 
     expect(h.imported[0].rows).toEqual([
       expect.objectContaining({ title: 'Essay 1', dueAt: local(2026, 12, 1) }),
     ]);
+    m.unmount();
+  });
+
+  it('does not let a term-start change re-tick a row the user explicitly unticked (finding 2)', async () => {
+    const h = harness();
+    const m = mount(<SyllabusImport deps={h.deps} />);
+    await extractPasted(m);
+    expect(buttonNamed(m.container, 'Add').textContent).toContain('1');
+
+    await click(byLabel<HTMLInputElement>(m.container, 'Include Essay 1'));
+    expect(buttonNamed(m.container, 'Add').textContent).toContain('0');
+
+    typeInto(byLabel<HTMLInputElement>(m.container, 'Term start'), '2026-09-01');
+
+    expect(byLabel<HTMLInputElement>(m.container, 'Include Essay 1').checked).toBe(false);
+    expect(buttonNamed(m.container, 'Add').textContent).toContain('0');
     m.unmount();
   });
 
@@ -213,6 +247,15 @@ describe('SyllabusImport', () => {
     await extractPasted(m, text);
 
     expect(m.container.textContent).toMatch(/already imported/i);
+    expect(m.container.textContent).toMatch(/updated in place/i);
+
+    // Editing the title changes the row's identity (A26): the marker, and the
+    // notice, must be recomputed rather than staying stale from extraction
+    // (finding 3) - otherwise the user is told the opposite of what confirm
+    // is about to do.
+    typeInto(byLabel<HTMLInputElement>(m.container, 'Title for Essay 1'), 'Essay 1 revised');
+    expect(m.container.textContent).not.toMatch(/already imported/i);
+    expect(m.container.textContent).not.toMatch(/updated in place/i);
     m.unmount();
   });
 
@@ -247,7 +290,27 @@ describe('SyllabusImport', () => {
     await extractPasted(m);
 
     expect(m.container.textContent).toContain('Could not reach Ollama');
+    // Announced to a screen-reader user, not just visible (finding 6).
+    expect(m.container.querySelector('[role="alert"]')?.textContent).toContain('Could not reach Ollama');
     expect(h.imported).toEqual([]);
+    m.unmount();
+  });
+
+  it('reports a write failure without claiming nothing happened, and does not run the task sync (finding 9)', async () => {
+    const h = harness();
+    h.deps.importAssignments = async () => {
+      throw new Error('storage full');
+    };
+    const m = mount(<SyllabusImport deps={h.deps} />);
+    await extractPasted(m);
+    await click(buttonNamed(m.container, 'Add'));
+    await flush();
+
+    const alert = m.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain('Import failed');
+    expect(alert?.textContent).toMatch(/may already have been added/i);
+    expect(alert?.textContent).toMatch(/re-importing is safe/i);
+    expect(h.syncs).toBe(0);
     m.unmount();
   });
 
@@ -280,9 +343,101 @@ describe('SyllabusImport', () => {
     expect(h.fromPdf).toHaveBeenCalledTimes(1);
     expect(h.fromText).not.toHaveBeenCalled();
     expect(m.container.textContent).toContain('Essay 1');
+    // Without resetting the control, re-picking the very same file fires no
+    // `change` event and the picker goes dead on a retry.
+    expect(picker.value).toBe('');
     await click(buttonNamed(m.container, 'Add'));
     await flush();
     expect(h.imported[0].importKey).toBe('file:hist101.pdf');
+    m.unmount();
+  });
+
+  it('passes the model, base URL, the displayed term start and the pasted text through to the extractor (finding 7)', async () => {
+    const h = harness();
+    h.settings['ollama.model'] = 'gemma3:12b';
+    h.settings['ollama.baseUrl'] = 'http://example:11434';
+    h.settings['syllabus.termStart'] = local(2026, 9, 1);
+    const m = mount(<SyllabusImport deps={h.deps} />);
+    await flush(); // loads the displayed term start before extraction runs
+
+    await extractPasted(m, 'Essay 1 due Oct 15');
+
+    expect(h.extractorFor).toHaveBeenCalledWith(
+      'gemma3:12b',
+      'http://example:11434',
+      local(2026, 9, 1),
+    );
+    expect(h.fromText).toHaveBeenCalledWith(
+      'Essay 1 due Oct 15',
+      expect.objectContaining({ model: 'gemma3:12b' }),
+    );
+    m.unmount();
+  });
+
+  it('extracts against the term start currently displayed, not a fresh read of storage (finding 5)', async () => {
+    const h = harness();
+    h.settings['syllabus.termStart'] = local(2026, 9, 1);
+    const m = mount(<SyllabusImport deps={h.deps} />);
+    await flush();
+
+    // The stored setting changes from elsewhere after it was already loaded
+    // and shown - the extraction must use what is on screen, not silently
+    // re-fetch a different value out from under the user.
+    h.settings['syllabus.termStart'] = local(2027, 1, 1);
+
+    await extractPasted(m);
+
+    // `expect.anything()` rejects `null`, and this harness's model/baseUrl
+    // settings are unset (null) here - only the term start argument matters
+    // to this test, so check it directly.
+    expect(h.extractorFor.mock.calls[0]?.[2]).toBe(local(2026, 9, 1));
+    m.unmount();
+  });
+
+  it('disables the term start control while an extraction is in flight, and announces progress as status (finding 5, 6)', async () => {
+    const h = harness();
+    // A promise this test controls the resolution of: the harness's other
+    // fakes resolve within the same microtask flush `click`'s `act` performs,
+    // which would let the whole extraction finish before this test could ever
+    // observe the mid-flight state it exists to check.
+    let resolveExtraction: (rows: ExtractedAssignment[]) => void = () => {};
+    h.deps.extractorFor = () => ({
+      fromText: () => new Promise((resolve) => { resolveExtraction = resolve; }),
+      fromPdf: async () => [],
+    });
+    const m = mount(<SyllabusImport deps={h.deps} />);
+    typeInto(byLabel<HTMLTextAreaElement>(m.container, 'Syllabus text'), 'Essay 1 due Oct 15');
+    await click(buttonNamed(m.container, 'Extract'));
+
+    await waitFor(() => {
+      expect(byLabel<HTMLInputElement>(m.container, 'Term start').disabled).toBe(true);
+    });
+    expect(m.container.querySelector('[role="status"]')?.textContent).toMatch(/starting/i);
+
+    resolveExtraction([]);
+    await waitFor(() => {
+      expect(byLabel<HTMLInputElement>(m.container, 'Term start').disabled).toBe(false);
+    });
+    m.unmount();
+  });
+
+  it('under StrictMode, the term start loads and an extraction still reaches the review table (finding 1)', async () => {
+    const h = harness();
+    h.settings['syllabus.termStart'] = local(2026, 9, 1);
+    const m = mount(
+      <StrictMode>
+        <SyllabusImport deps={h.deps} />
+      </StrictMode>,
+    );
+    await flush();
+
+    const termStart = byLabel<HTMLInputElement>(m.container, 'Term start');
+    expect(termStart.value).toBe('2026-09-01');
+
+    await extractPasted(m);
+
+    expect(m.container.querySelector('table')).toBeTruthy();
+    expect(buttonNamed(m.container, 'Add').disabled).toBe(false);
     m.unmount();
   });
 });

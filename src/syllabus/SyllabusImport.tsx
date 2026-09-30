@@ -81,22 +81,42 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
   const [result, setResult] = useState<string | null>(null);
   const [rows, setRows] = useState<ReviewRow[] | null>(null);
   const [importKey, setImportKey] = useState<string | null>(null);
+  // The events a previous import wrote, kept so a title/date edit can
+  // recompute "already imported" against them rather than only at extraction
+  // time (finding 3).
+  const [events, setEvents] = useState<CalendarEventRecord[]>([]);
   // Two clicks dispatched inside one `act` both observe the pre-render state,
   // so a state-only guard does not stop the second write; the ref does,
   // because it is mutated synchronously.
   const writingRef = useRef(false);
+  // The user's own tick/untick of a row, keyed by row id. `reresolveRows`
+  // (term-start change) recomputes `include` for any row the user has not
+  // manually re-dated, which would otherwise silently re-tick a row the user
+  // deliberately excluded (finding 2). This is tracked separately from
+  // `ReviewRow.edited`, which gates DATE re-resolution and must keep doing
+  // that independently of the tick decision.
+  const includeOverridesRef = useRef<Map<string, boolean>>(new Map());
+  // Discards a stale extraction's result if a newer one was started before it
+  // finished - `disabled={busy}` is the primary guard, but this holds even if
+  // that's ever bypassed.
+  const extractionSeqRef = useRef(0);
 
   // A real setting read (or extraction, or write) can still be in flight when
   // this unmounts - e.g. the user switches away from the Triage tab. Without
   // this, the state update that promise resolves to lands on an unmounted
-  // component.
+  // component. The ref is re-armed at the TOP of the effect body, not just
+  // initialised once: StrictMode runs this cleanup as part of its mount ->
+  // unmount -> remount simulation, on the very same ref, and without
+  // re-arming it here every async path in this component would see
+  // `mountedRef.current === false` forever after - silently disabling the
+  // whole feature in development.
   const mountedRef = useRef(true);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
       mountedRef.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -115,42 +135,53 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
         opts: { model: string; onProgress: (p: ExtractProgress) => void },
       ) => Promise<Awaited<ReturnType<SyllabusExtractor['fromText']>>>,
     ) => {
+      const seq = ++extractionSeqRef.current;
+      const stale = () => seq !== extractionSeqRef.current || !mountedRef.current;
+
       setBusy(true);
       setError(null);
       setResult(null);
       setRows(null);
+      includeOverridesRef.current = new Map();
       setProgress('Starting…');
       try {
-        const [model, baseUrl, storedTermStart] = await Promise.all([
+        const [model, baseUrl] = await Promise.all([
           d.getSetting('ollama.model'),
           d.getSetting('ollama.baseUrl'),
-          d.getSetting('syllabus.termStart'),
         ]);
-        const extractor = d.extractorFor(model, baseUrl, storedTermStart);
+        // The term start this extraction resolves dates against is whatever
+        // is currently on screen, not a fresh read of the stored setting: a
+        // change mid-flight must not retroactively rewrite an already-running
+        // run's rows out from under it (finding 5), and the control is also
+        // disabled while `busy` so this can't race a change in the first
+        // place.
+        const extractor = d.extractorFor(model, baseUrl, termStart);
         const extracted = await run(extractor, {
           model,
           onProgress: (p) => {
-            if (mountedRef.current) setProgress(progressText(p));
+            if (!stale()) setProgress(progressText(p));
           },
         });
 
         const at = d.now();
-        const built = rowsFromExtracted(extracted, storedTermStart ?? at, at);
-        const withExisting = markExisting(built, await d.listEvents(), key);
-        if (!mountedRef.current) return;
+        const built = rowsFromExtracted(extracted, termStart ?? at, at);
+        const fetchedEvents = await d.listEvents();
+        const withExisting = markExisting(built, fetchedEvents, key);
+        if (stale()) return;
+        setEvents(fetchedEvents);
         setRows(withExisting);
         setImportKey(key);
         setProgress(null);
       } catch (err) {
-        if (mountedRef.current) {
+        if (!stale()) {
           setError(errorText(err));
           setProgress(null);
         }
       } finally {
-        if (mountedRef.current) setBusy(false);
+        if (!stale()) setBusy(false);
       }
     },
-    [d],
+    [d, termStart],
   );
 
   const extractPasted = useCallback(() => {
@@ -182,21 +213,44 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
       setTermStart(next);
       void d.setSetting('syllabus.termStart', next);
       const nowMs = d.now();
-      setRows((current) =>
-        current === null ? current : reresolveRows(current, next ?? nowMs, nowMs),
-      );
+      setRows((current) => {
+        if (current === null) return current;
+        const resolved = reresolveRows(current, next ?? nowMs, nowMs);
+        // `reresolveRows` recomputes `include` from the newly-resolved date
+        // for every row the user has not manually re-dated - which would
+        // silently re-tick a row the user explicitly unticked (finding 2).
+        // An explicit tick/untick always wins over that recomputation, for
+        // as long as the row still has a date to include.
+        return resolved.map((row) => {
+          const override = includeOverridesRef.current.get(row.id);
+          if (override === undefined || row.dueDate === '') return row;
+          return { ...row, include: override };
+        });
+      });
     },
     [d],
   );
 
-  const patchRow = useCallback((id: string, patch: Partial<ReviewRow>) => {
-    setRows((current) => {
-      if (current === null) return current;
-      // Editing a title or a date changes a row's identity, so what "already
-      // imported" means changes with it.
-      return current.map((row) => (row.id === id ? { ...row, ...patch } : row));
-    });
-  }, []);
+  const patchRow = useCallback(
+    (id: string, patch: Partial<ReviewRow>) => {
+      // A direct toggle of the Include checkbox - as opposed to `include`
+      // changing as a side effect of editing the date - is an explicit
+      // decision the user made, and a later term-start change must never
+      // silently reverse it (finding 2).
+      if ('include' in patch && !('dueDate' in patch)) {
+        includeOverridesRef.current.set(id, patch.include as boolean);
+      }
+      setRows((current) => {
+        if (current === null) return current;
+        const next = current.map((row) => (row.id === id ? { ...row, ...patch } : row));
+        // Editing a title or a date changes a row's identity (A26), so
+        // "already imported" has to be recomputed against it rather than
+        // staying stale from the original extraction (finding 3).
+        return importKey === null ? next : markExisting(next, events, importKey);
+      });
+    },
+    [events, importKey],
+  );
 
   const confirm = useCallback(() => {
     if (writingRef.current) return;
@@ -250,6 +304,11 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
             type="date"
             aria-label="Term start"
             value={termStart === null ? '' : toDateInputValue(termStart)}
+            // Disabled while busy: an in-flight extraction already resolved
+            // its dates against whatever term start was showing when it
+            // started (finding 5), and changing the setting mid-flight would
+            // otherwise leave the two out of sync with no re-resolution.
+            disabled={busy}
             onChange={(e) => changeTermStart(e.target.value)}
           />
         </label>
@@ -260,7 +319,12 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
             accept="application/pdf,.pdf"
             aria-label="Syllabus PDF"
             disabled={busy}
-            onChange={(e) => pickPdf(e.target.files?.[0])}
+            onChange={(e) => {
+              pickPdf(e.target.files?.[0]);
+              // Without this, re-picking the same file fires no `change`
+              // event and the control goes dead on a retry.
+              e.target.value = '';
+            }}
             className="text-sm"
           />
         </label>
@@ -284,9 +348,21 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
         </Button>
       </div>
 
-      {progress !== null && <p className="mt-2 text-xs text-muted-foreground">{progress}</p>}
-      {error !== null && <p className="mt-2 text-xs text-destructive">{error}</p>}
-      {result !== null && <p className="mt-2 text-xs text-muted-foreground">{result}</p>}
+      {progress !== null && (
+        <p role="status" className="mt-2 text-xs text-muted-foreground">
+          {progress}
+        </p>
+      )}
+      {error !== null && (
+        <p role="alert" className="mt-2 text-xs text-destructive">
+          {error}
+        </p>
+      )}
+      {result !== null && (
+        <p role="status" className="mt-2 text-xs text-muted-foreground">
+          {result}
+        </p>
+      )}
 
       {rows !== null && (
         <div className="mt-4">
@@ -299,9 +375,9 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
             <ReviewTable rows={rows} onChange={patchRow} />
           )}
           {hasExisting && (
-            <p className="mt-2 text-xs text-amber-600">
-              Rows already on your calendar will be updated in place, overwriting their current
-              values.
+            <p className="mt-2 text-xs text-destructive">
+              Rows already on your calendar will be updated in place to match what&apos;s shown
+              here.
             </p>
           )}
           <Button

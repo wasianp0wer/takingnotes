@@ -52,7 +52,7 @@ export function ReviewTable({ rows, onChange }: ReviewTableProps) {
                 <span className="text-xs text-muted-foreground">Already imported — will update</span>
               )}
               {row.dueDate === '' && (
-                <span className="block text-xs text-amber-600">
+                <span className="block text-xs text-destructive">
                   No date{row.rawDate === '' ? '' : ` in "${row.rawDate}"`} — enter one to include it
                 </span>
               )}
@@ -62,13 +62,22 @@ export function ReviewTable({ rows, onChange }: ReviewTableProps) {
                 type="date"
                 aria-label={`Due date for ${row.title}`}
                 value={row.dueDate}
-                onChange={(e) =>
+                onChange={(e) => {
+                  const value = e.target.value;
+                  const hadNoDate = row.dueDate === '';
                   onChange(row.id, {
-                    dueDate: e.target.value,
+                    dueDate: value,
                     edited: true,
-                    include: e.target.value !== '' && row.include,
-                  })
-                }
+                    // A27: a row starts excluded until it has a date; once one
+                    // is entered it becomes includable on its own, rather than
+                    // requiring a second, separate tick the "enter one to
+                    // include it" message would otherwise be lying about.
+                    // Clearing the date back out always excludes it again. An
+                    // edit to an already-dated row leaves the user's own tick
+                    // decision alone.
+                    include: value === '' ? false : hadNoDate ? true : row.include,
+                  });
+                }}
               />
             </td>
             <td className="p-1">
