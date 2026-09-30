@@ -116,6 +116,12 @@ export interface PageRecord {
    * which reads as finalized: a legacy page is complete by definition.
    */
   finalizedAt?: number | null;
+  /**
+   * Result of the last Phase 2 gap analysis of this page. Absent (or `null`)
+   * means never analyzed, so the v3 upgrade needs no data migration. See
+   * `GapAnalysisMeta` at the end of this file.
+   */
+  gapAnalysis?: GapAnalysisMeta | null;
 }
 
 export interface SettingRecord {
@@ -219,4 +225,59 @@ export interface TaskRecord {
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
+}
+
+/** Review state of one gap suggestion. A re-run replaces only `proposed` ones (A23). */
+export type GapStatus = 'proposed' | 'accepted' | 'rejected';
+
+/** What kind of substantive point was missed (spec-phase2 J6). */
+export type GapKind =
+  | 'claim'
+  | 'definition'
+  | 'name-or-date'
+  | 'example'
+  | 'argument-step'
+  | 'other';
+
+/**
+ * One point present in the recording but missing from a page's handwriting.
+ * Stored separately from the transcript with its provenance (J2): accepting a
+ * suggestion never rewrites `TranscriptRecord.markdown`.
+ */
+export interface GapSuggestionRecord {
+  id: string;
+  noteId: string;
+  pageId: string;
+  /** Recording the speech came from. */
+  recordingId: string;
+  /** Absolute epoch ms window of speech compared for this page. */
+  fromMs: number;
+  toMs: number;
+  /** The missing point, as the model stated it. */
+  text: string;
+  kind: GapKind;
+  /** Verbatim speech supporting it, so a claim can be checked against the audio. */
+  sourceQuote: string;
+  status: GapStatus;
+  model: string;
+  promptVersion: string;
+  /**
+   * True when the speech was summarized into bullets before comparison (J5), so
+   * the UI can say the source was lossy.
+   */
+  summarized: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type GapAnalysisStatus = 'pending' | 'running' | 'done' | 'failed';
+
+/** Per-page record of the last gap analysis. Lives on `PageRecord.gapAnalysis`. */
+export interface GapAnalysisMeta {
+  status: GapAnalysisStatus;
+  at: number;
+  model: string;
+  promptVersion: string;
+  error: string | null;
+  summarized: boolean;
 }

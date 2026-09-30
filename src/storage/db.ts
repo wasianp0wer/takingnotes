@@ -2,6 +2,7 @@ import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 
 import type {
   CalendarEventRecord,
+  GapSuggestionRecord,
   NoteRecord,
   PageRecord,
   PageRenderRecord,
@@ -13,7 +14,7 @@ import type {
 } from '@/storage/types';
 
 export const DB_NAME = 'takingnotes';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 export interface NotesDb extends DBSchema {
   notes: {
@@ -59,6 +60,11 @@ export interface NotesDb extends DBSchema {
     key: string;
     value: TaskRecord;
     indexes: { 'by-status': string; 'by-event': string };
+  };
+  gaps: {
+    key: string;
+    value: GapSuggestionRecord;
+    indexes: { 'by-note': string; 'by-page': string };
   };
 }
 
@@ -106,6 +112,14 @@ export function openNotesDb(): Promise<IDBPDatabase<NotesDb>> {
           const tasks = db.createObjectStore('tasks', { keyPath: 'id' });
           tasks.createIndex('by-status', 'status');
           tasks.createIndex('by-event', 'eventId');
+        }
+        if (oldVersion < 3) {
+          // Phase 2 gap suggestions (docs/architecture.md §6.2). Indexed by
+          // both note and page: the note view lists a whole note's suggestions,
+          // and a re-run of one page deletes that page's proposed ones.
+          const gaps = db.createObjectStore('gaps', { keyPath: 'id' });
+          gaps.createIndex('by-note', 'noteId');
+          gaps.createIndex('by-page', 'pageId');
         }
       },
       // Without these, a version bump with a second tab open hangs forever with
