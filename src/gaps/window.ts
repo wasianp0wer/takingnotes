@@ -11,14 +11,29 @@ export interface SpeechWindowOptions {
   trailMs?: number;
 }
 
+/**
+ * A usable epoch-ms instant, or `undefined`. `NaN` and the infinities are not
+ * instants: a non-finite value that reached the window would make every segment
+ * comparison false, so the page would read as "the recording said nothing here"
+ * when the truth is "this stroke carries no time to align against".
+ */
+function instant(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 /** Epoch ms of a stroke's first and last point, or `null` when it carries no times. */
 function strokeSpan(stroke: PageStroke): SpeechWindow | null {
   const times = stroke.points
     .map((p) => p.t)
     .filter((t): t is number => typeof t === 'number' && Number.isFinite(t));
-  const first = typeof stroke.startedAt === 'number' ? stroke.startedAt : times[0];
-  const last = typeof stroke.endedAt === 'number' ? stroke.endedAt : times[times.length - 1];
-  if (typeof first !== 'number' || typeof last !== 'number') return null;
+  // Each end falls back to the other: a stroke carrying exactly one of
+  // `startedAt` / `endedAt` and no point times still says when it was written,
+  // and a zero-length span at that instant is the honest reading of it.
+  const started = instant(stroke.startedAt) ?? instant(times.at(0));
+  const ended = instant(stroke.endedAt) ?? instant(times.at(-1));
+  const first = started ?? ended;
+  const last = ended ?? started;
+  if (first === undefined || last === undefined) return null;
   return { fromMs: Math.min(first, last), toMs: Math.max(first, last) };
 }
 
@@ -33,7 +48,10 @@ function strokeSpan(stroke: PageStroke): SpeechWindow | null {
  * The end is `finalizedAt` when the page has one: writing often stops well
  * before the page is turned, and the speech in between is exactly what a gap
  * analysis is looking for. An absent `finalizedAt` (a v1 row) is not a
- * timestamp, so it falls back to the last stroke like an open page does.
+ * timestamp, so it falls back to the last stroke like an open page does. It is
+ * taken as `max(finalizedAt, last stroke)`, never the bare `finalizedAt`: a
+ * `finalizedAt` that predates the last stroke (a clock adjustment, a repaired
+ * row) would otherwise truncate or invert the window.
  */
 export function speechWindowForPage(
   page: PageRecord,

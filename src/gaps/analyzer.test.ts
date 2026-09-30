@@ -507,12 +507,15 @@ describe('createGapAnalyzer', () => {
     expect(generator.calls).toEqual([]);
   });
 
-  it('clears the proposals and records done when the window holds no speech', async () => {
+  it('keeps the proposals and records done when the window holds no speech', async () => {
+    // A run that compared *nothing* must not destroy what a run that compared
+    // something found: an empty window means a wrongly linked recording, a
+    // disagreeing device clock or a legacy import, not "your notes are complete".
     const { pageId, noteId, recordingId } = await seed({
       segments: [{ startMs: 500_000, endMs: 520_000, text: SPEECH }],
     });
     await createGaps(
-      ['Stale one.', 'Stale two.'].map((text) => ({
+      ['Kept one.', 'Kept two.'].map((text) => ({
         noteId,
         pageId,
         recordingId: recordingId ?? '',
@@ -530,7 +533,10 @@ describe('createGapAnalyzer', () => {
     expect(await analyzerFor(generator).analyzePage(pageId)).toEqual([]);
 
     expect(generator.calls).toEqual([]);
-    expect(await listGapsByPage(pageId)).toEqual([]);
+    expect((await listGapsByPage(pageId)).map((g) => g.text).sort()).toEqual([
+      'Kept one.',
+      'Kept two.',
+    ]);
     expect(await gapAnalysisOf(pageId)).toMatchObject({
       status: 'done',
       error: null,

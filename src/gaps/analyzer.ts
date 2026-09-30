@@ -216,9 +216,13 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
 
       const speech = speechTextOf(segmentsInWindow(recording, window.fromMs, window.toMs));
       if (speech.length === 0) {
-        // A real result, not a skip: the page's own window was silent, so its
-        // stale proposals go and the analysis is recorded with zero findings.
-        await deleteGapsByPage(pageId, 'proposed');
+        // The run happened and honestly found no overlap, so it is recorded
+        // `done` - but it compared *nothing*, which is not the same as finding
+        // nothing missing. An empty window means a wrongly linked recording, a
+        // device clock that disagrees or a legacy import; deleting the page's
+        // `proposed` suggestions here would destroy what an earlier run that
+        // did compare speech found, with no way back. They stay, and the panel
+        // says the window matched no speech rather than "no gaps found".
         await writeMeta(pageId, 'done', promptVersionDirect, false, null);
         return { skipped: false, created: [] };
       }

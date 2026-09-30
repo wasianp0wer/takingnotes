@@ -102,6 +102,28 @@ describe('speechWindowForPage', () => {
     ).toBeNull();
   });
 
+  it('is null when the stroke timestamps are not finite numbers', () => {
+    // A NaN that survives into the window makes every segment comparison false,
+    // so the page reads as "the recording said nothing here" instead of "there
+    // is nothing to align against".
+    const p = page({ strokes: [stroke(Number.NaN, Number.NaN, [undefined])] });
+    expect(speechWindowForPage(p)).toBeNull();
+    expect(speechWindowForPage(page({ strokes: [stroke(Infinity, Number.NaN)] }))).toBeNull();
+  });
+
+  it('uses the one timestamp a stroke carries when the other is missing', () => {
+    const onlyStart = page({ strokes: [stroke(8_000, undefined)], finalizedAt: null });
+    expect(speechWindowForPage(onlyStart, { leadMs: 0, trailMs: 0 })).toEqual({
+      fromMs: 8_000,
+      toMs: 8_000,
+    });
+    const onlyEnd = page({ strokes: [stroke(undefined, 9_000)], finalizedAt: null });
+    expect(speechWindowForPage(onlyEnd, { leadMs: 0, trailMs: 0 })).toEqual({
+      fromMs: 9_000,
+      toMs: 9_000,
+    });
+  });
+
   it('takes the min and max across strokes stored out of order', () => {
     const p = page({
       strokes: [stroke(30_000, 31_000, [30_000]), stroke(4_000, 5_000, [4_000])],
