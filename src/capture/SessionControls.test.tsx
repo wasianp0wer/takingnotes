@@ -1,0 +1,576 @@
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { Recorder, RecorderLink, RecorderState } from '@/audio/recorder';
+import { createCaptureEngine, type LiveCaptureEngine } from '@/capture/engine';
+import { interruptedNoteOf, SessionPanel } from '@/capture/SessionControls';
+import { createNote, listNotes } from '@/storage/notes';
+import { countPoints, listPages } from '@/storage/pages';
+import { listSessions } from '@/storage/sessions';
+import { createFakeDeviceController, type FakeDeviceController } from '@/test/fakeDeviceController';
+import { resetDatabase } from '@/test/resetDb';
+
+declare global {
+  var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
+}
+
+const IDLE_RECORDER: RecorderState = {
+  status: 'idle',
+  startedAt: null,
+  elapsedMs: 0,
+  link: null,
+  error: null,
+};
+
+interface FakeRecorder extends Recorder {
+  setState(patch: Partial<RecorderState>): void;
+  readonly links: RecorderLink[];
+  readonly stops: number;
+  /** What `start` does. Reassign to refuse the microphone or to throw. */
+  startImpl: (link: RecorderLink) => Promise<void>;
+}
+
+/** Mirrors the fake in `src/audio/RecorderControl.test.tsx`. */
+function createFakeRecorder(initial: Partial<RecorderState> = {}): FakeRecorder {
+  let state: RecorderState = { ...IDLE_RECORDER, ...initial };
+  const listeners = new Set<() => void>();
+  const links: RecorderLink[] = [];
+  let stops = 0;
+
+  function set(patch: Partial<RecorderState>): void {
+    state = { ...state, ...patch };
+    for (const fn of [...listeners]) fn();
+  }
+
+  const fake: FakeRecorder = {
+    links,
+    get stops() {
+      return stops;
+    },
+    startImpl: async (link) => {
+      set({ status: 'recording', startedAt: 0, elapsedMs: 0, link, error: null });
+    },
+    getState: () => state,
+    subscribe(fn) {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
+    async start(link) {
+      links.push(link);
+      await fake.startImpl(link);
+    },
+    async stop() {
+      stops += 1;
+      set({ ...IDLE_RECORDER });
+      return null;
+    },
+    clearError: () => set({ error: null }),
+    setState: set,
+  };
+  return fake;
+}
+
+let container: HTMLDivElement;
+let root: ReturnType<typeof createRoot>;
+let fake: FakeDeviceController;
+let engine: LiveCaptureEngine;
+let recorder: FakeRecorder;
+let clock = 1_000_000;
+
+beforeEach(async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  await resetDatabase();
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  fake = createFakeDeviceController();
+  engine = createCaptureEngine({ controller: fake, now: () => clock });
+  recorder = createFakeRecorder();
+  clock = 1_000_000;
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+  engine.dispose();
+});
+
+function render(overrides: { engine?: LiveCaptureEngine } = {}) {
+  act(() => {
+    root.render(
+      <SessionPanel
+        engine={overrides.engine ?? engine}
+        controller={fake}
+        recorder={recorder}
+        now={() => clock}
+      />,
+    );
+  });
+}
+
+function panel(): HTMLElement {
+  const found = container.querySelector('[aria-label="Session"]');
+  if (!found) throw new Error('no element labelled Session');
+  return found as HTMLElement;
+}
+
+function button(text: string): HTMLButtonElement {
+  const found = [...container.querySelectorAll('button')].find((el) =>
+    el.textContent?.includes(text),
+  );
+  if (!found) throw new Error(`no button containing "${text}"`);
+  return found as HTMLButtonElement;
+}
+
+async function click(el: HTMLElement) {
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
+/** Lets the engine's op chain and the panel's effects settle. */
+async function settle() {
+  await act(async () => {
+    await engine.flush();
+  });
+}
+
+describe('SessionPanel', () => {
+  it('offers Start session while idle', async () => {
+    render();
+    await settle();
+
+    expect(panel()).toBeTruthy();
+    expect(button('Start session')).toBeTruthy();
+    expect(container.querySelector('[data-testid="session-elapsed"]')).toBeNull();
+  });
+
+  it('starts the session, the pad and the recording from one click', async () => {
+    render();
+
+    await click(button('Start session'));
+    await settle();
+
+    const sessions = await listSessions();
+    const notes = await listNotes();
+    expect(sessions).toHaveLength(1);
+    expect(notes).toHaveLength(1);
+    // Connect then stream: connecting without streaming captures no pen input.
+    expect(fake.calls).toEqual(['connect', 'startStreaming']);
+    expect(recorder.links).toEqual([{ sessionId: sessions[0].id, noteId: notes[0].id }]);
+    expect(button('End session')).toBeTruthy();
+    expect(panel().textContent).toContain('0:00');
+    expect(panel().textContent).toContain('Recording');
+  });
+
+  it('leaves a connected, streaming pad alone', async () => {
+    fake.setDeviceState({ isConnected: true, isStreaming: true, deviceName: 'Huion Note' });
+    render();
+
+    await click(button('Start session'));
+    await settle();
+
+    expect(fake.calls).toEqual([]);
+    expect(panel().textContent).toContain('Pad connected');
+  });
+
+  it('starts streaming on a pad that is connected but silent', async () => {
+    fake.setDeviceState({ isConnected: true, isStreaming: false });
+    render();
+
+    await click(button('Start session'));
+    await settle();
+
+    expect(fake.calls).toEqual(['startStreaming']);
+  });
+
+  it('keeps the session when the pad will not connect', async () => {
+    fake.connect = () => Promise.reject(new Error('User cancelled the requestDevice() chooser'));
+    render();
+
+    await click(button('Start session'));
+    await settle();
+
+    expect(panel().textContent).toContain('User cancelled');
+    // The session is running and audio started anyway: a session with no pad
+    // still records.
+    expect(button('End session')).toBeTruthy();
+    expect(engine.getState().activeNoteId).not.toBeNull();
+    expect(recorder.links).toHaveLength(1);
+  });
+
+  it('keeps capturing handwriting when the microphone is refused', async () => {
+    recorder.startImpl = async () => {
+      recorder.setState({
+        status: 'idle',
+        error: 'Microphone access was denied. Allow it in the browser to record.',
+      });
+    };
+    render();
+
+    await click(button('Start session'));
+    await settle();
+
+    expect(panel().textContent).toContain('Microphone access was denied');
+    expect(panel().textContent).toContain('No audio');
+    expect(button('End session')).toBeTruthy();
+
+    const notesBefore = await listNotes();
+    expect(notesBefore).toHaveLength(1);
+    const noteId = notesBefore[0].id;
+    const pagesBefore = await listPages(noteId);
+    expect(pagesBefore).toHaveLength(1);
+    expect(countPoints(pagesBefore[0].strokes)).toBe(0);
+
+    // A28: writing is never blocked. The stroke lands on the session's note.
+    fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
+    fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+    await settle();
+
+    const notes = await listNotes();
+    expect(notes).toHaveLength(1);
+    expect(engine.getState().activeNoteId).toBe(notes[0].id);
+    // The point above the "one note exists" check: the stroke itself actually
+    // landed on that note's page, not just that starting a session created a
+    // note before any pen input arrived.
+    const pagesAfter = await listPages(noteId);
+    expect(pagesAfter).toHaveLength(1);
+    expect(countPoints(pagesAfter[0].strokes)).toBeGreaterThan(0);
+  });
+
+  it('reports a recorder that throws and keeps the session', async () => {
+    recorder.startImpl = () => Promise.reject(new Error('Recording is not supported'));
+    render();
+
+    await click(button('Start session'));
+    await settle();
+
+    expect(panel().textContent).toContain('Recording is not supported');
+    expect(button('End session')).toBeTruthy();
+  });
+
+  it('reports a mislinked recording and keeps capturing handwriting', async () => {
+    // The header's Record button already has the recorder going (P3-A3) when
+    // Start session is pressed. The real recorder's start() is then a silent
+    // no-op (recorder.ts line 204) and the existing recording keeps the link
+    // it captured earlier - here, the standalone case from A10 - not this
+    // session's. `startImpl` mirrors that: it leaves the state untouched.
+    recorder.setState({
+      status: 'recording',
+      startedAt: 0,
+      elapsedMs: 0,
+      link: { sessionId: null, noteId: null },
+      error: null,
+    });
+    recorder.startImpl = async () => {};
+    render();
+
+    await click(button('Start session'));
+    await settle();
+
+    expect(panel().textContent).toContain(
+      'Audio was already recording when this session started, so this session has no recording of its own.',
+    );
+    // The session is nevertheless open, not unwound (A28).
+    expect(button('End session')).toBeTruthy();
+    expect(engine.getState().activeNoteId).not.toBeNull();
+
+    const notesBefore = await listNotes();
+    expect(notesBefore).toHaveLength(1);
+    const noteId = notesBefore[0].id;
+    const pagesBefore = await listPages(noteId);
+    expect(pagesBefore).toHaveLength(1);
+    expect(countPoints(pagesBefore[0].strokes)).toBe(0);
+
+    // Handwriting still lands on the session's own note despite the mislink.
+    fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
+    fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+    await settle();
+
+    expect(engine.getState().activeNoteId).toBe(noteId);
+    const pagesAfter = await listPages(noteId);
+    expect(pagesAfter).toHaveLength(1);
+    expect(countPoints(pagesAfter[0].strokes)).toBeGreaterThan(0);
+  });
+
+  it('reports a session that cannot start and touches neither pad nor microphone', async () => {
+    const broken = {
+      ...engine,
+      startSession: () => Promise.reject(new Error('session write failed')),
+    } as unknown as LiveCaptureEngine;
+    render({ engine: broken });
+
+    await click(button('Start session'));
+    await settle();
+
+    expect(panel().textContent).toContain('session write failed');
+    expect(recorder.links).toEqual([]);
+    expect(fake.calls).toEqual([]);
+    expect(button('Start session')).toBeTruthy();
+  });
+
+  it('shows the elapsed time growing', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+    expect(panel().textContent).toContain('0:00');
+
+    clock += 65_000;
+    // Real timers on purpose: the panel's own one-second tick is what has to
+    // move the clock, and the engine's flush timer and fake-indexeddb both run
+    // on real timers in this file.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+    });
+
+    expect(panel().textContent).toContain('1:05');
+  });
+
+  it('disables the control while a start is in flight', async () => {
+    let release: (() => void) | null = null;
+    fake.connect = () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    render();
+
+    await click(button('Start session'));
+    // The session write itself takes real IndexedDB ticks (fake-indexeddb
+    // schedules them with setImmediate, not just microtasks), so a bare
+    // `click()` lands mid-write, before the pad's `connect()` has even been
+    // called. Draining the engine's op chain here gets past that write -
+    // `connect()` is now the thing in flight, hung on `release` - without
+    // resolving it, since `flush()` only awaits the engine's own chain.
+    await settle();
+
+    // The pad has not come back yet, so the start is still running and the
+    // button is disabled. An impatient second click on it must neither start a
+    // second session nor end the one that just opened.
+    const busy = [...container.querySelectorAll('button')].find((el) => el.disabled);
+    expect(busy).toBeTruthy();
+    await click(busy as HTMLButtonElement);
+    // Cast: TS's control-flow analysis narrows `release` to `never` here -
+    // it does not track the async reassignment inside `fake.connect`'s
+    // executor, run via a closure it never sees called from this scope.
+    (release as (() => void) | null)?.();
+    await settle();
+
+    expect(await listSessions()).toHaveLength(1);
+    expect(recorder.links).toHaveLength(1);
+    expect(engine.getState().activeNoteId).not.toBeNull();
+  });
+
+  it('shows a mid-session reconnect without ending the session', async () => {
+    fake.setDeviceState({ isConnected: true, isStreaming: true });
+    render();
+    await click(button('Start session'));
+    await settle();
+
+    await act(async () => {
+      fake.setDeviceState({ isConnected: false, isStreaming: false, isReconnecting: true });
+    });
+
+    expect(panel().textContent).toContain('Reconnecting');
+    expect(button('End session')).toBeTruthy();
+    expect(engine.getState().activeNoteId).not.toBeNull();
+  });
+
+  it('unmounting mid-start does not derail the session or the recording', async () => {
+    // React 19 no longer warns on a `setState` after unmount, so a spy that
+    // only checks for a logged "Warning" can never fail here regardless of
+    // whether the `mounted` ref guard in SessionControls.tsx exists - it
+    // proves nothing about that guard. What *is* genuinely testable from
+    // outside is that unmounting mid-start does not derail the start itself:
+    // the session the click opened is still open, the recorder still got
+    // going, and the component's own error-reporting path logged nothing.
+    // Whether the guard's specific job - suppressing a `setState` call on the
+    // unmounted panel - actually ran is not observable from here either way;
+    // that part of the guard's effect stays unverified by this test.
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let release: (() => void) | null = null;
+    fake.connect = () =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    render();
+
+    await click(button('Start session'));
+    // As in "disables the control..." above: the session write needs real
+    // IndexedDB ticks, so draining the engine's chain here is what actually
+    // gets the component past `engine.startSession()` and into the pending,
+    // deliberately-hung `controller.connect()` - the thing we're about to
+    // unmount out from under.
+    await settle();
+    act(() => root.unmount());
+    // Same TS narrowing quirk as above.
+    (release as (() => void) | null)?.();
+    await settle();
+
+    expect(engine.getState().activeNoteId).not.toBeNull();
+    expect(recorder.links).toHaveLength(1);
+    expect(logged.mock.calls.filter(([m]) => String(m).includes('[session]'))).toEqual([]);
+    logged.mockRestore();
+    // A fresh root, so afterEach's unmount has something to unmount.
+    root = createRoot(container);
+  });
+
+  it('ends the session and the recording together', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+    const noteId = engine.getState().activeNoteId;
+
+    await click(button('End session'));
+    await settle();
+
+    expect(recorder.stops).toBe(1);
+    const notes = await listNotes();
+    expect(notes[0]).toMatchObject({ id: noteId, status: 'complete' });
+    expect((await listSessions())[0]).toMatchObject({ status: 'ended' });
+    expect(button('Start session')).toBeTruthy();
+  });
+
+  it('still stops the recording when ending the note fails', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    render();
+    await click(button('Start session'));
+    await settle();
+    // Same state and the same subscription (spread keeps both), only the close
+    // path fails - a note write that rejects mid-session.
+    const broken = {
+      ...engine,
+      endSession: () => Promise.reject(new Error('note write failed')),
+    } as unknown as LiveCaptureEngine;
+    render({ engine: broken });
+
+    await click(button('End session'));
+    await settle();
+
+    // The audio is in memory until stop() saves it (A11), so it is stopped
+    // whatever the note did.
+    expect(recorder.stops).toBe(1);
+    expect(panel().textContent).toContain('note write failed');
+    logged.mockRestore();
+  });
+
+  it('survives the recorder being stopped from elsewhere', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+
+    // The header's own Record/Stop drives the same recorder singleton (P3-A3).
+    await act(async () => {
+      await recorder.stop();
+    });
+
+    expect(panel().textContent).toContain('No audio');
+    expect(button('End session')).toBeTruthy();
+
+    await click(button('End session'));
+    await settle();
+    expect(button('Start session')).toBeTruthy();
+  });
+
+  it('starting over a pen-started bare note completes it', async () => {
+    render();
+    // The student writes before pressing Start: the pen auto-starts a bare note.
+    fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
+    fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+    await settle();
+    const bare = engine.getState().activeNoteId;
+    expect(bare).not.toBeNull();
+    // A bare note is not a session, so the control still offers Start.
+    expect(button('Start session')).toBeTruthy();
+
+    clock += 5000;
+    await click(button('Start session'));
+    await settle();
+
+    const notes = await listNotes();
+    expect(notes.find((n) => n.id === bare)).toMatchObject({ status: 'complete' });
+    expect(engine.getState().activeNoteId).not.toBe(bare);
+    // The clock runs from the session, not from the bare note.
+    expect(panel().textContent).toContain('0:00');
+  });
+
+  it('says a session was interrupted and its recording lost', async () => {
+    await createNote({
+      title: 'Interrupted seminar',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      startedAt: 5_000,
+    });
+    render();
+    await settle();
+
+    expect(panel().textContent).toContain('interrupted');
+    expect(panel().textContent).toContain('recording was lost');
+
+    await click(button('Dismiss'));
+    expect(panel().textContent).not.toContain('recording was lost');
+  });
+
+  it('says nothing when the newest note finished cleanly', async () => {
+    await createNote({
+      title: 'Finished',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'complete',
+      startedAt: 5_000,
+    });
+    render();
+    await settle();
+
+    expect(panel().textContent).not.toContain('interrupted');
+  });
+
+  it('clears the notice once a new session starts', async () => {
+    await createNote({
+      title: 'Interrupted seminar',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      startedAt: 5_000,
+    });
+    render();
+    await settle();
+    expect(panel().textContent).toContain('recording was lost');
+
+    // Starting a session changes `activeNoteId`: the effect must re-read the
+    // notes list off that change, not just on mount. The new session's note
+    // is now the newest, and it is the engine's current note, so
+    // `interruptedNoteOf` excludes it - the notice should clear on its own,
+    // with no Dismiss click.
+    await click(button('Start session'));
+    await settle();
+
+    expect(panel().textContent).not.toContain('recording was lost');
+  });
+
+  it('reads an interrupted session from the newest note only', () => {
+    const note = (id: string, status: 'active' | 'complete' | 'interrupted', startedAt: number) =>
+      ({ id, status, startedAt, legacy: false }) as never;
+
+    // Newest first, as `listNotes()` returns them.
+    expect(interruptedNoteOf([note('b', 'interrupted', 2), note('a', 'complete', 1)], null)?.id).toBe('b');
+    expect(interruptedNoteOf([note('b', 'complete', 2), note('a', 'interrupted', 1)], null)).toBeNull();
+    // Still `active` because recovery has not run yet: the same situation.
+    expect(interruptedNoteOf([note('b', 'active', 2)], null)?.id).toBe('b');
+    // Unless it is the note being written right now.
+    expect(interruptedNoteOf([note('b', 'active', 2)], 'b')).toBeNull();
+    // A legacy header row is skipped entirely, even one whose status would
+    // otherwise look interrupted - the next-newest, clean note is the real
+    // newest as far as the notice is concerned.
+    expect(
+      interruptedNoteOf(
+        [
+          { id: 'legacy', status: 'interrupted', startedAt: 3, legacy: true } as never,
+          { id: 'a', status: 'complete', startedAt: 1, legacy: false } as never,
+        ],
+        null,
+      ),
+    ).toBeNull();
+  });
+});

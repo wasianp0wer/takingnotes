@@ -25,7 +25,31 @@ export interface CaptureEngineDeps {
   maxGapMs?: number;
 }
 
+/**
+ * What the live engine actually publishes. `CaptureState` (foundations-owned,
+ * `src/capture/types.ts`) has no field for "a manually started session is open"
+ * or for when it began, and P3 does not own that file, so the engine adds one
+ * optional field to the same object (spec P3-A1). It is *absent* - not null -
+ * while idle and for bare notes, so nothing that reads `CaptureState` changes
+ * shape.
+ */
+export interface LiveCaptureState extends CaptureState {
+  /** Present only while a session started by `startSession()` is open. */
+  sessionStartedAt?: number;
+}
+
+/**
+ * When the open manual session began, or null when none is. The reader exists
+ * so `SessionControls` can ask a plain `CaptureState` (what the context hands
+ * it) without a cast.
+ */
+export function sessionStartedAtOf(state: CaptureState): number | null {
+  const at = (state as LiveCaptureState).sessionStartedAt;
+  return typeof at === 'number' ? at : null;
+}
+
 export interface LiveCaptureEngine extends CaptureEngine {
+  getState(): LiveCaptureState;
   /**
    * Attaches to the pen stream, starts the flush timer and runs startup
    * recovery. Idempotent; resolves when recovery has finished. Called
@@ -109,11 +133,11 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
   const flushIntervalMs = deps.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
   const segmenter = createStrokeSegmenter({ maxGapMs: deps.maxGapMs ?? DEFAULT_MAX_GAP_MS });
 
-  const stateEmitter = createEmitter<CaptureState>();
+  const stateEmitter = createEmitter<LiveCaptureState>();
   const inkEmitter = createEmitter<void>();
   const pageFinalizedEmitter = createEmitter<string>();
 
-  let state: CaptureState = { ...idleState };
+  let state: LiveCaptureState = { ...idleState };
   let disposed = false;
 
   /**
@@ -124,8 +148,8 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
    */
   let noteOpen = false;
   /**
-   * Bumped by every `startNote` call. A failed creation rolls `noteOpen` back
-   * only while it is still the newest opener: without this, a `startNote` that
+   * Bumped by every `openNote` call. A failed creation rolls `noteOpen` back
+   * only while it is still the newest opener: without this, an opener that
    * fails *after* a second one has queued behind it would clear the flag the
    * second one set, and the next pen-down would auto-start a third note on top
    * of the one that succeeded.
@@ -143,7 +167,7 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
 
   // Replaces the whole object rather than mutating it: `useSyncExternalStore`
   // needs a new reference per change and a stable one in between.
-  function setState(next: CaptureState) {
+  function setState(next: LiveCaptureState) {
     state = next;
     if (!disposed) stateEmitter.emit(state);
   }
@@ -268,6 +292,13 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     });
   }
 
+  /** `endNote`/`endSession`: the close path, or nothing when idle. */
+  function endOpenNote(): Promise<void> {
+    void start();
+    if (!noteOpen) return Promise.resolve();
+    return closeNote();
+  }
+
   /**
    * Startup recovery: a note left `active` means the app died mid-session.
    * Runs as the first op on the chain, so every later write sees a clean store.
@@ -348,7 +379,22 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     return started;
   }
 
-  function startNote(opts: { title?: string } = {}): Promise<string> {
+  /**
+   * Opens Session + Note + page 0 and makes them active, ending any open note
+   * first. Both entry points funnel through here: `startNote` for bare notes and
+   * pen-input auto-start, `startSession` for a manual session (P3).
+   *
+   * `map` runs inside the op, so a caller gets the ids of the records *this*
+   * call created. Reading them off published state after the await would hand
+   * two concurrent callers the same, newer session. It also keeps the returned
+   * promise the one `enqueue` already attached a handler to, so the pen
+   * handler's fire-and-forget `void startNote()` cannot produce an unhandled
+   * rejection.
+   */
+  function openNote<T>(
+    opts: { title?: string; manual: boolean },
+    map: (ids: { sessionId: string; noteId: string }) => T,
+  ): Promise<T> {
     void start();
     if (noteOpen) void closeNote();
     noteOpen = true;
@@ -356,9 +402,11 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     const b = buffer;
 
     return enqueue(async () => {
+      let ids: { sessionId: string; noteId: string };
       try {
         const startedAt = now();
-        const title = opts.title ?? `Note ${new Date(startedAt).toLocaleString()}`;
+        const stamp = new Date(startedAt).toLocaleString();
+        const title = opts.title ?? `${opts.manual ? 'Session' : 'Note'} ${stamp}`;
         const device = controller.getState();
 
         const session = await createSession({ title, startedAt });
@@ -387,25 +435,41 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
 
         b.pageId = page.id;
         if (b.strokes.length === buffered.length) b.dirty = false;
-        setState({
+        const next: LiveCaptureState = {
           activeSessionId: session.id,
           activeNoteId: note.id,
           activePageId: page.id,
           pageIndex: 0,
-        });
+        };
+        // Only a manual session is a session as far as the header is concerned.
+        if (opts.manual) next.sessionStartedAt = startedAt;
+        setState(next);
         // Anything written since that snapshot (the stroke in progress, or a
         // stroke that closed mid-creation).
         void flushBuffer(b);
-        return note.id;
+        ids = { sessionId: session.id, noteId: note.id };
       } catch (error) {
         // No note is open after all, so the next pen point tries again rather
         // than accumulating into a buffer that will never have a page - unless a
-        // later `startNote` has already claimed the flag, whose own op has not
-        // run yet (or has already succeeded).
+        // later opener has already claimed the flag, whose own op has not run
+        // yet (or has already succeeded).
         if (openerSeq === opener) noteOpen = false;
         throw error;
       }
+      // Outside the `try`: the records are written and the state published, so a
+      // throwing `map` must not roll `noteOpen` back on a note that is open.
+      return map(ids);
     });
+  }
+
+  function startNote(opts: { title?: string } = {}): Promise<string> {
+    return openNote({ title: opts.title, manual: false }, (ids) => ids.noteId);
+  }
+
+  function startSession(
+    opts: { title?: string } = {},
+  ): Promise<{ sessionId: string; noteId: string }> {
+    return openNote({ title: opts.title, manual: true }, (ids) => ids);
   }
 
   function newPage(reason: NewPageReason): Promise<string | null> {
@@ -461,35 +525,14 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
 
     start,
     startNote,
+    startSession,
     newPage,
 
-    endNote() {
-      void start();
-      if (!noteOpen) return Promise.resolve();
-      return closeNote();
-    },
-
-    // Phase 2's session flow belongs to P3 (docs/architecture.md §6.7). What is
-    // here is the thin delegation the interface needs to compile, and it is
-    // already correct for Phase 1's shape - `startNote` creates exactly one
-    // session per note and `endNote` ends it - so the tree stays green and
-    // behaviour does not change until P3 implements the real thing.
-    async startSession(opts = {}) {
-      const noteId = await startNote(opts);
-      const sessionId = state.activeSessionId;
-      if (sessionId === null) {
-        // Unreachable while `startNote` creates the session it opens the note
-        // in; asserted rather than fudged so a future divergence is loud.
-        throw new Error('Session started without a session id');
-      }
-      return { sessionId, noteId };
-    },
-
-    endSession() {
-      void start();
-      if (!noteOpen) return Promise.resolve();
-      return closeNote();
-    },
+    endNote: endOpenNote,
+    // One session is one note, started and ended together (spec J4), so ending
+    // the session is the same close path: finalize the page, complete the note,
+    // end the session.
+    endSession: endOpenNote,
 
     async flush() {
       void start();

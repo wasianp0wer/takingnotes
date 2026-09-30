@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createCaptureEngine, type LiveCaptureEngine } from '@/capture/engine';
+import { createCaptureEngine, sessionStartedAtOf, type LiveCaptureEngine } from '@/capture/engine';
 import type { CaptureState } from '@/capture/types';
 import { createNote, getNote, listNotes } from '@/storage/notes';
 import { createPage, getPage, listPages } from '@/storage/pages';
@@ -503,5 +503,194 @@ describe('capture engine', () => {
 
     expect(noteId).not.toBe(firstNote);
     expect(await getNote(firstNote)).toMatchObject({ status: 'complete' });
+  });
+
+  it('startSession records the session on the note and publishes its start time', async () => {
+    await engine.start();
+
+    const { sessionId, noteId } = await engine.startSession({ title: 'Seminar' });
+
+    const note = await getNote(noteId);
+    expect(note).toMatchObject({ status: 'active', sessionId, title: 'Seminar' });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'active', endedAt: null });
+    const state = engine.getState();
+    expect(state.sessionStartedAt).toBe(note!.startedAt);
+    expect(sessionStartedAtOf(state)).toBe(note!.startedAt);
+  });
+
+  it('gives each concurrent startSession its own pair of ids', async () => {
+    await engine.start();
+
+    // Two clicks in one tick (or a click while the first start is still in
+    // flight): reading the session id off published state after the await would
+    // hand both callers the newer session.
+    const [first, second] = await Promise.all([
+      engine.startSession({ title: 'One' }),
+      engine.startSession({ title: 'Two' }),
+    ]);
+
+    expect(first.sessionId).not.toBe(second.sessionId);
+    expect(first.noteId).not.toBe(second.noteId);
+    expect((await getNote(first.noteId))?.sessionId).toBe(first.sessionId);
+    expect((await getNote(second.noteId))?.sessionId).toBe(second.sessionId);
+    expect(await listSessions()).toHaveLength(2);
+    expect(await listNotes()).toHaveLength(2);
+    expect(await listPages(first.noteId)).toHaveLength(1);
+    expect(await listPages(second.noteId)).toHaveLength(1);
+  });
+
+  it('endSession clears the published session start time', async () => {
+    await engine.start();
+    await engine.startSession();
+
+    await engine.endSession();
+
+    expect(engine.getState()).toEqual(IDLE);
+    expect(sessionStartedAtOf(engine.getState())).toBeNull();
+  });
+
+  it('endNote also clears the published session start time', async () => {
+    await engine.start();
+    const { sessionId, noteId } = await engine.startSession();
+
+    // Whatever closes the note ends its session, so the UI can never show a
+    // session the engine no longer has.
+    await engine.endNote();
+
+    expect(sessionStartedAtOf(engine.getState())).toBeNull();
+    expect(await getNote(noteId)).toMatchObject({ status: 'complete' });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'ended' });
+  });
+
+  it('publishes no session start time for a bare note', async () => {
+    await engine.start();
+
+    const noteId = await engine.startNote({ title: 'Bare' });
+
+    // A bare note still gets its own session record (Phase 1's shape, A10),
+    // but it is not a manual session, so the header shows none.
+    expect(sessionStartedAtOf(engine.getState())).toBeNull();
+    expect((await getNote(noteId))?.sessionId).toBeTruthy();
+  });
+
+  it('leaves nothing open when the session write fails', async () => {
+    await engine.start();
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    hooks.failSessionWrites = 1;
+
+    await expect(engine.startSession()).rejects.toThrow('session write failed');
+    expect(engine.getState()).toEqual(IDLE);
+
+    // The next pen point must start a fresh note rather than accumulate into a
+    // buffer that will never have a page.
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await engine.flush();
+    expect(await listNotes()).toHaveLength(1);
+    logged.mockRestore();
+  });
+
+  it('keeps writing on the session note when the pen comes down', async () => {
+    await engine.start();
+    const { sessionId, noteId } = await engine.startSession();
+
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await engine.flush();
+
+    // No second note and no second session: the pen's auto-start only fires
+    // when nothing is open.
+    expect(await listNotes()).toHaveLength(1);
+    expect(await listSessions()).toHaveLength(1);
+    expect(engine.getState().activeNoteId).toBe(noteId);
+    expect(engine.getState().activeSessionId).toBe(sessionId);
+    const pages = await listPages(noteId);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].strokes).toHaveLength(1);
+  });
+
+  it('serializes a session start, a page turn and a session end fired together', async () => {
+    await engine.start();
+
+    const starting = engine.startSession({ title: 'Seminar' });
+    const turning = engine.newPage('device-turn');
+    const ending = engine.endSession();
+    const [{ sessionId, noteId }] = await Promise.all([starting, turning, ending]);
+
+    // Queued, never interleaved: one note, pages 0 and 1, both finalized.
+    expect(await listNotes()).toHaveLength(1);
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => p.pageIndex)).toEqual([0, 1]);
+    for (const page of pages) expect(page.finalizedAt).not.toBeNull();
+    expect(await getNote(noteId)).toMatchObject({ status: 'complete' });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'ended' });
+    expect(engine.getState()).toEqual(IDLE);
+  });
+
+  it('recovers a session interrupted by a reload', async () => {
+    await engine.start();
+    const { sessionId, noteId } = await engine.startSession();
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await engine.flush();
+    // A reload or crash: nothing ended the session.
+    engine.dispose();
+
+    const next = createCaptureEngine({ controller: fake });
+    const finalized = vi.fn();
+    next.subscribePageFinalized(finalized);
+    await next.start();
+
+    expect(await getNote(noteId)).toMatchObject({ status: 'interrupted' });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'ended' });
+    const pages = await listPages(noteId);
+    expect(pages[0].finalizedAt).not.toBeNull();
+    // The recovered page still queues for transcription.
+    expect(finalized).toHaveBeenCalledWith(pages[0].id);
+    expect(next.getState()).toEqual(IDLE);
+    next.dispose();
+  });
+
+  it('keeps publishing the session start time across a page turn', async () => {
+    await engine.start();
+    await engine.startSession({ title: 'Seminar' });
+    const startedAt = sessionStartedAtOf(engine.getState());
+    expect(startedAt).toBeTypeOf('number');
+
+    await engine.newPage('device-turn');
+
+    // `newPage` republishes with a spread, so the field is one careless edit
+    // away from being dropped mid-session.
+    expect(engine.getState()).toMatchObject({ pageIndex: 1 });
+    expect(sessionStartedAtOf(engine.getState())).toBe(startedAt);
+  });
+
+  it('clears the session start time when a bare note replaces the session', async () => {
+    await engine.start();
+    const { sessionId, noteId } = await engine.startSession({ title: 'Seminar' });
+
+    const bare = await engine.startNote({ title: 'Bare' });
+
+    // The session is gone, so the header must not still show one.
+    expect(engine.getState().activeNoteId).toBe(bare);
+    expect(sessionStartedAtOf(engine.getState())).toBeNull();
+    expect(await getNote(noteId)).toMatchObject({ status: 'complete' });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'ended' });
+  });
+
+  it('titles an untitled session from the local date and time (A8)', async () => {
+    await engine.start();
+
+    const { sessionId, noteId } = await engine.startSession();
+
+    // Not the formatted stamp itself: that is locale- and timezone-dependent.
+    expect((await getSession(sessionId))?.title).toMatch(/^Session ./);
+    expect((await getNote(noteId))?.title).toBe((await getSession(sessionId))?.title);
   });
 });
