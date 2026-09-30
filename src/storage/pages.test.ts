@@ -10,10 +10,11 @@ import {
   getPageRender,
   listPages,
   setPageRender,
+  setPageGapAnalysis,
   setPageStrokes,
   setPageTranscript,
 } from '@/storage/pages';
-import type { PageStroke } from '@/storage/types';
+import type { GapAnalysisMeta, PageStroke } from '@/storage/types';
 import { resetDatabase } from '@/test/resetDb';
 
 const STROKES: PageStroke[] = [
@@ -366,5 +367,72 @@ describe('pages repository', () => {
 
     expect(await getPageRender(doomedPage.id)).toBeNull();
     expect(await getPageRender(keptPage.id)).not.toBeNull();
+  });
+});
+
+describe('setPageGapAnalysis', () => {
+  const meta = (patch: Partial<GapAnalysisMeta> = {}): GapAnalysisMeta => ({
+    status: 'done',
+    at: 5_000,
+    model: 'gemma4:12b',
+    promptVersion: 'gap-gemma-v1',
+    error: null,
+    summarized: false,
+    ...patch,
+  });
+
+  async function freshPage() {
+    const note = await createNote({ title: 'N', deviceId: 'huion:abc', pageBaseline: 0 });
+    return createPage({
+      noteId: note.id,
+      pageIndex: 0,
+      devicePageNum: null,
+      source: 'live',
+      strokes: [],
+    });
+  }
+
+  it('starts absent, which reads as never analyzed', async () => {
+    const page = await freshPage();
+    expect(page.gapAnalysis).toBeUndefined();
+  });
+
+  it('stores the analysis meta and leaves the rest of the page alone', async () => {
+    const page = await createPage({
+      noteId: (await createNote({ title: 'N', deviceId: 'huion:abc', pageBaseline: 0 })).id,
+      pageIndex: 0,
+      devicePageNum: null,
+      source: 'live',
+      strokes: STROKES,
+    });
+
+    const updated = await setPageGapAnalysis(page.id, meta());
+
+    expect(updated.gapAnalysis).toEqual(meta());
+    expect(updated.pointCount).toBe(3);
+    expect(await getPage(page.id)).toEqual(updated);
+  });
+
+  it('replaces an earlier analysis, including a failure', async () => {
+    const page = await freshPage();
+    await setPageGapAnalysis(page.id, meta({ status: 'running' }));
+
+    const failed = await setPageGapAnalysis(
+      page.id,
+      meta({ status: 'failed', error: 'Ollama 500', at: 6_000 }),
+    );
+
+    expect(failed.gapAnalysis).toMatchObject({ status: 'failed', error: 'Ollama 500' });
+  });
+
+  it('clears the analysis when passed null', async () => {
+    const page = await freshPage();
+    await setPageGapAnalysis(page.id, meta());
+    const cleared = await setPageGapAnalysis(page.id, null);
+    expect(cleared.gapAnalysis).toBeNull();
+  });
+
+  it('rejects a missing page', async () => {
+    await expect(setPageGapAnalysis('nope', meta())).rejects.toThrow('Page not found: nope');
   });
 });

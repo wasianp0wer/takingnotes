@@ -1,6 +1,12 @@
 import { openNotesDb } from '@/storage/db';
 import { newId } from '@/storage/id';
-import type { PageRecord, PageSource, PageStroke, TranscriptRecord } from '@/storage/types';
+import type {
+  GapAnalysisMeta,
+  PageRecord,
+  PageSource,
+  PageStroke,
+  TranscriptRecord,
+} from '@/storage/types';
 
 export interface CreatePageInput {
   noteId: string;
@@ -122,6 +128,19 @@ export function setPageTranscript(
   transcript: TranscriptRecord,
 ): Promise<PageRecord> {
   return patchPage(id, { transcript });
+}
+
+/**
+ * Records the outcome of a gap analysis of this page (docs/architecture.md
+ * §6.1). Replaces whatever was there: only the last run is interesting, and the
+ * suggestions it produced live in the `gaps` store. `null` puts the page back to
+ * never-analyzed.
+ */
+export function setPageGapAnalysis(
+  id: string,
+  meta: GapAnalysisMeta | null,
+): Promise<PageRecord> {
+  return patchPage(id, { gapAnalysis: meta });
 }
 
 /**
