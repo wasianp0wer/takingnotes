@@ -656,4 +656,41 @@ describe('capture engine', () => {
     expect(next.getState()).toEqual(IDLE);
     next.dispose();
   });
+
+  it('keeps publishing the session start time across a page turn', async () => {
+    await engine.start();
+    await engine.startSession({ title: 'Seminar' });
+    const startedAt = sessionStartedAtOf(engine.getState());
+    expect(startedAt).toBeTypeOf('number');
+
+    await engine.newPage('device-turn');
+
+    // `newPage` republishes with a spread, so the field is one careless edit
+    // away from being dropped mid-session.
+    expect(engine.getState()).toMatchObject({ pageIndex: 1 });
+    expect(sessionStartedAtOf(engine.getState())).toBe(startedAt);
+  });
+
+  it('clears the session start time when a bare note replaces the session', async () => {
+    await engine.start();
+    const { sessionId, noteId } = await engine.startSession({ title: 'Seminar' });
+
+    const bare = await engine.startNote({ title: 'Bare' });
+
+    // The session is gone, so the header must not still show one.
+    expect(engine.getState().activeNoteId).toBe(bare);
+    expect(sessionStartedAtOf(engine.getState())).toBeNull();
+    expect(await getNote(noteId)).toMatchObject({ status: 'complete' });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'ended' });
+  });
+
+  it('titles an untitled session from the local date and time (A8)', async () => {
+    await engine.start();
+
+    const { sessionId, noteId } = await engine.startSession();
+
+    // Not the formatted stamp itself: that is locale- and timezone-dependent.
+    expect((await getSession(sessionId))?.title).toMatch(/^Session ./);
+    expect((await getNote(noteId))?.title).toBe((await getSession(sessionId))?.title);
+  });
 });

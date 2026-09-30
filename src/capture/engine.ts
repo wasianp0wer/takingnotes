@@ -402,6 +402,7 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     const b = buffer;
 
     return enqueue(async () => {
+      let ids: { sessionId: string; noteId: string };
       try {
         const startedAt = now();
         const stamp = new Date(startedAt).toLocaleString();
@@ -446,7 +447,7 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
         // Anything written since that snapshot (the stroke in progress, or a
         // stroke that closed mid-creation).
         void flushBuffer(b);
-        return map({ sessionId: session.id, noteId: note.id });
+        ids = { sessionId: session.id, noteId: note.id };
       } catch (error) {
         // No note is open after all, so the next pen point tries again rather
         // than accumulating into a buffer that will never have a page - unless a
@@ -455,6 +456,9 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
         if (openerSeq === opener) noteOpen = false;
         throw error;
       }
+      // Outside the `try`: the records are written and the state published, so a
+      // throwing `map` must not roll `noteOpen` back on a note that is open.
+      return map(ids);
     });
   }
 
