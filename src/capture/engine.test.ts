@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createCaptureEngine, type LiveCaptureEngine } from '@/capture/engine';
+import { createCaptureEngine, sessionStartedAtOf, type LiveCaptureEngine } from '@/capture/engine';
 import type { CaptureState } from '@/capture/types';
 import { createNote, getNote, listNotes } from '@/storage/notes';
 import { createPage, getPage, listPages } from '@/storage/pages';
@@ -503,5 +503,92 @@ describe('capture engine', () => {
 
     expect(noteId).not.toBe(firstNote);
     expect(await getNote(firstNote)).toMatchObject({ status: 'complete' });
+  });
+
+  it('startSession records the session on the note and publishes its start time', async () => {
+    await engine.start();
+
+    const { sessionId, noteId } = await engine.startSession({ title: 'Seminar' });
+
+    const note = await getNote(noteId);
+    expect(note).toMatchObject({ status: 'active', sessionId, title: 'Seminar' });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'active', endedAt: null });
+    const state = engine.getState();
+    expect(state.sessionStartedAt).toBe(note!.startedAt);
+    expect(sessionStartedAtOf(state)).toBe(note!.startedAt);
+  });
+
+  it('gives each concurrent startSession its own pair of ids', async () => {
+    await engine.start();
+
+    // Two clicks in one tick (or a click while the first start is still in
+    // flight): reading the session id off published state after the await would
+    // hand both callers the newer session.
+    const [first, second] = await Promise.all([
+      engine.startSession({ title: 'One' }),
+      engine.startSession({ title: 'Two' }),
+    ]);
+
+    expect(first.sessionId).not.toBe(second.sessionId);
+    expect(first.noteId).not.toBe(second.noteId);
+    expect((await getNote(first.noteId))?.sessionId).toBe(first.sessionId);
+    expect((await getNote(second.noteId))?.sessionId).toBe(second.sessionId);
+    expect(await listSessions()).toHaveLength(2);
+    expect(await listNotes()).toHaveLength(2);
+    expect(await listPages(first.noteId)).toHaveLength(1);
+    expect(await listPages(second.noteId)).toHaveLength(1);
+  });
+
+  it('endSession clears the published session start time', async () => {
+    await engine.start();
+    await engine.startSession();
+
+    await engine.endSession();
+
+    expect(engine.getState()).toEqual(IDLE);
+    expect(sessionStartedAtOf(engine.getState())).toBeNull();
+  });
+
+  it('endNote also clears the published session start time', async () => {
+    await engine.start();
+    const { sessionId, noteId } = await engine.startSession();
+
+    // Whatever closes the note ends its session, so the UI can never show a
+    // session the engine no longer has.
+    await engine.endNote();
+
+    expect(sessionStartedAtOf(engine.getState())).toBeNull();
+    expect(await getNote(noteId)).toMatchObject({ status: 'complete' });
+    expect(await getSession(sessionId)).toMatchObject({ status: 'ended' });
+  });
+
+  it('publishes no session start time for a bare note', async () => {
+    await engine.start();
+
+    const noteId = await engine.startNote({ title: 'Bare' });
+
+    // A bare note still gets its own session record (Phase 1's shape, A10),
+    // but it is not a manual session, so the header shows none.
+    expect(sessionStartedAtOf(engine.getState())).toBeNull();
+    expect((await getNote(noteId))?.sessionId).toBeTruthy();
+  });
+
+  it('leaves nothing open when the session write fails', async () => {
+    await engine.start();
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    hooks.failSessionWrites = 1;
+
+    await expect(engine.startSession()).rejects.toThrow('session write failed');
+    expect(engine.getState()).toEqual(IDLE);
+
+    // The next pen point must start a fresh note rather than accumulate into a
+    // buffer that will never have a page.
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await engine.flush();
+    expect(await listNotes()).toHaveLength(1);
+    logged.mockRestore();
   });
 });
