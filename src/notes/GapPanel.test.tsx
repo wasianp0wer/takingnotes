@@ -1,14 +1,22 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { GapAnalyzer } from '@/gaps/analyzer';
+import { describeGapSkip } from '@/gaps/eligibility';
 import { GapPanel } from '@/notes/GapPanel';
 import { createGap, listGapsByPage, type CreateGapInput } from '@/storage/gaps';
 import { createNote } from '@/storage/notes';
-import { createPage, getPage, setPageTranscript } from '@/storage/pages';
+import { createPage, getPage, setPageGapAnalysis, setPageTranscript } from '@/storage/pages';
 import { createRecording, setRecordingTranscript } from '@/storage/recordings';
 import { createSession } from '@/storage/sessions';
-import type { PageStroke, TranscriptStatus } from '@/storage/types';
+import type {
+  GapAnalysisMeta,
+  GapAnalysisStatus,
+  GapSuggestionRecord,
+  PageStroke,
+  TranscriptStatus,
+} from '@/storage/types';
 import { resetDatabase } from '@/test/resetDb';
 
 declare global {
@@ -142,11 +150,61 @@ async function settle(rounds = 4): Promise<void> {
   }
 }
 
-async function render(props: { noteId: string; pageId: string }): Promise<void> {
+async function render(props: {
+  noteId: string;
+  pageId: string;
+  analyzer?: GapAnalyzer;
+}): Promise<void> {
   act(() => {
     root.render(<GapPanel {...props} />);
   });
   await settle();
+}
+
+function gapAnalysisMeta(
+  status: GapAnalysisStatus,
+  overrides: Partial<GapAnalysisMeta> = {},
+): GapAnalysisMeta {
+  return {
+    status,
+    at: 0,
+    model: 'gemma4:12b',
+    promptVersion: 'gap-compare-gemma-v1',
+    error: null,
+    summarized: false,
+    ...overrides,
+  };
+}
+
+/** A stub `GapAnalyzer` whose calls are `vi.fn`s the caller can override. */
+function createStubAnalyzer(overrides: Partial<GapAnalyzer> = {}): GapAnalyzer & {
+  analyzePage: ReturnType<typeof vi.fn>;
+  analyzeNote: ReturnType<typeof vi.fn>;
+} {
+  return {
+    analyzePage: vi.fn(overrides.analyzePage ?? (async () => [] as GapSuggestionRecord[])),
+    analyzeNote: vi.fn(overrides.analyzeNote ?? (async () => {})),
+  };
+}
+
+/** An analyzer whose `analyzePage` call hangs until `resolve` is called by hand. */
+function createManualAnalyzer() {
+  let release: ((value: GapSuggestionRecord[]) => void) | null = null;
+  const analyzePage = vi.fn(
+    () =>
+      new Promise<GapSuggestionRecord[]>((resolve) => {
+        release = resolve;
+      }),
+  );
+  const analyzeNote = vi.fn(async () => {});
+  return {
+    analyzePage,
+    analyzeNote,
+    resolve(value: GapSuggestionRecord[] = []) {
+      release?.(value);
+      release = null;
+    },
+  };
 }
 
 function buttons(): HTMLButtonElement[] {
@@ -250,5 +308,190 @@ describe('GapPanel', () => {
 
     const stored = await getPage(pageId);
     expect(stored?.transcript?.markdown).toBe('What the student wrote.');
+  });
+
+  it('Find gaps analyzes this page and reloads the list', async () => {
+    const { noteId, pageId, recordingId } = await seedPage();
+    const analyzer = createStubAnalyzer({
+      analyzePage: async () => {
+        const created = await createGap(
+          gapInput(pageId, noteId, recordingId!, { text: 'Found by analysis' }),
+        );
+        return [created];
+      },
+    });
+
+    await render({ noteId, pageId, analyzer });
+    await click(buttonByText('Find gaps'));
+
+    expect(analyzer.analyzePage).toHaveBeenCalledWith(pageId);
+    expect(container.textContent).toContain('Found by analysis');
+  });
+
+  it('Find gaps in note analyzes the note', async () => {
+    const { noteId, pageId } = await seedPage();
+    const analyzer = createStubAnalyzer();
+
+    await render({ noteId, pageId, analyzer });
+    await click(buttonByText('Find gaps in note'));
+
+    expect(analyzer.analyzeNote).toHaveBeenCalledWith(noteId);
+  });
+
+  it('both buttons are disabled while a run is in flight and enabled after', async () => {
+    const { noteId, pageId } = await seedPage();
+    const manual = createManualAnalyzer();
+
+    await render({ noteId, pageId, analyzer: manual });
+    await click(buttonByText('Find gaps'));
+
+    expect(buttonByText('Find gaps').disabled).toBe(true);
+    expect(buttonByText('Find gaps in note').disabled).toBe(true);
+
+    await act(async () => {
+      manual.resolve();
+    });
+    await settle();
+
+    expect(buttonByText('Find gaps').disabled).toBe(false);
+    expect(buttonByText('Find gaps in note').disabled).toBe(false);
+  });
+
+  it('a second press while a run is in flight does not start a second run', async () => {
+    const { noteId, pageId } = await seedPage();
+    const manual = createManualAnalyzer();
+
+    await render({ noteId, pageId, analyzer: manual });
+    await click(buttonByText('Find gaps'));
+    await click(buttonByText('Find gaps'));
+
+    await act(async () => {
+      manual.resolve();
+    });
+    await settle();
+
+    expect(manual.analyzePage).toHaveBeenCalledTimes(1);
+  });
+
+  it('unmounting mid-run is quiet', async () => {
+    const { noteId, pageId } = await seedPage();
+    const manual = createManualAnalyzer();
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const localContainer = document.createElement('div');
+    document.body.appendChild(localContainer);
+    const localRoot = createRoot(localContainer);
+    act(() => {
+      localRoot.render(<GapPanel noteId={noteId} pageId={pageId} analyzer={manual} />);
+    });
+    await settle();
+
+    const findGapsButton = Array.from(localContainer.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Find gaps',
+    );
+    if (!findGapsButton) throw new Error('no Find gaps button rendered');
+    await act(async () => {
+      findGapsButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(() => {
+      act(() => localRoot.unmount());
+    }).not.toThrow();
+    localContainer.remove();
+
+    await act(async () => {
+      manual.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
+  });
+
+  it('shows the running and pending status lines', async () => {
+    const running = await seedPage();
+    await setPageGapAnalysis(running.pageId, gapAnalysisMeta('running'));
+    await render({ noteId: running.noteId, pageId: running.pageId });
+    expect(container.textContent).toContain('Looking for gaps…');
+
+    act(() => root.unmount());
+    root = createRoot(container);
+
+    const pending = await seedPage();
+    await setPageGapAnalysis(pending.pageId, gapAnalysisMeta('pending'));
+    await render({ noteId: pending.noteId, pageId: pending.pageId });
+    expect(container.textContent).toContain('Waiting to analyze…');
+  });
+
+  it('shows a failed analysis with its error and still offers Find gaps', async () => {
+    const { noteId, pageId } = await seedPage();
+    await setPageGapAnalysis(pageId, gapAnalysisMeta('failed', { error: 'Ollama 500: boom' }));
+
+    await render({ noteId, pageId });
+
+    expect(container.textContent).toContain('Ollama 500: boom');
+    expect(buttonByText('Find gaps').disabled).toBe(false);
+  });
+
+  it('shows an error when the analyzer rejects and stays usable', async () => {
+    const { noteId, pageId } = await seedPage();
+    const analyzer = createStubAnalyzer({
+      analyzePage: async () => {
+        throw new Error('no model');
+      },
+    });
+
+    await render({ noteId, pageId, analyzer });
+    await click(buttonByText('Find gaps'));
+
+    expect(container.textContent).toContain('no model');
+    expect(buttonByText('Find gaps').disabled).toBe(false);
+  });
+
+  it('says so when an analysis found nothing', async () => {
+    const { noteId, pageId } = await seedPage();
+    await setPageGapAnalysis(pageId, gapAnalysisMeta('done'));
+
+    await render({ noteId, pageId });
+
+    expect(container.textContent).toContain('No gaps found in the recording for this page.');
+  });
+
+  it('says when the speech was summarized', async () => {
+    const summarized = await seedPage();
+    await setPageGapAnalysis(summarized.pageId, gapAnalysisMeta('done', { summarized: true }));
+    await render({ noteId: summarized.noteId, pageId: summarized.pageId });
+    expect(container.textContent).toContain('summarized');
+
+    act(() => root.unmount());
+    root = createRoot(container);
+
+    const notSummarized = await seedPage();
+    await setPageGapAnalysis(
+      notSummarized.pageId,
+      gapAnalysisMeta('done', { summarized: false }),
+    );
+    await render({ noteId: notSummarized.noteId, pageId: notSummarized.pageId });
+    expect(container.textContent).not.toContain('summarized');
+  });
+
+  it('explains an ineligible page and disables Find gaps', async () => {
+    const { noteId, pageId } = await seedPage({ strokes: [] });
+
+    await render({ noteId, pageId });
+
+    expect(container.textContent).toContain(describeGapSkip('no-strokes'));
+    expect(buttonByText('Find gaps').disabled).toBe(true);
+    expect(buttonByText('Find gaps in note').disabled).toBe(false);
+  });
+
+  it('says when the note has no recording and disables both actions', async () => {
+    const { noteId, pageId } = await seedPage({ withRecording: false });
+
+    await render({ noteId, pageId });
+
+    expect(container.textContent).toContain(describeGapSkip('no-recording'));
+    expect(buttonByText('Find gaps').disabled).toBe(true);
+    expect(buttonByText('Find gaps in note').disabled).toBe(true);
   });
 });
