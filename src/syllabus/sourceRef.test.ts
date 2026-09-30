@@ -46,6 +46,27 @@ describe('sourceRefFor', () => {
     const a = { title: 'Essay 1', dueAt: local(2026, 10, 15) };
     expect(sourceRefFor('file:hist101.pdf', a)).not.toBe(sourceRefFor('file:engl210.pdf', a));
   });
+
+  it('does not let a # in the import key or title shift the component boundary', () => {
+    const d = local(2026, 10, 15);
+    const a = sourceRefFor('file:hist#101.pdf', { title: 'Midterm', dueAt: d });
+    const b = sourceRefFor('file:hist', { title: '101.pdf#Midterm', dueAt: d });
+    expect(a).not.toBe(b);
+  });
+
+  it('is stable when the title itself contains separator characters', () => {
+    const a = { title: 'Essay #1 @ noon', dueAt: local(2026, 10, 15) };
+    expect(sourceRefFor(KEY, a)).toBe(sourceRefFor(KEY, { ...a }));
+  });
+
+  it('separates two different titles that both normalize to empty', () => {
+    const d = local(2026, 10, 15);
+    const dots = sourceRefFor(KEY, { title: '...', dueAt: d });
+    const dashes = sourceRefFor(KEY, { title: '---', dueAt: d });
+    expect(dots).not.toBe(dashes);
+    expect(dots).toBe(sourceRefFor(KEY, { title: '...', dueAt: d }));
+    expect(dashes).toBe(sourceRefFor(KEY, { title: '---', dueAt: d }));
+  });
 });
 
 describe('import keys', () => {
