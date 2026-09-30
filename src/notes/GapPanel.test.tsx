@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { GapAnalyzer } from '@/gaps/analyzer';
 import { describeGapSkip } from '@/gaps/eligibility';
+import { speechWindowForPage } from '@/gaps/window';
 import { GapPanel } from '@/notes/GapPanel';
 import { createGap, listGapsByPage, type CreateGapInput } from '@/storage/gaps';
 import { createNote } from '@/storage/notes';
@@ -37,6 +38,9 @@ beforeEach(async () => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  // A spy (e.g. on `console.error`) left mocked by a test that failed before
+  // its own teardown line ran must not bleed into the rest of the file.
+  vi.restoreAllMocks();
 });
 
 /** A stroke written between two epoch-ms instants. */
@@ -187,13 +191,18 @@ function createStubAnalyzer(overrides: Partial<GapAnalyzer> = {}): GapAnalyzer &
   };
 }
 
-/** An analyzer whose `analyzePage` call hangs until `resolve` is called by hand. */
+/**
+ * An analyzer whose `analyzePage` call hangs until `resolve` or `reject` is
+ * called by hand.
+ */
 function createManualAnalyzer() {
   let release: ((value: GapSuggestionRecord[]) => void) | null = null;
+  let fail: ((error: unknown) => void) | null = null;
   const analyzePage = vi.fn(
     () =>
-      new Promise<GapSuggestionRecord[]>((resolve) => {
+      new Promise<GapSuggestionRecord[]>((resolve, reject) => {
         release = resolve;
+        fail = reject;
       }),
   );
   const analyzeNote = vi.fn(async () => {});
@@ -203,6 +212,12 @@ function createManualAnalyzer() {
     resolve(value: GapSuggestionRecord[] = []) {
       release?.(value);
       release = null;
+      fail = null;
+    },
+    reject(error: unknown) {
+      fail?.(error);
+      release = null;
+      fail = null;
     },
   };
 }
@@ -358,12 +373,21 @@ describe('GapPanel', () => {
   });
 
   it('a second press while a run is in flight does not start a second run', async () => {
+    // Both clicks are dispatched inside one `act()`, before React commits the
+    // first one's state update - a same-batch double press. `running` (the
+    // rendered state) would read `null` for both handlers in that window, so
+    // this only proves the guard if the guard itself does not depend on a
+    // commit having happened yet (see `runningRef` in `GapPanel.tsx`).
     const { noteId, pageId } = await seedPage();
     const manual = createManualAnalyzer();
 
     await render({ noteId, pageId, analyzer: manual });
-    await click(buttonByText('Find gaps'));
-    await click(buttonByText('Find gaps'));
+    const findGapsButton = buttonByText('Find gaps');
+
+    await act(async () => {
+      findGapsButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      findGapsButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
 
     await act(async () => {
       manual.resolve();
@@ -377,6 +401,15 @@ describe('GapPanel', () => {
     const { noteId, pageId } = await seedPage();
     const manual = createManualAnalyzer();
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // A rejection is what would exercise the `catch` - and its guarded
+    // `console.error` - so a successful resolve after unmount would prove
+    // nothing here.
+    let unhandled = false;
+    const onUnhandledRejection = () => {
+      unhandled = true;
+    };
+    process.on('unhandledRejection', onUnhandledRejection);
 
     const localContainer = document.createElement('div');
     document.body.appendChild(localContainer);
@@ -400,12 +433,17 @@ describe('GapPanel', () => {
     localContainer.remove();
 
     await act(async () => {
-      manual.resolve();
+      manual.reject(new Error('boom'));
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    // A little extra room: an unhandled rejection is reported asynchronously
+    // relative to the reject call, not in the same microtask.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    process.off('unhandledRejection', onUnhandledRejection);
 
     expect(consoleErrorSpy).not.toHaveBeenCalled();
-    consoleErrorSpy.mockRestore();
+    expect(unhandled).toBe(false);
   });
 
   it('shows the running and pending status lines', async () => {
@@ -435,6 +473,10 @@ describe('GapPanel', () => {
 
   it('shows an error when the analyzer rejects and stays usable', async () => {
     const { noteId, pageId } = await seedPage();
+    // This run genuinely fails while mounted, so the panel's own (guarded)
+    // `console.error` legitimately fires - spied here so the run's handled
+    // error does not spill a stack trace into the test output.
+    vi.spyOn(console, 'error').mockImplementation(() => {});
     const analyzer = createStubAnalyzer({
       analyzePage: async () => {
         throw new Error('no model');
@@ -455,6 +497,57 @@ describe('GapPanel', () => {
     await render({ noteId, pageId });
 
     expect(container.textContent).toContain('No gaps found in the recording for this page.');
+  });
+
+  it('says an analysis found nothing even when a previously reviewed suggestion is on the page', async () => {
+    // `done` with no *proposed* suggestions is what "found nothing" means -
+    // an accepted or rejected leftover from an earlier run must not swallow
+    // the line.
+    const { noteId, pageId, recordingId } = await seedPage();
+    await createGap(gapInput(pageId, noteId, recordingId!, { status: 'rejected' }));
+    await setPageGapAnalysis(pageId, gapAnalysisMeta('done'));
+
+    await render({ noteId, pageId });
+
+    expect(container.textContent).toContain('No gaps found in the recording for this page.');
+  });
+
+  it('shows a fallback message when a failed analysis carries no error text', async () => {
+    const { noteId, pageId } = await seedPage();
+    await setPageGapAnalysis(pageId, gapAnalysisMeta('failed', { error: null }));
+
+    await render({ noteId, pageId });
+
+    expect(container.textContent).toContain('Gap analysis failed');
+    expect(container.textContent).not.toContain('null');
+  });
+
+  it('marks a summarized suggestion without claiming the current analysis was summarized', async () => {
+    // The status-line notice must come from `gapAnalysis.summarized` alone:
+    // an older `accepted` suggestion carrying `summarized: true` must not
+    // make a direct (`summarized: false`) analysis look lossy.
+    const { noteId, pageId, recordingId } = await seedPage();
+    await createGap(
+      gapInput(pageId, noteId, recordingId!, { status: 'accepted', summarized: true }),
+    );
+    await setPageGapAnalysis(pageId, gapAnalysisMeta('done', { summarized: false }));
+
+    await render({ noteId, pageId });
+
+    expect(container.textContent).not.toContain('The speech was too long to compare directly');
+    expect(container.textContent).toContain('Summarized');
+  });
+
+  it('shows a one-line source note naming the recording window', async () => {
+    const { noteId, pageId } = await seedPage();
+
+    await render({ noteId, pageId });
+
+    const page = await getPage(pageId);
+    const window = speechWindowForPage(page!);
+    expect(window).not.toBeNull();
+    expect(container.textContent).toContain(new Date(window!.fromMs).toLocaleTimeString());
+    expect(container.textContent).toContain(new Date(window!.toMs).toLocaleTimeString());
   });
 
   it('says when the speech was summarized', async () => {

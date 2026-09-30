@@ -46,11 +46,26 @@ function SuggestionQuote({ suggestion }: { suggestion: GapSuggestionRecord }) {
       <span className="rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent-foreground">
         {GAP_KIND_LABELS[suggestion.kind]}
       </span>
+      {suggestion.summarized && (
+        // A per-item marker, not the full lossy-source sentence (that only
+        // belongs on the status line, and only for the analysis that
+        // actually produced it - see `summarizedNotice` below).
+        <span className="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          Summarized
+        </span>
+      )}
       <blockquote aria-label="From the recording" className="mt-1 border-l-2 pl-2 text-sm italic text-muted-foreground">
         {suggestion.sourceQuote}
       </blockquote>
     </>
   );
+}
+
+/** Local time, so the source note reads like a clock rather than a raw epoch. */
+function formatSourceWindow(win: { fromMs: number; toMs: number }): string {
+  const from = new Date(win.fromMs).toLocaleTimeString();
+  const to = new Date(win.toMs).toLocaleTimeString();
+  return `Comparing against the recording from ${from} to ${to}.`;
 }
 
 /**
@@ -84,6 +99,13 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
     };
   }, []);
 
+  // A second guard, separate from the `running` state: two presses
+  // committed in the same batch (before either has re-rendered) would both
+  // read `running` as its pre-click value from their shared render closure,
+  // so the re-entrancy check has to live somewhere that mutates immediately,
+  // not something that only updates on the next commit.
+  const runningRef = useRef<null | 'page' | 'note'>(null);
+
   useEffect(() => {
     let live = true;
     void Promise.all([getPage(pageId), listGapsByPage(pageId), recordingForNote(noteId)])
@@ -114,8 +136,10 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
     // A press while a run is already in flight is a no-op: the buttons are
     // disabled for this, but a second press slipping through (a race, or an
     // environment that does not honour `disabled`) must not start a second
-    // run on top of it.
-    if (running !== null) return;
+    // run on top of it. Checked and set on the ref first, synchronously,
+    // before any `await` - see `runningRef` above.
+    if (runningRef.current !== null) return;
+    runningRef.current = kind;
     setRunning(kind);
     setRunError(null);
     try {
@@ -132,6 +156,7 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
         console.error('[gaps] analysis run failed', error);
       }
     } finally {
+      runningRef.current = null;
       if (mountedRef.current) setRunning(null);
     }
   }
@@ -145,10 +170,15 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
   const findGapsDisabled = running !== null || eligible?.ok !== true;
   const findGapsInNoteDisabled = running !== null || recording === null;
 
-  const summarizedNotice =
-    page?.gapAnalysis?.summarized === true || gaps.some((g) => g.summarized);
-
   const meta = page?.gapAnalysis;
+  // The lossy-source statement on the status line describes *this*
+  // analysis, so it is gated on the analysis meta alone - not on whether any
+  // listed suggestion (possibly from an earlier, different run) happens to
+  // carry the flag. Each such suggestion gets its own small marker instead
+  // (see `SuggestionQuote`), which cannot misdescribe a run it was not part
+  // of.
+  const summarizedNotice = meta?.summarized === true;
+
   let statusLine: string | null = null;
   let statusIsError = false;
   if (!meta) {
@@ -158,14 +188,12 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
   } else if (meta.status === 'running') {
     statusLine = 'Looking for gaps…';
   } else if (meta.status === 'failed') {
-    statusLine = `Gap analysis failed: ${meta.error}`;
+    statusLine = `Gap analysis failed: ${meta.error ?? 'unknown error'}`;
     statusIsError = true;
-  } else if (
-    meta.status === 'done' &&
-    proposed.length === 0 &&
-    accepted.length === 0 &&
-    rejected.length === 0
-  ) {
+  } else if (meta.status === 'done' && proposed.length === 0) {
+    // "found nothing" means no *proposed* suggestions from this analysis -
+    // an accepted or rejected leftover from an earlier run must not swallow
+    // the line.
     statusLine = 'No gaps found in the recording for this page.';
   }
 
@@ -177,6 +205,9 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
       className="border-t border-border p-4"
     >
       <h3 className="text-sm font-medium">Gaps</h3>
+      {speechWindow && (
+        <p className="text-xs text-muted-foreground">{formatSourceWindow(speechWindow)}</p>
+      )}
       {loadError && <p className="mt-1 text-sm text-destructive">{loadError}</p>}
 
       <div className="mt-2 flex items-center gap-2">
