@@ -1,4 +1,4 @@
-import { act } from 'react';
+import { StrictMode, act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -222,6 +222,25 @@ describe('TranscriptionSettings', () => {
 
     await waitForUpdate(() => {
       expect(container.textContent).not.toContain('Loading models…');
+    });
+  });
+  it('still loads models after a StrictMode remount', async () => {
+    // StrictMode mounts, runs cleanup, then mounts again on the same instance,
+    // so a mounted flag that is only ever cleared stays false for the life of
+    // the component and silently discards every async result.
+    const fetchImpl = fakeFetch();
+    act(() => {
+      root.render(
+        <StrictMode>
+          <TranscriptionSettings fetchImpl={fetchImpl} />
+        </StrictMode>,
+      );
+    });
+
+    await waitForUpdate(() => {
+      // 'llava:7b' can only come from the fetched list: the saved model
+      // ('gemma4:12b', the default) is always offered regardless.
+      expect(Array.from(select().options).map((o) => o.value)).toContain('llava:7b');
     });
   });
 });

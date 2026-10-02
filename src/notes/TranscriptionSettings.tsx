@@ -38,13 +38,17 @@ export function TranscriptionSettings(props?: { fetchImpl?: FetchLike }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Re-armed on mount, not just cleared on unmount: StrictMode mounts, runs
+  // cleanup, then mounts again on the same instance, so a flag that is only
+  // ever cleared stays false for the life of the component and silently
+  // discards every async result - which disables the model list entirely.
   const mountedRef = useRef(true);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
       mountedRef.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   // Guards a slow fetch for a URL the user has since changed away from
   // overwriting the result of a newer one.
