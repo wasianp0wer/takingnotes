@@ -335,6 +335,20 @@ describe('SyllabusImport', () => {
     const picker = byLabel<HTMLInputElement>(m.container, 'Syllabus PDF');
     const file = new File([new Uint8Array([1, 2, 3])], 'hist101.pdf', { type: 'application/pdf' });
     Object.defineProperty(picker, 'files', { value: [file] });
+    // Observe the WRITE to `value`, not the resulting value. Asserting
+    // `picker.value === ''` cannot fail: happy-dom already reports '' once
+    // `files` is defined this way, so that assertion passed even with the reset
+    // deleted from the component. The reset is what keeps the control alive -
+    // re-picking the very same file fires no `change` event without it - so the
+    // assignment itself is the behaviour worth pinning.
+    const valueWrites: string[] = [];
+    Object.defineProperty(picker, 'value', {
+      configurable: true,
+      get: () => '',
+      set: (written: string) => {
+        valueWrites.push(written);
+      },
+    });
     await act(async () => {
       picker.dispatchEvent(new Event('change', { bubbles: true }));
     });
@@ -343,9 +357,7 @@ describe('SyllabusImport', () => {
     expect(h.fromPdf).toHaveBeenCalledTimes(1);
     expect(h.fromText).not.toHaveBeenCalled();
     expect(m.container.textContent).toContain('Essay 1');
-    // Without resetting the control, re-picking the very same file fires no
-    // `change` event and the picker goes dead on a retry.
-    expect(picker.value).toBe('');
+    expect(valueWrites).toEqual(['']);
     await click(buttonNamed(m.container, 'Add'));
     await flush();
     expect(h.imported[0].importKey).toBe('file:hist101.pdf');

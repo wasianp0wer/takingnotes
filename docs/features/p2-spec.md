@@ -365,6 +365,74 @@ Recorded rather than asked (all consistent with A25–A27, A29, A30):
 - **P2-A12** Every entry point that opens a PDF passes pdf.js a copy of the
   bytes, because pdf.js may transfer and detach the caller's `ArrayBuffer`.
 
+## Known limitations — these need a product decision
+
+Found by probing the finished feature against a real database, not by reading
+it. All three follow from decisions the specs mandate, so the code is correct as
+specified; what is wrong is the specification. They are recorded here rather
+than fixed because every candidate remedy either deletes a student's calendar
+entries or trades one of these failures for a worse one, and that is not a call
+to make inside a feature branch.
+
+- **L1 — a re-import whose dates changed duplicates instead of updating.**
+  `sourceRef` includes the assignment's resolved local day (A26), so when a
+  professor revises a date — or the first extraction mis-read one and the
+  student corrected it on the review screen — the revised row computes a *new*
+  identity. A second event is created, the old one stays, both dates sit on the
+  calendar, F3 generates a task for each, and the review table shows no marker
+  for the corrected row, so nothing warns the student. Measured: import
+  "Essay 1 / 15 Oct", re-import the same file with "Essay 1 / 16 Oct" →
+  `{ created: 1, updated: 0 }`, two events.
+  This makes this spec's own claim that "a re-import of the same syllabus
+  updates rather than duplicates" untrue in precisely the case that matters
+  most, because a revised or mis-read date is the commonest reason to re-import
+  a syllabus at all. Candidate remedy: after a confirmed write, find the
+  `source: 'syllabus'` events whose `sourceRef` begins with this import's key
+  but which were not in the confirmed batch, and offer to remove them — which
+  means deleting calendar entries, so it needs its own design and its own
+  confirmation step.
+
+- **L2 — the file import key is the bare file name, so two courses collide.**
+  `importKeyForFile(name)` is `file:<name>` (A26). Measured: History
+  `syllabus.pdf` with "Midterm exam / 15 Oct / 90 min", then Biology
+  `syllabus.pdf` with "Midterm exam / 15 Oct / 300 min" → one event,
+  `{ created: 0, updated: 1 }`; History's deadline is gone. `syllabus.pdf` is
+  the commonest name a course site serves. The student does at least see
+  "Already imported — will update", but that sentence then asserts something
+  false. The mirror case is quieter and worse: the same file saved as
+  `syllabus (1).pdf` produces a complete duplicate set with no marker at all.
+  Candidate remedy: mix a content hash of the PDF bytes into the key, as the
+  pasted-text path already does. Note the trade: that fixes the collision but
+  makes any revision of the file orphan every event it previously created,
+  which is L1 made worse. The real fix is probably to let the user name or
+  pick the import, which is a product change.
+
+- **L3 — a two-column page can produce a plausible, pre-ticked, wrong date.**
+  PDF text assembly trusts pdf.js's item order and deliberately does not sort
+  by position. On a page whose items arrive column-major, the page comes out as
+  all the titles in one block and all the dates in another, so the model is
+  handed a list of titles and a separate list of dates and pairs them
+  positionally. Row-interleaved order — the common table case — comes out
+  correctly. An earlier note in this feature's ledger recorded the cost of not
+  sorting as "unresolvable rows in the review table rather than a wrong date";
+  that was wrong in the more dangerous direction and is corrected here.
+  Candidate remedy: stable-sort each page's items by y bucketed to the line
+  height, then by x. Not done here because the geometry rules this assembly
+  depends on were freshly tuned and sorting risks the common case to improve an
+  uncommon one.
+
+Smaller, recorded so they are not rediscovered: `syllabusModelFamily` can
+return `qwen`, `llava` and `llama`, which have no entry in the prompt maps and
+so receive distinct version strings (`syllabus-qwen-v1`) over byte-identical
+generic prompt text — a version that does not identify the prompt. Harmless
+today only because nothing stores a prompt version for a syllabus import at all
+(P2-A6's consequence: `CalendarEventRecord` has no field for it, and storage is
+another feature's to change). The vision prompt's version is the one an audit
+would most want, and it is discarded inside `fromPdf` with no route out.
+Four lines also remain unguarded by any test, none touching a safety property:
+the include tick's `disabled` attribute, the stale-extraction early return, the
+chunker's `<=` budget boundary, and the extractor's trailing blank-page filter.
+
 ## Done means
 
 `npm run build` succeeds and still emits the pdf worker locally (no new CDN
