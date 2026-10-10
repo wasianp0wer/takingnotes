@@ -99,6 +99,14 @@ export function NotesView(props?: NotesViewProps) {
   // while one is running.
   const sessionLocked = sessionStartedAtOf(state) !== null;
 
+  // K16: viewing anything other than the active note while a session is
+  // locked still shows that writing is going somewhere - chosen over a hard
+  // lock so a lecture can be checked against an older note without ending
+  // the session. Names the *active* note, not the one being viewed.
+  const activeNoteTitle = notes.find((n) => n.id === state.activeNoteId)?.title ?? null;
+  const showsWritingDestination =
+    sessionLocked && state.activeNoteId !== null && selectedNoteId !== state.activeNoteId;
+
   return (
     <div className="flex h-full">
       <NoteList
@@ -126,6 +134,16 @@ export function NotesView(props?: NotesViewProps) {
           pageCount={pages.length}
           viewedIndex={viewedIndex}
           onGoToPage={goToPage}
+          banner={
+            showsWritingDestination && activeNoteTitle !== null ? (
+              <p
+                role="status"
+                className="px-4 py-1 text-xs text-muted-foreground"
+              >
+                {`Writing still goes to "${activeNoteTitle}"`}
+              </p>
+            ) : undefined
+          }
         />
 
         <div className="flex flex-1 overflow-hidden">

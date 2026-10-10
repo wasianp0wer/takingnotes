@@ -7,7 +7,7 @@ import { createCaptureEngine } from '@/capture/engine';
 import type { LiveCaptureEngine } from '@/capture/engine';
 import { NotesView } from '@/notes/NotesView';
 import { resetResumeLockForTests } from '@/notes/resumeLock';
-import { createNote } from '@/storage/notes';
+import { createNote, getNote } from '@/storage/notes';
 import { createPage, setPageTranscript } from '@/storage/pages';
 import type { NoteRecord, PageRecord, TranscriptStatus } from '@/storage/types';
 import { createFakeDeviceController } from '@/test/fakeDeviceController';
@@ -383,5 +383,67 @@ describe('NotesView', () => {
     await click(buttonByText('New note'));
 
     expect(findButtonByText('Resume')).toBeUndefined();
+  });
+
+  it('shows "Writing still goes to" naming the active note when viewing a different one (K16)', async () => {
+    await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    await render();
+
+    await act(async () => {
+      await engine.startSession();
+    });
+    await settle();
+    const active = engine.getState().activeNoteId;
+    expect(active).not.toBeNull();
+    const activeNote = await getNote(active!);
+
+    await click(buttonByText('Last week'));
+
+    expect(container.textContent).toContain(`Writing still goes to "${activeNote!.title}"`);
+    // Names the *active* note, not "Last week" (the one being viewed).
+    expect(container.textContent).not.toContain('Writing still goes to "Last week"');
+  });
+
+  it('does not show the banner while viewing the active note itself', async () => {
+    await render();
+    await click(buttonByText('New note'));
+
+    expect(container.textContent).not.toContain('Writing still goes to');
+  });
+
+  it('does not show the banner when no session is open', async () => {
+    await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    await render();
+    await click(buttonByText('Last week'));
+
+    expect(container.textContent).not.toContain('Writing still goes to');
+  });
+
+  it('does not show the banner for a bare, pen-started note (an active note with no locked session)', async () => {
+    // Isolates the `sessionLocked` term from `activeNoteId !== null`: a pen
+    // stroke with no session running makes a note active without ever
+    // setting `sessionStartedAt` (A6), so the banner must still stay off even
+    // though an active note now exists and a different one is being viewed.
+    await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    const fake = createFakeDeviceController();
+    const bareEngine = createCaptureEngine({ controller: fake });
+    await act(async () => {
+      root.render(
+        <CaptureProvider engine={bareEngine}>
+          <NotesView queue={queue} />
+        </CaptureProvider>,
+      );
+    });
+    await settle();
+
+    fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
+    fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+    await settle();
+    expect(bareEngine.getState().activeNoteId).not.toBeNull();
+
+    await click(buttonByText('Last week'));
+
+    expect(container.textContent).not.toContain('Writing still goes to');
+    bareEngine.dispose();
   });
 });
