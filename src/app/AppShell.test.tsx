@@ -96,6 +96,11 @@ async function typeQuery(value: string): Promise<void> {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
   await settle();
+  // Fix round 3, I4: SearchView debounces Find by 150ms - a real, generous
+  // margin past that so this helper's callers see Find's result.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
 }
 
 async function click(el: HTMLElement): Promise<void> {

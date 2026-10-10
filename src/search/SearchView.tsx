@@ -23,6 +23,11 @@ export interface SearchViewProps {
   onOpenRecordings?: (recordingId: string, startMs?: number) => void;
 }
 
+/** Fix round 3, I4: debounces the expensive Find recompute/render, not the input's own feel - the `Input` stays bound to `query` directly. */
+const FIND_DEBOUNCE_MS = 150;
+/** Fix round 3, I4: a query on its way to being typed can match far more than is useful to mount synchronously - rendered hits are capped, with a "showing first N of M" line naming the true total. */
+const FIND_RESULTS_CAP = 50;
+
 const SOURCE_LABEL: Record<FindHit['source'], string> = {
   'note-title': 'Title',
   'note-summary': 'Summary',
@@ -63,10 +68,25 @@ function openSmartHit(
 export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: SearchViewProps = {}) {
   const [corpus, setCorpus] = useState<SearchCorpus | null>(null);
   const [query, setQuery] = useState('');
+  // Fix round 3, I4: Find recomputes/renders from this, not `query`
+  // directly, so a fast typist doesn't pay for a full match-and-render on
+  // every intermediate keystroke.
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [smart, setSmart] = useState<SmartSearchResult | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const runningRef = useRef(false);
+  // Fix round 3, M2: the in-flight smart-search run's own controller, so
+  // the unmount cleanup below can abort it - a run abandoned by a tab
+  // switch (SearchView remounts fresh on the next visit; see fix round
+  // 1/2's remount premise) would otherwise keep making serial model calls
+  // for a result nothing will ever read.
+  const abortRef = useRef<AbortController | null>(null);
+  // Guards a `setState` after unmount from the abort below: aborting
+  // doesn't stop `handleSmartSearch`'s own `await` from eventually
+  // resolving (to a rejection), and that resolution must not touch state
+  // on a component that no longer exists.
+  const liveRef = useRef(true);
 
   useEffect(() => {
     let live = true;
@@ -78,7 +98,26 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
     };
   }, []);
 
-  const hits = useMemo(() => (corpus ? findInCorpus(corpus, query) : []), [corpus, query]);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query), FIND_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  // Fix round 3, M2: aborts whatever smart-search run is in flight when
+  // this view unmounts (a tab switch away from Search). `[]` deps - this
+  // must run only on unmount, not on every re-render.
+  useEffect(() => {
+    return () => {
+      liveRef.current = false;
+      abortRef.current?.abort();
+    };
+  }, []);
+
+  const hits = useMemo(
+    () => (corpus ? findInCorpus(corpus, debouncedQuery) : []),
+    [corpus, debouncedQuery],
+  );
+  const visibleHits = hits.slice(0, FIND_RESULTS_CAP);
 
   const isEmptyLibrary = corpus !== null && corpus.notes.length === 0 && corpus.recordings.length === 0;
 
@@ -98,17 +137,22 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
     runningRef.current = true;
     setRunning(true);
     setError(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const deps = smartSearchDeps ?? (await getSmartSearchDeps());
-      const result = await runSmartSearch(query, corpus, deps);
-      setSmart(result);
+      const result = await runSmartSearch(query, corpus, deps, { signal: controller.signal });
+      if (liveRef.current) setSmart(result);
     } catch (e) {
       // The error never escapes this handler: it never reaches React as an
-      // uncaught rejection or a stack trace (K44).
-      setError(e instanceof Error ? e.message : String(e));
+      // uncaught rejection or a stack trace (K44). Also never shown for an
+      // abort from our own unmount cleanup - there is no view left to show
+      // it to, and "Smart search aborted" would be a confusing thing to
+      // have flashed on screen on the way out anyway.
+      if (liveRef.current) setError(e instanceof Error ? e.message : String(e));
     } finally {
       runningRef.current = false;
-      setRunning(false);
+      if (liveRef.current) setRunning(false);
     }
   }
 
@@ -124,7 +168,16 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
     if (hit.noteId) onOpenNotes?.(hit.noteId, hit.pageIndex ?? 0);
   }
 
-  if (corpus === null) return null;
+  // Fix round 3, I5: a real loading state, not `null` - a `null` return
+  // meant this tab showed nothing at all (not even its own landmark) for
+  // as long as `loadSearchCorpus()` took.
+  if (corpus === null) {
+    return (
+      <section aria-label="Search" className="flex h-full items-center justify-center p-8">
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      </section>
+    );
+  }
 
   // Fix round 3, I1: `unsummarizedCount` notes have no summary, but K46's
   // fallback also now draws on page text *and* recording text (C1) - only
@@ -158,9 +211,14 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
 
           {error && <p className="text-sm text-destructive">{error}</p>}
 
-          {query.trim() !== '' && (
+          {debouncedQuery.trim() !== '' && (
             <ul className="space-y-2">
-              {hits.map((hit, i) => (
+              {hits.length > FIND_RESULTS_CAP && (
+                <li className="text-xs text-muted-foreground">
+                  Showing first {FIND_RESULTS_CAP} of {hits.length} matches.
+                </li>
+              )}
+              {visibleHits.map((hit, i) => (
                 <li key={i} className="flex items-start justify-between gap-2 text-sm">
                   <div>
                     <span className="font-medium">{SOURCE_LABEL[hit.source]}</span>

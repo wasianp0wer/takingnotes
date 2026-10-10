@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createFakeTextGenerator } from '@/search/fakeTextGenerator';
 import { SearchView } from '@/search/SearchView';
+import type { SmartSearchDeps } from '@/search/smartSearch';
 import { createNote } from '@/storage/notes';
 import { createPage, setPageTranscript } from '@/storage/pages';
 import { createRecording, finalizeRecording, setRecordingTranscript } from '@/storage/recordings';
@@ -82,6 +83,13 @@ async function type(value: string): Promise<void> {
     el.dispatchEvent(new Event('input', { bubbles: true }));
   });
   await settle();
+  // Fix round 3, I4: Find now recomputes from a debounced query
+  // (FIND_DEBOUNCE_MS = 150 in SearchView.tsx) - a real, generous margin
+  // past that so every existing `type()` call site keeps seeing Find's
+  // result without having to know about the debounce itself.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
 }
 
 function render(props: Parameters<typeof SearchView>[0] = {}) {
@@ -388,5 +396,112 @@ describe('SearchView', () => {
 
     await type('osmosis');
     expect(container.textContent).not.toContain('could not be checked');
+  });
+
+  it('shows a loading state, with the Search landmark already present, before the corpus has resolved (fix round 3, I5)', () => {
+    render();
+    // Deliberately no `await settle()` - this checks the render that
+    // happens *before* loadSearchCorpus() has had a chance to resolve.
+    expect(container.querySelector('[aria-label="Search"]')).not.toBeNull();
+    expect(container.textContent).toContain('Loading');
+  });
+
+  it('does not search below MIN_QUERY_LENGTH, even in the UI (fix round 3, I4)', async () => {
+    await createNote({ title: 'Anything', deviceId: 'd', pageBaseline: 0 });
+    render();
+    await settle();
+    await type('a');
+    expect(container.textContent).not.toContain('Anything');
+  });
+
+  it('debounces Find: a hit is not yet shown immediately after typing, only once the debounce elapses (fix round 3, I4)', async () => {
+    await createNote({ title: 'Thermodynamics', deviceId: 'd', pageBaseline: 0 });
+    render();
+    await settle();
+
+    const input = queryInput();
+    await act(async () => {
+      nativeInputValueSetter.call(input, 'thermo');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await settle(); // flushes microtasks, but not the 150ms debounce timer
+    expect(container.textContent).not.toContain('Thermodynamics');
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    expect(container.textContent).toContain('Thermodynamics');
+  });
+
+  // The test above also passes if `hits` is computed straight from `query`
+  // (undebounced), because the surrounding block is separately gated on
+  // `debouncedQuery.trim() !== ''` - while that gate is still empty, no
+  // hits can show regardless of what `hits` itself was computed from. This
+  // test forces `debouncedQuery` to be *non-empty but stale* (a completed,
+  // older debounce cycle) at the moment `query` changes again, which is
+  // the only state in which the two possible implementations disagree.
+  it("debounces Find's own recompute, not just the surrounding block's visibility", async () => {
+    await createNote({ title: 'Thermo Lecture', deviceId: 'd', pageBaseline: 0 });
+    await createNote({ title: 'Wave Lecture', deviceId: 'd', pageBaseline: 0 });
+    render();
+    await settle();
+
+    await type('thermo'); // type()'s own wait lets this debounce cycle complete
+    expect(container.textContent).toContain('Thermo Lecture');
+
+    const input = queryInput();
+    await act(async () => {
+      nativeInputValueSetter.call(input, 'wave');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await settle(); // debouncedQuery is still 'thermo' here - a stale, non-empty value
+    expect(container.textContent).toContain('Thermo Lecture');
+    expect(container.textContent).not.toContain('Wave Lecture');
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    expect(container.textContent).toContain('Wave Lecture');
+    expect(container.textContent).not.toContain('Thermo Lecture');
+  });
+
+  it('caps rendered Find hits and states the true total (fix round 3, I4)', async () => {
+    for (let i = 0; i < 60; i += 1) {
+      await createNote({ title: `Match ${i}`, deviceId: 'd', pageBaseline: 0 });
+    }
+    render();
+    await settle();
+    await type('match');
+    expect(container.querySelectorAll('li').length).toBeLessThanOrEqual(51); // 50 hits + the "showing" line
+    expect(container.textContent).toContain('Showing first 50 of 60 matches.');
+  });
+
+  it("aborts an in-flight smart search when the view unmounts, rather than letting it keep making calls (fix round 3, M2)", async () => {
+    await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0 });
+    let capturedSignal: AbortSignal | undefined;
+    let callCount = 0;
+    const hangingGenerator: SmartSearchDeps['generator'] = {
+      generate: async () => '',
+      generateJson: async (_prompt, opts) => {
+        callCount += 1;
+        capturedSignal = opts.signal;
+        // Never resolves within the test - the point is to catch the
+        // run mid-flight, not to let it finish.
+        return new Promise(() => {});
+      },
+    };
+    render({ smartSearchDeps: { generator: hangingGenerator, model: 'm' } });
+    await settle();
+    await type('something');
+    await click(buttonByText('Smart search'));
+
+    expect(callCount).toBe(1);
+    expect(capturedSignal?.aborted).toBe(false);
+
+    act(() => root.unmount());
+    expect(capturedSignal?.aborted).toBe(true);
+
+    // A fresh root so afterEach's own unmount is a harmless no-op.
+    root = createRoot(container);
   });
 });
