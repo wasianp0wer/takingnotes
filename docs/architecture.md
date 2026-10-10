@@ -710,3 +710,284 @@ contract; keep them.
 restoring the pen stream fails. The pad then reports connected while sending no
 pen input, and nothing retries; page turns still create empty pages. Found by
 F4, out of scope for Phase 1 and 2, recorded here so it is not rediscovered.
+
+## 8. Phase 3 foundations
+
+Product decisions are in `docs/spec-phase3.md`. This section is the contract
+Wave 2's five units (S1 sessions, S4 typed pages, S5 tags, and the others)
+build against, written after six foundations tasks landed on `phase3`. Same
+rules as always: the code wins where this disagrees, and this file gets
+updated to match.
+
+### 8.1 IndexedDB schema (version 4)
+
+The v1–v3 upgrade blocks are frozen. v4 adds, inside `if (oldVersion < 4)`
+(`src/storage/db.ts`):
+
+| Store | keyPath | Indexes |
+|-------|---------|---------|
+| `recordingChunks` | `id` | `by-recording` → `recordingId` |
+
+No data migration: every v4 field is optional with a documented
+absent-reading, so existing rows are already valid v4 rows.
+
+`recordingChunks` holds transient per-`MediaRecorder`-chunk audio for a
+recording in progress (K4–K6): one row per chunk, written as it arrives so an
+interruption costs at most one timeslice of audio. `stop()` stitches a
+recording's chunks into `recordingAudio` and deletes them, so a row surviving
+a reload means a recording that was interrupted - exactly what startup
+recovery looks for. The id is `<recordingId>:<seq>` (not random), so a retried
+write of the same chunk overwrites itself instead of duplicating audio into
+the stitched file.
+
+```ts
+export interface RecordingChunkRecord {
+  id: string;
+  recordingId: string;
+  /** Monotonic per recording, starting at 0. Stitch order (K6). */
+  seq: number;
+  data: ArrayBuffer;
+  /** The `MediaRecorder` MIME type, carried so stitching needs no second read. */
+  type: string;
+}
+```
+
+Four new optional fields land on existing records (`src/storage/types.ts`),
+each with a documented absent-reading so no v4 field needed a data migration:
+
+```ts
+export interface NoteRecord {
+  // ...all existing fields unchanged...
+  /** Free-form tags, normalized on write (K3). Absent on pre-v4 rows = []. */
+  tags?: string[];
+  /** See `TitleSource`. Absent reads as `'default'`. */
+  titleSource?: TitleSource;
+  /** Identifies the prompt that produced `summary`. Absent reads as `null`. */
+  summaryPromptVersion?: string | null;
+}
+
+export interface PageRecord {
+  // ...all existing fields unchanged...
+  /**
+   * The typed content of a `source: 'typed'` page (K32). Absent on ink pages.
+   * Mirrored into `transcript` (K33), so search and gap analysis read it
+   * through the one field they already know about.
+   */
+  text?: string;
+}
+```
+
+`TitleSource` (`src/storage/types.ts`) is `'default' | 'auto' | 'manual'`:
+absent on v1–v3 rows, which reads as `'default'` - the `Note <timestamp>`
+placeholder `openNote()` (in `src/capture/engine.ts`) writes when
+`startNote`/`startSession` is given no explicit title - so every pre-Phase-3
+note is eligible for auto-naming. That same eligibility is what
+the summary backfill (smart search) needs. `PageSource` gains a third
+member: `'rom' | 'live' | 'typed'`.
+
+### 8.2 Repository functions owning the new fields
+
+A Wave 2 unit reads or writes a new field only through the function below; it
+must not invent its own writer, since several of these do more than a plain
+`put` (normalization, provenance, or a second mirrored field).
+
+**`src/storage/notes.ts`** - tags and title provenance:
+
+- `normalizeTags(input: readonly string[]): string[]` - trims, lowercases,
+  deduplicates, drops blanks; preserves first-seen order (K3).
+- `tagsOf(note: NoteRecord): string[]` - the absent-reading, `note.tags ?? []`.
+- `titleSourceOf(note: NoteRecord): TitleSource` - the absent-reading,
+  `note.titleSource ?? 'default'`.
+- `setNoteTags(id: string, tags: readonly string[]): Promise<NoteRecord>` -
+  normalizes, then `updateNote(id, { tags: normalizeTags(tags) })`. This is
+  S5's one writer for tags.
+- `renameNote(id: string, title: string): Promise<NoteRecord>` - a manual
+  rename; trims, rejects a blank title, and sets `titleSource: 'manual'`,
+  which permanently opts the note out of auto-titling. The only path that
+  writes a title by hand.
+- `setNoteSummary(id: string, input: NoteSummaryInput): Promise<NoteRecord>` -
+  `NoteSummaryInput` is `{ summary, model, promptVersion, title? }`. The
+  summary always lands; `title` lands (with `titleSource: 'auto'`) only when
+  `titleSourceOf(existing) !== 'manual'` - read, decide and write inside one
+  transaction, so a concurrent `renameNote` can't be overwritten by a stale
+  decision. A blank generated title is treated as a failed generation, never
+  as an instruction to clear the title.
+- `listTagVocabulary(): Promise<string[]>` - every distinct tag across all
+  notes, sorted, derived by scanning rather than cached.
+
+**`src/storage/pages.ts`** - typed pages and open-page timing:
+
+- `isTypedPage(page: PageRecord): boolean` - `page.source === 'typed'`.
+- `createTypedPage(input: CreateTypedPageInput): Promise<PageRecord>` -
+  `CreateTypedPageInput` is `{ noteId, pageIndex, text?, capturedAt? }`; `text`
+  defaults to `''`. Creates a page with `source: 'typed'`, no strokes, no
+  device page number, then calls `setPageText` to fill it. This is S4's one
+  creator for a typed page.
+- `setPageText(id: string, text: string): Promise<PageRecord>` - writes
+  `page.text` and mirrors it into `page.transcript` (K33): non-blank text
+  becomes a `'done'` transcript with `model: TYPED_MODEL` (`'typed'`) and
+  `promptVersion: TYPED_PROMPT_VERSION` (`'typed/1'`); blank text leaves
+  `transcript: null` rather than writing a contentless `'done'` transcript, so
+  an empty typed page doesn't show up in smart search or get offered to gap
+  analysis. Throws if the page is not a typed page.
+- `pageEndedAt(page: PageRecord): number` - when a page last received
+  writing: the latest stroke `endedAt`, falling back to `capturedAt` for a
+  page whose strokes carry no timestamps (ROM, legacy, or typed). Shared by
+  startup recovery and `resumeNote` (§8.3): both must finalize an interrupted
+  page at the time writing stopped, not at the time the app noticed.
+
+`finalizePage(id, at)` and `isPageFinalized(page)` are unchanged from Phase 1
+(§2.4) and are what `resumeNote` calls to close a page it finds open.
+
+**`src/storage/recordingChunks.ts`** and **`src/storage/recordings.ts`** -
+chunks and unfinished-recording lookup:
+
+- `appendRecordingChunk(recordingId: string, seq: number, blob: Blob): Promise<void>` -
+  writes one chunk row (`<recordingId>:<seq>`).
+- `listRecordingChunks(recordingId: string): Promise<RecordingChunkRecord[]>` -
+  `seq`-ordered (not index order: the primary key sorts lexicographically, so
+  "rec:10" would otherwise land before "rec:2" past nine chunks).
+- `stitchRecordingChunks(recordingId: string): Promise<Blob | null>` -
+  concatenates a recording's chunks in `seq` order; `null` when there are
+  none. A hole in the sequence (a failed write) is concatenated across rather
+  than treated as an error.
+- `deleteRecordingChunks(recordingId: string): Promise<void>`.
+- `listUnfinishedRecordings(): Promise<RecordingRecord[]>` (in
+  `recordings.ts`) - every recording with `endedAt === null`, newest first.
+  K5: a recording row is created at record-start, before any chunk exists, so
+  recovery can find it this way and already knows its session/note link,
+  title and start time.
+- `deleteRecording(id)` was extended to also delete any chunks left over for
+  that recording (a recording deleted while still open would otherwise leave
+  orphaned chunk rows, since nothing else scans for them).
+
+### 8.3 `resumeNote`'s contract
+
+Declared on `CaptureEngine` in `src/capture/types.ts`:
+
+```ts
+/**
+ * Reopens an existing note and appends a new page after its last one (K10,
+ * K11). One mechanism serves both restarting an interrupted session and
+ * returning to a finished note. Ends any other open note first. Appending
+ * only: no existing page is modified and none is re-finalized.
+ */
+resumeNote(noteId: string): Promise<{ sessionId: string; noteId: string }>;
+```
+
+Implemented in `src/capture/engine.ts`. Behavioral rules Wave 2 relies on:
+
+- **Reopens, never forks.** It is not a call into `startNote`/`openNote`:
+  no new Note or Session row is created when the note already has a usable
+  one. It calls `getNote(noteId)` and operates on the same note row.
+- **Appends after the last page; never touches an existing one.** It reads
+  `listPages(noteId)` (`pageIndex`-sorted) and creates exactly one new page
+  whose `pageIndex` is `pages[pages.length - 1].pageIndex + 1` (`0` for an
+  empty note). No existing page's strokes, `transcript`, or `finalizedAt` are
+  rewritten.
+- **The note keeps its original `startedAt`.** Only `status` (back to
+  `'active'`) and `endedAt` (back to `null`) move on the note row; `startedAt`
+  is never part of the patch.
+- **`sessionStartedAt` is reset to `now()`.** The published `CaptureState`'s
+  `sessionStartedAt` (read via `sessionStartedAtOf(state)`) is set to the
+  resume's own timestamp, not the note's or session's original start, so the
+  header clock measures the current sitting - a note resumed three days later
+  must not show a 72-hour timer.
+- **A missing or dangling session is created and linked.** `note.sessionId`
+  may be `null` (legacy/imported note) or may name a session row that no
+  longer exists (`getSession` returns nothing). Either way `resumeNote`
+  creates a new `SessionRecord` (`title: note.title`, `startedAt:
+  note.startedAt`) and links it onto the note via `updateNote`'s `sessionId`
+  patch - every note is resumable (K14), not just ones with a live session. A
+  session that does still exist is reactivated in place
+  (`updateSession(sessionId, { status: 'active', endedAt: null })`) rather
+  than replaced.
+- **An open page is finalized at `pageEndedAt(page)`, not `now()`.** Before
+  appending, any page the note left unfinalized (an interrupted capture) is
+  closed with `finalizePage(page.id, pageEndedAt(page))` - the time writing
+  actually stopped, so the page's gap-analysis speech window isn't stretched
+  across the days-long gap until the resume.
+- **Two concurrent resumes of the same note share one promise.** A
+  synchronous `pendingResume: { noteId, result } | null` marker is set before
+  the async op is enqueued and cleared only when it is still the newest
+  pending resume. A second `resumeNote(noteId)` call for the *same* note,
+  arriving before the first call's enqueued op has published state, returns
+  `pendingResume.result` directly rather than falling through to close the
+  page the first call is in the middle of opening. (A call for the same note
+  while it is already the open, active note - and a session exists - is a
+  separate, cheaper early-return: it resolves immediately with the current
+  state and never touches storage at all.)
+- **Resuming a *different* note before the first resume's op has run still
+  leaves a stray empty page.** The `pendingResume` guard only covers a second
+  call for the *same* `noteId`; a call for a different note falls through to
+  `closeNote()` against whatever note/page was open before the first resume's
+  op has had a chance to publish its own state. This is why the UI must
+  disable the Resume control while a call is in flight - S1's own
+  responsibility, not the engine's.
+
+### 8.4 Wave 2 mount points
+
+`NotesView` was split in Task 6 into `src/notes/NoteList.tsx` and
+`src/notes/NoteToolbar.tsx`, each exposing slots as `ReactNode` (or
+`ReactNode`-returning) props. **A Wave 2 unit adds to a slot it owns; it does
+not edit `NoteList.tsx`, `NoteToolbar.tsx`, or `NotesView.tsx` itself.** Two
+units touching the same file is exactly what parallel worktrees can't resolve
+without a merge conflict at best and a silently dropped mount at worst.
+
+| Mount point | Owner |
+|---|---|
+| `NoteList.filter` | S5 tags |
+| `NoteList.rowActions` | S1 sessions (Resume) |
+| `NoteToolbar.title` | S1 sessions (inline title) |
+| `NoteToolbar.meta` | S5 tags (tag editor) |
+| `NoteToolbar.actions` | S4 typed pages ("Type page") |
+| `NoteToolbar.banner` | S1 sessions (writing-destination notice) |
+
+Signatures, from the components as shipped:
+
+```ts
+// src/notes/NoteList.tsx
+export interface NoteListProps {
+  notes: readonly NoteRecord[];
+  selectedNoteId: string | null;
+  activeNoteId: string | null;
+  onSelect: (id: string) => void;
+  /** Rendered above the list. */
+  filter?: ReactNode;
+  /** Trailing controls for one row. */
+  rowActions?: (note: NoteRecord) => ReactNode;
+}
+
+// src/notes/NoteToolbar.tsx
+export interface NoteToolbarProps {
+  noteTitle: string | null;
+  /** Replaces the plain title. */
+  title?: ReactNode;
+  /** Rendered under the title. */
+  meta?: ReactNode;
+  /** Rendered before page navigation. */
+  actions?: ReactNode;
+  /** A full-width row below the toolbar. */
+  banner?: ReactNode;
+  sessionLocked: boolean;
+  hasActiveNote: boolean;
+  onNewNote: () => void;
+  onEndNote: () => void;
+  pageCount: number;
+  viewedIndex: number;
+  onGoToPage: (index: number) => void;
+}
+```
+
+`filter` renders above the note list; `rowActions` is called per note and
+rendered at the bottom of that note's list item. `title` replaces the plain
+`noteTitle ?? 'No note selected'` span when given; `meta` renders directly
+under the title/title-slot; `actions` renders in the button row, before page
+navigation and before F4's `<PageTurnControls />` (which must stay mounted -
+it is F4's only mount point, §4); `banner` renders as a full-width row below
+the whole toolbar row.
+
+`NoteToolbarProps.sessionLocked` already exists for S1: when `true`, "New
+note" is disabled (K15 - a session locks you into its note) while "End note"
+deliberately stays enabled, since ending must never be reachable only by
+reload.
