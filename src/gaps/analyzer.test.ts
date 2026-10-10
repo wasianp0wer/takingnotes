@@ -717,21 +717,37 @@ describe('createGapAnalyzer', () => {
     expect(await gapAnalysisOf(pageId)).toBeUndefined();
   });
 
-  it('ignores an unfinished recording even when its time span would overlap (K45, architecture.md §8.2)', async () => {
-    const { pageId, sessionId, noteId } = await seed({ withRecording: false });
-    // Still recording: endedAt is null, so `listFinishedRecordings()` must
-    // exclude it even though its startedAt/now overlaps the page's window.
-    await createRecording(
+  it('ignores an unfinished recording even when its time span would overlap and it already has a transcript (K45, architecture.md §8.2)', async () => {
+    // fix round 1, Important 4: the original version of this test gave the
+    // unfinished recording no transcript at all, so `analyzePage` skipped it
+    // on `recording-transcript` eligibility regardless of K45's own
+    // selection logic - the assertions passed for a reason unrelated to
+    // what the test's name claims. A `done` transcript with a segment
+    // squarely inside the page's window removes that masking: if the
+    // unfinished recording were ever (incorrectly) treated as a usable
+    // candidate, the analyzer would have something to compare and would
+    // call the generator.
+    const { pageId, sessionId, noteId, startedAt } = await seed({ withRecording: false });
+    const stillRecording = await createRecording(
       {
         sessionId,
         noteId,
         title: 'Still recording',
-        startedAt: 1_000_000,
+        startedAt,
         endedAt: null,
         durationMs: 0,
       },
       audio(),
     );
+    await setRecordingTranscript(stillRecording.id, {
+      text: 'speech',
+      segments: [{ startMs: 10_000, endMs: 20_000, text: SPEECH }],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 0,
+    });
     const generator = createFakeTextGenerator([ONE_POINT]);
 
     expect(await analyzerFor(generator).analyzePage(pageId)).toEqual([]);
