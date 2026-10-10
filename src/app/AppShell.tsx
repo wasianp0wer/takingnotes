@@ -9,6 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useHuionDevice } from '@/device/TabletProvider';
 import { NotesView } from '@/notes/NotesView';
 import { RecordingsView } from '@/recordings/RecordingsView';
+import { SearchView } from '@/search/SearchView';
 import { migrateLegacyNotebooks } from '@/storage/migrate';
 import { TriageView } from '@/triage/TriageView';
 
@@ -54,6 +55,8 @@ export function AppShell() {
           <TabsTrigger value="notes">Notes</TabsTrigger>
           <TabsTrigger value="recordings">Recordings</TabsTrigger>
           <TabsTrigger value="triage">Triage</TabsTrigger>
+          {/* K39: its own tab, since it spans both Notes and Recordings. */}
+          <TabsTrigger value="search">Search</TabsTrigger>
         </TabsList>
         <div className="ml-auto flex items-center gap-2">
           {/* P3's only mount point (docs/architecture.md §6.7). */}
@@ -71,6 +74,16 @@ export function AppShell() {
       </TabsContent>
       <TabsContent value="triage" className="min-h-0 overflow-auto">
         <TriageView />
+      </TabsContent>
+      <TabsContent value="search" className="min-h-0 overflow-auto">
+        {/*
+         * S6-A6: these are cross-tab switches only. NotesView/RecordingsView
+         * are off-limits (owned by other units) and expose no prop through
+         * which an external caller can select a specific note, page or
+         * recording - see docs/features/s6-spec.md's S6-A6 for the full
+         * reasoning.
+         */}
+        <SearchView onOpenNotes={() => setTab('notes')} onOpenRecordings={() => setTab('recordings')} />
       </TabsContent>
     </Tabs>
   );

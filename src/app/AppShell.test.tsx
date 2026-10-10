@@ -58,18 +58,38 @@ function tab(label: string): HTMLElement {
 }
 
 describe('AppShell', () => {
-  it('shows the three tabs, the device status and the header controls', () => {
+  it('shows the four tabs, the device status and the header controls', () => {
     renderShell();
 
     expect(tab('Notes')).toBeTruthy();
     expect(tab('Recordings')).toBeTruthy();
     expect(tab('Triage')).toBeTruthy();
+    expect(tab('Search')).toBeTruthy();
     expect(container.textContent).toContain('Not connected');
     expect(container.textContent).toContain('Record');
     expect(container.querySelector('[aria-label="Settings"]')).toBeTruthy();
     // P3's mount point (docs/architecture.md §6.7): the header is the only
     // place session controls appear, so nothing else may claim it.
     expect(container.querySelector('[aria-label="Session"]')).toBeTruthy();
+  });
+
+  it("switches to Search and renders its landmark (S6, K39)", async () => {
+    renderShell();
+
+    await act(async () => {
+      tab('Search').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      tab('Search').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    // SearchView loads its corpus asynchronously (over IndexedDB) before it
+    // renders anything but `null` - give it a few ticks to resolve.
+    for (let i = 0; i < 4; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+
+    expect(tab('Search').getAttribute('data-state')).toBe('active');
+    expect(container.querySelector('[aria-label="Search"]')).not.toBeNull();
   });
 
   it('opens on Notes, which mounts F4\'s page-turn controls', () => {
