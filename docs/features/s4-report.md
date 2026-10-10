@@ -100,9 +100,16 @@ mirroring, mixed-order pages in one note, and K34's redirect-to-a-new-live-page.
   not stated in the spec.
 - **S4-A3**: a typed page's editor is open for editing for *any* typed page
   navigated to, not only the currently-active one.
-- **S4-A4**: the `recover()`/`resumeNote()` fix above is defense in depth,
-  independent of whether the three live engine paths already prevent an
-  unfinalized typed page from reaching those loops in practice.
+- **S4-A4**: the `recover()`/`resumeNote()` fix above is defense in depth.
+  **Correction, added in the fix round below**: I originally framed this as
+  "independent of whether the three live engine paths already prevent an
+  unfinalized typed page from reaching those loops in practice" — that
+  understated it. Review Finding 1 found a real race in exactly those live
+  paths (`newTypedPage`'s own write-in-flight window) that *could* leave a
+  typed page unfinalized if the app were interrupted mid-window; the
+  `recover()`/`resumeNote()` fix is what would have kept that scenario safe
+  even before Finding 1's own fix landed. It's covering a real, reachable
+  gap, not a hypothetical one.
 
 ## Mutation-check results
 
@@ -155,3 +162,144 @@ None blocking. The one open question is S4-A1 above (typed-from-scratch, no
 pen ever involved) — if the owner wants that too, it's a small, scoped
 follow-up (teach `openNote` a typed first-page variant), not a rework of
 anything shipped here.
+
+---
+
+# Fix round 1
+
+Three findings from review. Addressed in commits `b6ddbf5` (Findings 1 and
+2) and `6d0f3df` (Finding 3).
+
+## Finding 1 (Critical) — a stroke could be silently and permanently dropped during `newTypedPage`'s own write
+
+**What changed.** `newTypedPage` cleared `activeTypedPageId` and parked the
+ink buffer synchronously, but only set `activeTypedPageId` to the new page's
+id *inside* its enqueued op, after `createTypedPage` resolved. A stroke
+completing in that window took neither of `handlePen`'s two branches
+(`noteOpen` already true, `activeTypedPageId` still null) and its ink sat in
+a buffer nothing was scheduled to claim - dropped silently and permanently.
+
+Fixed with two synchronous flags, `typedPagePending` and
+`typedToLiveRedirectPending` (declared and documented in `engine.ts` next to
+`activeTypedPageId`):
+
+- `typedPagePending` is set before `newTypedPage`'s op is enqueued and
+  cleared in that op's `finally` (both the success and the early-return/
+  failure paths). `handlePen`'s redirect condition now treats "a typed page
+  is being created" the same as "a typed page is active":
+  `!typedToLiveRedirectPending && (activeTypedPageId !== null ||
+  typedPagePending)`.
+- `startLivePageAfterTyping` now reads `activeTypedPageId` **fresh, inside
+  its own op**, not captured before it is enqueued. If `newTypedPage`'s op
+  had already run by the time this one starts (the chain is FIFO), it has
+  set `activeTypedPageId` to the page it just created, and that page gets
+  finalized by this op too - "the typed page is created and immediately
+  finalised, and a live page takes the ink," exactly as suggested.
+- `typedToLiveRedirectPending`, set synchronously the moment the redirect
+  fires and cleared in *its* op's `finally`, stops a second point of the
+  same down-stroke from queuing a second, redundant redirect before the
+  first one has run.
+
+**Test added** (`engine.test.ts`, `typed pages and pen input (K34)` describe
+block): `'does not drop a stroke that completes while newTypedPage is still
+creating its page'`. Uses a new `vi.mock('@/storage/pages', ...)` with a
+`hooks.deferredTypedPage` lever (same countdown-hook pattern already used for
+`@/storage/notes`/`@/storage/sessions` in this file) to hold `createTypedPage`
+open while a full stroke is delivered, then releases it and asserts the
+stroke lands on a new live page with its points intact.
+
+**Mutation-check** (all against the final committed code, reverted after
+each):
+
+1. Remove the pending marker (`typedPagePending = true;`):
+   ```
+   $ npx vitest run src/capture/engine.test.ts -t "does not drop a stroke"
+   FAIL ... does not drop a stroke that completes while newTypedPage is still creating its page
+   AssertionError: expected [ 'live', 'typed' ] to deeply equal [ 'live', 'typed', 'live' ]
+   Tests  1 failed | 54 skipped (55)
+   ```
+   Detected.
+2. Capture `activeTypedPageId` before `enqueue` instead of fresh inside the op:
+   ```
+   $ npx vitest run src/capture/engine.test.ts -t "does not drop a stroke"
+   FAIL ... does not drop a stroke that completes while newTypedPage is still creating its page
+   AssertionError: expected typedPage.finalizedAt ("object"/null) to be type of 'number'
+   Tests  1 failed | 54 skipped (55)
+   ```
+   Detected - this is the exact "stale, never-cleared `activeTypedPageId`" consequence reasoned through while designing the fix.
+3. Remove the `typedToLiveRedirectPending` guard:
+   ```
+   $ npx vitest run src/capture/engine.test.ts
+   Tests  3 failed | 52 passed (55)
+   ```
+   Detected (the re-trigger tests and the new test all fail).
+
+All three detected. No mutation went unnoticed for this finding.
+
+## Finding 2 (Important) — a test that could not fail
+
+**What changed.** `'does not emit pageFinalized for the typed page it leaves
+behind'` asserted only `expect(finalized).not.toContain(typedId)` against a
+`finalized` array that starts empty - true even if the whole K34 redirect
+were deleted. Renamed to `'finalizes the typed page it leaves behind,
+without emitting pageFinalized for it'` and strengthened to first assert the
+redirect actually ran (a third, live page exists and is the active one, and
+isn't the note's first page), then assert the typed page it left behind
+**is** finalized, and only then assert `finalized` stays empty.
+
+**Mutation-check:**
+```
+$ npx vitest run src/capture/engine.test.ts -t "finalizes the typed page it leaves behind"
+# with the K34 redirect's trigger condition replaced by `false`:
+FAIL ... finalizes the typed page it leaves behind, without emitting pageFinalized for it
+AssertionError: expected [ 'live', 'typed' ] to deeply equal [ 'live', 'typed', 'live' ]
+Tests  1 failed | 54 skipped (55)
+```
+Detected - confirms the strengthened test now fails under the exact
+condition ("redirect deleted") the original version could not catch.
+
+## Finding 3 (Important, scope-limited) — the double-failure data-loss case in `TypedPageEditor`
+
+**What changed.** Documented in `docs/features/s4-spec.md` §8 ("Known
+limitations") with the precise triggering condition (a failed debounced
+write *and* a failed flush-on-unmount retry of that same pending edit), why
+it's not fixed here (a retry policy or navigation guard is a larger design
+question; it mirrors a pre-existing `useScratchpad` risk), and a note that
+it's pinned by test. No production code changed.
+
+**Test added** (`TypedPageEditor.test.tsx`): `'known limitation: a failed
+debounced write followed by a failed unmount flush loses the edit without a
+trace'`. Fails both the debounced write and the subsequent unmount-flush
+retry, then asserts storage still holds the pre-edit text.
+
+**Sensitivity check** (not a mutation of production code, since this test
+intentionally pins current - not fixed - behavior; instead, confirms the
+test is actually testing the double-failure condition and not something
+vacuous): with the *second* failure removed (unmount flush succeeds), the
+same assertion's expected outcome flips:
+```
+$ npx vitest run src/notes/TypedPageEditor.test.tsx -t "known limitation"
+AssertionError: expected 'lost edit' to be 'original'
+Tests  1 failed | 4 skipped (5)
+```
+This confirms the test is sensitive to exactly the double-failure condition
+it documents, not trivially true regardless of what fails.
+
+## Framing correction
+
+My original report's S4-A4 called the `recover()`/`resumeNote()` fix
+"defense in depth... independent of whether the three live engine paths
+already prevent an unfinalized typed page from reaching those loops in
+practice." That understated it: Finding 1 found a real, reachable race in
+exactly those live paths. The `recover()`/`resumeNote()` fix is what would
+have kept a crash during that window safe even before Finding 1's engine fix
+landed - it was always covering a real gap, not a hypothetical one.
+Corrected in place in the S4-A4 bullet above.
+
+## Final verification
+
+All four gates, after this round, on the final commit:
+- `npm test` — **1162 tests across 94 files**, all passing.
+- `npx tsc -b` — clean.
+- `npm run lint` — 0 errors, same 5 pre-existing warnings in untouched files.
+- `npm run build` — succeeds.
