@@ -1681,6 +1681,13 @@ describe('NoteToolbar', () => {
     expect(container.textContent).toContain('Lecture 1');
   });
 
+  it('falls back to "No note selected" when there is no note', async () => {
+    // NotesView.test.tsx:312 asserts this exact string for the empty state;
+    // the extraction has to keep producing it.
+    await render({ noteTitle: null, hasActiveNote: false });
+    expect(container.textContent).toContain('No note selected');
+  });
+
   it('a title slot replaces the plain title', async () => {
     await render({ title: <input aria-label="Note title" defaultValue="x" /> });
     expect(container.querySelector('input[aria-label="Note title"]')).not.toBeNull();
@@ -1726,7 +1733,12 @@ Create `src/notes/NoteToolbar.tsx` holding the toolbar row from `NotesView.tsx:1
 
 ```tsx
 export interface NoteToolbarProps {
-  /** Shown when `title` is not given. */
+  /**
+   * Shown when `title` is not given, rendered as `noteTitle ?? 'No note
+   * selected'`. That exact fallback string is asserted by
+   * `NotesView.test.tsx:312`, so it is part of the contract, not a placeholder
+   * to reword.
+   */
   noteTitle: string | null;
   /** **Wave 2 mount point**: S1's inline title editor. Replaces the plain title. */
   title?: ReactNode;
@@ -1750,7 +1762,9 @@ export interface NoteToolbarProps {
 }
 ```
 
-`PageTurnControls` stays mounted inside this component — `architecture.md` §4 names the notes toolbar as its only mount point, and moving it would break that.
+`PageTurnControls` stays mounted inside this component — `architecture.md` §4 names the notes toolbar as its only mount point, and moving it would break that. `NotesView.test.tsx:192` asserts a "New page" button is present after rendering `NotesView`, which only passes while `PageTurnControls` is reachable through the toolbar.
+
+Three strings in the extracted markup are load-bearing for existing tests and must survive verbatim: the `'No note selected'` fallback (`NotesView.test.tsx:312`), the `'No notes yet'` empty state in `NoteList` (`:311`), and the `aria-label`s `'Previous page'` / `'Next page'` on the page-navigation buttons (`:244`).
 
 - [ ] **Step 8: Run to verify they pass**
 
