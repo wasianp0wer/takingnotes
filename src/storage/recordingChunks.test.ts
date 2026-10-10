@@ -42,12 +42,17 @@ describe('recording chunks', () => {
   });
 
   it('stitches in seq order regardless of write order', async () => {
-    await appendRecordingChunk('rec-1', 2, chunk('c'));
-    await appendRecordingChunk('rec-1', 0, chunk('a'));
-    await appendRecordingChunk('rec-1', 1, chunk('b'));
+    // Write chunks out of seq order, including multi-digit seq values to catch
+    // lexicographic vs numeric ordering bugs. Seq 10 is crucial: lexicographically
+    // it sorts between 1 and 2, but numerically it comes after all single digits.
+    const expected = 'abcdefghijk';
+    const seqs = [2, 0, 10, 1, 5, 3, 9, 4, 7, 6, 8];
+    for (const seq of seqs) {
+      await appendRecordingChunk('rec-1', seq, chunk(expected[seq]));
+    }
     const blob = await stitchRecordingChunks('rec-1');
     expect(blob).not.toBeNull();
-    expect(await textOf(blob!)).toBe('abc');
+    expect(await textOf(blob!)).toBe(expected);
     expect(blob!.type).toBe(TYPE);
   });
 

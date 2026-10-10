@@ -33,7 +33,13 @@ export async function appendRecordingChunk(
   await db.put('recordingChunks', record);
 }
 
-/** `seq`-ordered, which is stitch order. The index is on `recordingId` only. */
+/**
+ * `seq`-ordered, which is stitch order. The index is on `recordingId` only.
+ * The primary key is `<recordingId>:<seq>` as a string, so index results come
+ * back ordered lexicographically: past nine chunks, "rec:10" sorts before
+ * "rec:2", making the sort essential for correctness in any recording longer
+ * than nine seconds.
+ */
 export async function listRecordingChunks(
   recordingId: string,
 ): Promise<RecordingChunkRecord[]> {
