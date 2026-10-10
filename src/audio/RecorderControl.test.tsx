@@ -69,6 +69,8 @@ function createFakeCaptureEngine(state: CaptureState): CaptureEngine {
   return {
     getState: () => state,
     subscribe: () => () => {},
+    // Resume is not exercised through this double.
+    resumeNote: () => Promise.reject(new Error('resumeNote is not exercised through this double')),
   } as unknown as CaptureEngine;
 }
 

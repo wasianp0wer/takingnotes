@@ -2,7 +2,7 @@ import { createStrokeSegmenter, DEFAULT_MAX_GAP_MS } from '@/capture/segmenter';
 import type { CaptureEngine, CaptureState, NewPageReason } from '@/capture/types';
 import type { DeviceController } from '@/device/controller';
 import { createEmitter } from '@/device/emitter';
-import { createNote, listNotes, updateNote } from '@/storage/notes';
+import { createNote, getNote, listNotes, updateNote } from '@/storage/notes';
 import {
   createPage,
   finalizePage,
@@ -11,7 +11,7 @@ import {
   pageEndedAt,
   setPageStrokes,
 } from '@/storage/pages';
-import { createSession, listSessions, updateSession } from '@/storage/sessions';
+import { createSession, getSession, listSessions, updateSession } from '@/storage/sessions';
 import type { PageStroke } from '@/storage/types';
 import type { HuionPenPoint } from '@/utils/huionBLE';
 import {
@@ -533,6 +533,115 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     });
   }
 
+  /**
+   * Reopens an existing note (K10, K11). Appending only: the note's existing
+   * pages are never rewritten, and the note keeps its original `startedAt` -
+   * only `status`/`endedAt` move.
+   *
+   * It is deliberately not a call into `openNote`: that function's whole job is
+   * creating a Session, Note and page 0, and the two share only the flag
+   * discipline around `noteOpen`/`openerSeq`, which is reproduced here for the
+   * same reason - a `newPage` or `endNote` arriving while these async reads run
+   * must queue behind them rather than see no active note and drop the turn.
+   */
+  function resumeNote(noteId: string): Promise<{ sessionId: string; noteId: string }> {
+    void start();
+
+    // Already the open note. Falling through would close and reopen it,
+    // finalizing the live page and discarding the stroke in progress - a
+    // double-click on Resume must not cost the sentence being written.
+    if (noteOpen && state.activeNoteId === noteId && state.activeSessionId !== null) {
+      return Promise.resolve({ sessionId: state.activeSessionId, noteId });
+    }
+
+    if (noteOpen) void closeNote();
+    noteOpen = true;
+    const opener = ++openerSeq;
+    const b = buffer;
+
+    return enqueue(async () => {
+      let createdSessionId: string | null = null;
+      const finalized: string[] = [];
+      try {
+        const at = now();
+        const note = await getNote(noteId);
+        if (!note) throw new Error(`Note not found: ${noteId}`);
+
+        // A legacy or imported note has no session, and a note can name a
+        // session row that has since been deleted. Either way every note is
+        // resumable (K14), so a missing session is created rather than fatal.
+        let sessionId = note.sessionId ?? null;
+        if (sessionId !== null && !(await getSession(sessionId))) sessionId = null;
+        if (sessionId === null) {
+          const session = await createSession({
+            title: note.title,
+            startedAt: note.startedAt,
+          });
+          createdSessionId = session.id;
+          sessionId = session.id;
+        } else {
+          await updateSession(sessionId, { status: 'active', endedAt: null });
+        }
+
+        const pages = await listPages(noteId);
+        // A page left open by an interruption is closed before appending, so
+        // the note never holds two unfinalized pages. Finalized at the time the
+        // writing stopped, not now: see `pageEndedAt`.
+        for (const page of pages) {
+          if (isPageFinalized(page)) continue;
+          await finalizePage(page.id, pageEndedAt(page));
+          finalized.push(page.id);
+        }
+
+        // `pages` is `pageIndex`-sorted by `listPages`, but max-of-last is read
+        // from the sort rather than assumed: an empty note starts at 0.
+        const pageIndex = pages.length > 0 ? pages[pages.length - 1].pageIndex + 1 : 0;
+
+        await updateNote(noteId, {
+          status: 'active',
+          endedAt: null,
+          ...(note.sessionId === sessionId ? {} : { sessionId }),
+        });
+
+        // Whatever the pen wrote during these reads belongs to the new page.
+        const buffered = [...b.strokes];
+        const page = await createPage({
+          noteId,
+          pageIndex,
+          devicePageNum: devicePageNum(),
+          source: 'live',
+          strokes: buffered,
+          capturedAt: at,
+        });
+
+        b.pageId = page.id;
+        if (b.strokes.length === buffered.length) b.dirty = false;
+        setState({
+          activeSessionId: sessionId,
+          activeNoteId: noteId,
+          activePageId: page.id,
+          pageIndex,
+          // K13: the header clock measures this sitting. A note resumed three
+          // days later must not show a 72-hour timer.
+          sessionStartedAt: at,
+        });
+        void flushBuffer(b);
+        for (const pageId of finalized) emitPageFinalized(pageId);
+        return { sessionId, noteId };
+      } catch (error) {
+        if (openerSeq === opener) noteOpen = false;
+        if (createdSessionId !== null) {
+          try {
+            await updateSession(createdSessionId, { status: 'ended', endedAt: now() });
+          } catch (cleanupError) {
+            console.error('[capture] ending a half-created session failed', cleanupError);
+          }
+        }
+        throw error;
+      }
+    });
+  }
+
   return {
     getState() {
       return state;
@@ -545,6 +654,7 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     start,
     startNote,
     startSession,
+    resumeNote,
     newPage,
 
     endNote: endOpenNote,

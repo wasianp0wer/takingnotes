@@ -42,6 +42,13 @@ export interface CaptureEngine {
   /** Finalizes the page, completes the note, ends the session. No-op when idle. */
   endSession(): Promise<void>;
   /**
+   * Reopens an existing note and appends a new page after its last one (K10,
+   * K11). One mechanism serves both restarting an interrupted session and
+   * returning to a finished note. Ends any other open note first. Appending
+   * only: no existing page is modified and none is re-finalized.
+   */
+  resumeNote(noteId: string): Promise<{ sessionId: string; noteId: string }>;
+  /**
    * Finalizes the active page and makes a new one the active page.
    * No active note → no-op, resolves null.
    */

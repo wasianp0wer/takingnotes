@@ -730,3 +730,139 @@ describe('capture engine', () => {
     expect((await getNote(noteId))?.title).toBe((await getSession(sessionId))?.title);
   });
 });
+
+describe('resumeNote', () => {
+  it('reopens the note and its session and appends a page after the last', async () => {
+    const noteId = await engine.startNote({ title: 'Lecture 1' });
+    await engine.newPage('manual');
+    await engine.endNote();
+    await engine.flush();
+
+    const before = await getNote(noteId);
+    expect(before?.status).toBe('complete');
+
+    const ids = await engine.resumeNote(noteId);
+    await engine.flush();
+
+    expect(ids.noteId).toBe(noteId);
+    const after = await getNote(noteId);
+    expect(after?.status).toBe('active');
+    expect(after?.endedAt).toBeNull();
+    expect(after?.startedAt).toBe(before?.startedAt);
+    expect((await getSession(ids.sessionId))?.status).toBe('active');
+
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => p.pageIndex)).toEqual([0, 1, 2]);
+    expect(engine.getState().activePageId).toBe(pages[2].id);
+    expect(engine.getState().pageIndex).toBe(2);
+  });
+
+  it('never modifies or re-finalizes an existing page', async () => {
+    const noteId = await engine.startNote();
+    await engine.endNote();
+    await engine.flush();
+    const [first] = await listPages(noteId);
+
+    await engine.resumeNote(noteId);
+    await engine.flush();
+
+    const [againFirst] = await listPages(noteId);
+    expect(againFirst).toEqual(first);
+  });
+
+  it('publishes a fresh sessionStartedAt so the clock measures this sitting', async () => {
+    const clock = { t: 1_000 };
+    // Reassigning the module-level engine is this file's own pattern for a
+    // test needing custom deps (engine.test.ts:184, :200); afterEach
+    // disposes whichever engine is current.
+    engine = createCaptureEngine({ controller: fake, now: () => clock.t });
+    const noteId = await engine.startNote();
+    await engine.endNote();
+    await engine.flush();
+
+    clock.t = 90_000_000;
+    await engine.resumeNote(noteId);
+    await engine.flush();
+
+    expect(sessionStartedAtOf(engine.getState())).toBe(90_000_000);
+  });
+
+  it('creates and links a session for a note that has none', async () => {
+    const orphan = await createNote({ title: 'Imported', deviceId: 'legacy', pageBaseline: 0, status: 'complete', sessionId: null });
+
+    const ids = await engine.resumeNote(orphan.id);
+    await engine.flush();
+
+    expect(ids.sessionId).toBeTruthy();
+    expect((await getNote(orphan.id))?.sessionId).toBe(ids.sessionId);
+    expect((await getSession(ids.sessionId))?.status).toBe('active');
+  });
+
+  it('creates a session when the note names one that no longer exists', async () => {
+    const dangling = await createNote({ title: 'Dangling', deviceId: 'huion', pageBaseline: 0, status: 'complete', sessionId: 'ses-gone' });
+
+    const ids = await engine.resumeNote(dangling.id);
+    await engine.flush();
+
+    expect(ids.sessionId).not.toBe('ses-gone');
+    expect((await getSession(ids.sessionId))?.status).toBe('active');
+  });
+
+  it('opens page 0 for a note with no pages', async () => {
+    const bare = await createNote({ title: 'Bare', deviceId: 'huion', pageBaseline: 0, status: 'complete' });
+
+    await engine.resumeNote(bare.id);
+    await engine.flush();
+
+    expect(engine.getState().pageIndex).toBe(0);
+    expect((await listPages(bare.id)).map((p) => p.pageIndex)).toEqual([0]);
+  });
+
+  it('is a no-op for the note that is already open', async () => {
+    const noteId = await engine.startNote();
+    await engine.flush();
+    const openPageId = engine.getState().activePageId;
+
+    const ids = await engine.resumeNote(noteId);
+    await engine.flush();
+
+    expect(ids.noteId).toBe(noteId);
+    // No new page, and the live page is still the live page: reopening would
+    // finalize it and drop the stroke in progress.
+    expect(engine.getState().activePageId).toBe(openPageId);
+    expect(await listPages(noteId)).toHaveLength(1);
+  });
+
+  it('ends a different open note before reopening', async () => {
+    const first = await engine.startNote({ title: 'First' });
+    await engine.endNote();
+    await engine.flush();
+    const second = await engine.startNote({ title: 'Second' });
+    await engine.flush();
+
+    await engine.resumeNote(first);
+    await engine.flush();
+
+    expect((await getNote(second))?.status).toBe('complete');
+    expect((await getNote(first))?.status).toBe('active');
+  });
+
+  it('finalizes a page left open, at the time the writing stopped', async () => {
+    const note = await createNote({ title: 'Interrupted', deviceId: 'huion', pageBaseline: 0, status: 'interrupted' });
+    const open = await createPage({
+      noteId: note.id, pageIndex: 0, devicePageNum: null, source: 'live',
+      strokes: [{ points: [], endedAt: 7_000 }], capturedAt: 1_000,
+    });
+
+    await engine.resumeNote(note.id);
+    await engine.flush();
+
+    expect((await getPage(open.id))?.finalizedAt).toBe(7_000);
+  });
+
+  it('rejects an unknown note and leaves nothing open', async () => {
+    await expect(engine.resumeNote('no-such-note')).rejects.toThrow(/not found/i);
+    await engine.flush();
+    expect(engine.getState().activeNoteId).toBeNull();
+  });
+});
