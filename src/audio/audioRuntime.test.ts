@@ -6,7 +6,7 @@ import {
   startAudioRuntime,
 } from '@/audio/audioRuntime';
 import { appendRecordingChunk, listRecordingChunks } from '@/storage/recordingChunks';
-import { createRecording, getRecording } from '@/storage/recordings';
+import { createRecording, finalizeRecording, getRecording } from '@/storage/recordings';
 import { resetDatabase } from '@/test/resetDb';
 
 const chunk = (bytes: number[]) => new Blob([new Uint8Array(bytes)], { type: 'audio/webm' });
@@ -82,6 +82,59 @@ describe('recoverInterruptedRecordings (K7)', () => {
     expect(after?.endedAt).toBe(5_000);
     expect(after?.byteLength).toBe(3);
     expect(enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('⚑ C1: a row finalized by another actor between the snapshot and the delete survives, instead of being destroyed', async () => {
+    const pending = await createRecording(
+      { title: 'Lecture', durationMs: 0, startedAt: 1_000, endedAt: null },
+      new Blob([], { type: 'audio/webm' }),
+    );
+    await appendRecordingChunk(pending.id, 0, chunk([1, 2, 3]));
+
+    const enqueue = vi.fn(async () => {});
+    await recoverInterruptedRecordings({
+      enqueue,
+      now: () => 5_000,
+      // Models another actor (a second tab, or a second recovery pass)
+      // finalizing this exact row first: its finalizeRecording call writes
+      // the audio and purges the chunks atomically, so by the time THIS
+      // pass's stitch runs, there are genuinely none left - indistinguishable
+      // from "nothing was ever captured" unless the row is re-read.
+      stitch: async (id) => {
+        await finalizeRecording(id, chunk([1, 2, 3]), { endedAt: 4_000, durationMs: 3_000 });
+        return null;
+      },
+    });
+
+    const after = await getRecording(pending.id);
+    // Survives as the other actor's save, not a deletion.
+    expect(after).toBeDefined();
+    expect(after?.endedAt).toBe(4_000);
+    expect(after?.byteLength).toBe(3);
+    // This pass did not itself finalize or enqueue it - the other actor did.
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  it('⚑ C1: a recording actively owned by this process\'s recorder is never touched by recovery', async () => {
+    const pending = await createRecording(
+      { title: 'Live', durationMs: 0, startedAt: 1_000, endedAt: null },
+      new Blob([], { type: 'audio/webm' }),
+    );
+    await appendRecordingChunk(pending.id, 0, chunk([1, 2, 3]));
+
+    const enqueue = vi.fn(async () => {});
+    await recoverInterruptedRecordings({
+      enqueue,
+      now: () => 5_000,
+      activeRecordingId: () => pending.id,
+    });
+
+    const after = await getRecording(pending.id);
+    // Untouched - still live, not finalized or deleted.
+    expect(after?.endedAt).toBeNull();
+    expect(after?.byteLength).toBe(0);
+    expect(await listRecordingChunks(pending.id)).toHaveLength(1);
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });
 

@@ -11,7 +11,12 @@ import type { TranscriptionQueue } from '@/audio/transcriptionQueue';
 import { createWhisperTranscriber } from '@/audio/whisperClient';
 import { createWhisperWorker } from '@/audio/whisperWorkerFactory';
 import { stitchRecordingChunks } from '@/storage/recordingChunks';
-import { deleteRecording, finalizeRecording, listUnfinishedRecordings } from '@/storage/recordings';
+import {
+  deleteRecording,
+  finalizeRecording,
+  getRecording,
+  listUnfinishedRecordings,
+} from '@/storage/recordings';
 import { getSettingValue } from '@/storage/settingKeys';
 
 export interface AudioRuntime {
@@ -51,6 +56,22 @@ export interface RecoveryDeps {
   enqueue?: (recordingId: string) => Promise<void>;
   /** Default: `Date.now`. Injectable so recovery's derived `endedAt` is deterministic in tests. */
   now?: () => number;
+  /**
+   * ⚑ The id of the recording this process's own recorder currently owns
+   * (if any) - default: `getAudioRuntime().recorder.getActiveRecordingId()`.
+   * A recording actively being written right now must never be touched by
+   * recovery: stitching and finalizing it mid-flight would purge its
+   * in-progress chunks (`finalizeRecording` deletes them in the same
+   * transaction it writes the audio) out from under the live recorder,
+   * which would then stitch only the post-purge remainder - headerless,
+   * undecodable bytes - into what it believes is the real close. Today
+   * this can only happen within one process (recovery runs once at
+   * startup, before any recorder is live, in the normal case), but relying
+   * on that ordering alone is luck, not a guard.
+   */
+  activeRecordingId?: () => string | null;
+  /** Default: `stitchRecordingChunks`. Injectable so tests can model another actor's interleaving. */
+  stitch?: (recordingId: string) => Promise<Blob | null>;
 }
 
 /**
@@ -66,6 +87,18 @@ export interface RecoveryDeps {
  * before anything else ran) would find zero chunks and an unfinished row and
  * delete a recording this pass just finished saving.
  *
+ * ⚑ The same hazard, reinstated across two *concurrent* actors (two tabs
+ * open after a crash, or two recovery passes racing): both can snapshot the
+ * same unfinished row before either finishes. The first to finalize writes
+ * the audio and purges the chunks atomically; the second's `stitch` then
+ * sees zero chunks and - without the guard below - would read that as
+ * "nothing was ever captured" and delete the row `finalizeRecording`'s
+ * transaction just populated, destroying the lecture the first actor just
+ * saved. Before deleting on a `null` stitch result, this re-reads the row
+ * and only deletes when it is *still* unfinished and *still* empty
+ * (`endedAt === null && byteLength === 0`) - a row some other actor just
+ * finished in between fails that check and is left alone.
+ *
  * One recording's recovery failing (a storage error) is logged and does not
  * stop the rest from being recovered - audio must never block on another
  * recording's trouble (A28's spirit extended to recovery).
@@ -73,13 +106,28 @@ export interface RecoveryDeps {
 export async function recoverInterruptedRecordings(deps: RecoveryDeps = {}): Promise<void> {
   const enqueue = deps.enqueue ?? ((id: string) => getAudioRuntime().queue.enqueue(id));
   const now = deps.now ?? Date.now;
+  const activeRecordingId =
+    deps.activeRecordingId ?? (() => getAudioRuntime().recorder.getActiveRecordingId());
+  const stitch = deps.stitch ?? stitchRecordingChunks;
 
   const unfinished = await listUnfinishedRecordings();
   for (const recording of unfinished) {
+    if (recording.id === activeRecordingId()) {
+      // Live right now, in this same process - never recovery's to touch.
+      continue;
+    }
     try {
-      const stitched = await stitchRecordingChunks(recording.id);
+      const stitched = await stitch(recording.id);
       if (stitched === null) {
-        await deleteRecording(recording.id);
+        // ⚑ Re-read rather than trust the snapshot above: another actor may
+        // have finalized this exact row (writing its audio and purging its
+        // chunks atomically) between listUnfinishedRecordings() and here.
+        // Only a row that is *still* unfinished and *still* empty is
+        // genuinely abandoned.
+        const current = await getRecording(recording.id);
+        if (current && current.endedAt === null && current.byteLength === 0) {
+          await deleteRecording(recording.id);
+        }
         continue;
       }
       const endedAt = now();

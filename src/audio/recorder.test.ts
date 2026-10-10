@@ -242,9 +242,10 @@ describe('createRecorder', () => {
     expect(listener).toHaveBeenCalled();
   });
 
-  // --- K5: the pending record exists before any chunk does ---------------
+  // --- K5/C2: the pending record exists, and MediaRecorder.start() is ----
+  // --- called, only after - no window where a chunk can be dropped -------
 
-  it('K5: creates the pending record before any chunk is appended, with endedAt implicitly open', async () => {
+  it('K5: the pending record is created with the right input before the MediaRecorder starts', async () => {
     const { recorder, createPending, appendChunk } = makeHarness();
 
     await recorder.start({ sessionId: 's1', noteId: 'n1' });
@@ -258,9 +259,64 @@ describe('createRecorder', () => {
       mimeType: 'audio/webm;codecs=opus',
       title: recordingTitle(1_000),
     });
-    // The pending row is created strictly before the first chunk append -
-    // not just "at some point before stop()".
     expect(appendChunk).not.toHaveBeenCalled();
+  });
+
+  it('C2: MediaRecorder.start() is not called until createPending resolves, so no window exists where a chunk can be dropped unhandled', async () => {
+    let resolveCreatePending!: () => void;
+    const createPending = vi.fn(
+      (input: CreatePendingInput) =>
+        new Promise<RecordingRecord>((resolve) => {
+          resolveCreatePending = () =>
+            resolve({
+              id: 'r1',
+              sessionId: input.sessionId,
+              noteId: input.noteId,
+              title: input.title,
+              startedAt: input.startedAt,
+              endedAt: null,
+              durationMs: 0,
+              mimeType: input.mimeType,
+              byteLength: 0,
+              transcript: null,
+            });
+        }),
+    );
+    const { recorder, appendChunk } = makeHarness({ createPending });
+
+    const startPromise = recorder.start({ sessionId: 's1', noteId: 'n1' });
+    await flush();
+
+    const fake = FakeMediaRecorder.instances[0];
+    expect(fake).toBeDefined();
+    // The real MediaRecorder.start() has not been called yet - this is the
+    // structural proof that no chunk can possibly arrive during the
+    // createPending await, not merely "none happened to arrive in this
+    // test run".
+    expect(fake.state).not.toBe('recording');
+
+    // Emit a chunk while createPending is still pending anyway: there is no
+    // handler attached yet (ondataavailable is still null), so this proves
+    // the old window - start() first, handlers attached only once
+    // createPending resolved - is gone, not just narrowed. A real
+    // MediaRecorder could not emit here at all, since it was never started.
+    fake.emit([99]);
+    expect(appendChunk).not.toHaveBeenCalled();
+
+    resolveCreatePending();
+    await startPromise;
+
+    expect(fake.state).toBe('recording');
+    expect(createPending).toHaveBeenCalledTimes(1);
+
+    // Now that start() has actually run and handlers are attached, a real
+    // chunk is captured normally, as seq 0 - proving the fixture itself
+    // (not just the harness) is live.
+    fake.emit([1, 2, 3]);
+    await flush();
+    expect(appendChunk).toHaveBeenCalledTimes(1);
+    expect(appendChunk.mock.calls[0][0]).toBe('r1');
+    expect(appendChunk.mock.calls[0][1]).toBe(0);
   });
 
   // --- K4: chunks persist as they arrive, in order ------------------------
@@ -297,6 +353,80 @@ describe('createRecorder', () => {
 
     expect(appendChunk).toHaveBeenCalledTimes(1);
     expect(appendChunk.mock.calls[0][1]).toBe(0);
+  });
+
+  // --- I3: seq 0 (the container header) is retried; a lost chunk warns ---
+  // --- (A28: reported, never fatal), the recording keeps going -----------
+
+  it('I3: seq 0 is retried once and silently succeeds when the retry lands', async () => {
+    let calls = 0;
+    const appendChunk = vi.fn(async (_id: string, seq: number) => {
+      calls += 1;
+      if (seq === 0 && calls === 1) throw new Error('transient');
+    });
+    const { recorder } = makeHarness({ appendChunk });
+
+    await recorder.start({ sessionId: null, noteId: null });
+    FakeMediaRecorder.instances[0].emit([1, 2, 3]);
+    await flush();
+
+    expect(appendChunk).toHaveBeenCalledTimes(2);
+    expect(appendChunk.mock.calls[0][1]).toBe(0);
+    expect(appendChunk.mock.calls[1][1]).toBe(0);
+    expect(recorder.getState().warning).toBeNull();
+    expect(recorder.getState().status).toBe('recording');
+  });
+
+  it('I3: seq 0 failing twice (initial attempt plus the one retry) surfaces a non-fatal warning; recording continues', async () => {
+    const appendChunk = vi.fn(async () => {
+      throw new Error('disk full');
+    });
+    const { recorder } = makeHarness({ appendChunk });
+
+    await recorder.start({ sessionId: null, noteId: null });
+    FakeMediaRecorder.instances[0].emit([1, 2, 3]);
+    await flush();
+
+    expect(appendChunk).toHaveBeenCalledTimes(2);
+    expect(recorder.getState().warning).toMatch(/chunk 0/);
+    expect(recorder.getState().warning).toMatch(/disk full/);
+    // A28: never fatal - the recording is still live.
+    expect(recorder.getState().status).toBe('recording');
+  });
+
+  it('I3: a non-zero chunk failure is not retried, but still surfaces a warning, and the recording continues', async () => {
+    const appendChunk = vi.fn(async (_id: string, seq: number) => {
+      if (seq === 1) throw new Error('disk full');
+    });
+    const { recorder } = makeHarness({ appendChunk });
+
+    await recorder.start({ sessionId: null, noteId: null });
+    const fake = FakeMediaRecorder.instances[0];
+    fake.emit([1]); // seq 0, succeeds
+    fake.emit([2]); // seq 1, fails
+    await flush();
+
+    // No retry for a non-zero seq: exactly one call per emitted chunk.
+    expect(appendChunk).toHaveBeenCalledTimes(2);
+    expect(recorder.getState().warning).toMatch(/chunk 1/);
+    expect(recorder.getState().status).toBe('recording');
+  });
+
+  it('I3: a new recording clears a stale warning from the previous one', async () => {
+    const appendChunk = vi.fn(async () => {
+      throw new Error('disk full');
+    });
+    const { recorder } = makeHarness({ appendChunk });
+
+    await recorder.start({ sessionId: null, noteId: null });
+    FakeMediaRecorder.instances[0].emit([1]);
+    await flush();
+    expect(recorder.getState().warning).not.toBeNull();
+
+    await recorder.stop();
+    await recorder.start({ sessionId: null, noteId: null });
+
+    expect(recorder.getState().warning).toBeNull();
   });
 
   // --- K6: stop() awaits every append, stitches, then finalizes atomically
@@ -370,11 +500,12 @@ describe('createRecorder', () => {
     expect(track.stopped).toBe(true);
   });
 
-  it('a finalize failure leaves the pending row and its chunks untouched for later recovery', async () => {
+  it('a finalize failure leaves the pending row and its chunks untouched for later recovery; clearError clears it, tracks stay stopped', async () => {
+    const track = new FakeTrack();
     const finalize = vi.fn(async () => {
       throw new Error('disk full');
     });
-    const { recorder, deletePending } = makeHarness({ finalize });
+    const { recorder, deletePending } = makeHarness({ finalize }, fakeStream([track]));
 
     await recorder.start({ sessionId: null, noteId: null });
     FakeMediaRecorder.instances[0].emit([1]);
@@ -386,6 +517,33 @@ describe('createRecorder', () => {
     // all - the row and its chunks are left exactly as K7 recovery expects
     // to find them on the next launch.
     expect(deletePending).not.toHaveBeenCalled();
+    expect(track.stopped).toBe(true);
+
+    recorder.clearError();
+    expect(recorder.getState().error).toBeNull();
+  });
+
+  it('I2: a stitch rejection does not hang stop() - the waiter always resolves and the row is left for recovery', async () => {
+    const stitch = vi.fn(async () => {
+      throw new Error('indexeddb blew up');
+    });
+    const { recorder, finalize, deletePending } = makeHarness({ stitch });
+
+    await recorder.start({ sessionId: null, noteId: null });
+    FakeMediaRecorder.instances[0].emit([1]);
+
+    const result = await recorder.stop(); // must resolve, not hang forever
+
+    expect(result).toBeNull();
+    expect(recorder.getState().status).toBe('idle');
+    expect(recorder.getState().error).toBe('Could not save the recording: indexeddb blew up');
+    expect(finalize).not.toHaveBeenCalled();
+    // Left for K7 recovery, not deleted - the chunks and the row survive.
+    expect(deletePending).not.toHaveBeenCalled();
+
+    // The recorder is not bricked in 'stopping': a new recording can start.
+    await recorder.start({ sessionId: null, noteId: null });
+    expect(recorder.getState().status).toBe('recording');
   });
 
   it('a createPending failure reports a start-time error and leaves no MediaRecorder running', async () => {
@@ -516,6 +674,52 @@ describe('createRecorder', () => {
     expect(createPending).not.toHaveBeenCalled();
   });
 
+  it('I1: stop() during the createPending await is not swallowed - the mic is released and the pending row is cleaned up', async () => {
+    const track = new FakeTrack();
+    let resolveCreatePending!: () => void;
+    const createPending = vi.fn(
+      (input: CreatePendingInput) =>
+        new Promise<RecordingRecord>((resolve) => {
+          resolveCreatePending = () =>
+            resolve({
+              id: 'r1',
+              sessionId: input.sessionId,
+              noteId: input.noteId,
+              title: input.title,
+              startedAt: input.startedAt,
+              endedAt: null,
+              durationMs: 0,
+              mimeType: input.mimeType,
+              byteLength: 0,
+              transcript: null,
+            });
+        }),
+    );
+    const { recorder, deletePending } = makeHarness({ createPending }, fakeStream([track]));
+
+    const startPromise = recorder.start({ sessionId: null, noteId: null });
+    await flush();
+    expect(recorder.getState().status).toBe('starting');
+
+    const stopResult = await recorder.stop();
+    expect(stopResult).toBeNull();
+    // createPending has not resolved yet - still starting, same as the
+    // getUserMedia-pending case above.
+    expect(recorder.getState().status).toBe('starting');
+
+    resolveCreatePending();
+    await startPromise;
+
+    expect(recorder.getState().status).toBe('idle');
+    expect(recorder.getState().error).toBeNull();
+    expect(track.stopped).toBe(true);
+    expect(deletePending).toHaveBeenCalledWith('r1');
+    // The MediaRecorder was constructed (its mimeType is needed for
+    // createPending's input) but never started - the fix orders start()
+    // strictly after createPending resolves and this check.
+    expect(FakeMediaRecorder.instances[0]?.state).not.toBe('recording');
+  });
+
   it('ignores a second start while starting (getUserMedia called once)', async () => {
     let resolveGetUserMedia!: (stream: MediaStream) => void;
     const getUserMedia = vi.fn(
@@ -544,14 +748,14 @@ describe('createRecorder', () => {
     expect(recorder.getState().error).toBe('Recording is not supported in this browser');
   });
 
-  it('reports a mediaRecorder.start() failure, stopping tracks and returning to idle', async () => {
+  it('reports a mediaRecorder.start() failure, stopping tracks, deleting the now-orphaned pending row, and returning to idle', async () => {
     class ThrowingMediaRecorder extends FakeMediaRecorder {
       start(): void {
         throw new Error('boom');
       }
     }
     const track = new FakeTrack();
-    const { recorder, createPending } = makeHarness(
+    const { recorder, createPending, deletePending } = makeHarness(
       { MediaRecorder: ThrowingMediaRecorder as unknown as RecorderDeps['MediaRecorder'] },
       fakeStream([track]),
     );
@@ -561,7 +765,11 @@ describe('createRecorder', () => {
     expect(recorder.getState().status).toBe('idle');
     expect(recorder.getState().error).toBe('Could not start recording: boom');
     expect(track.stopped).toBe(true);
-    expect(createPending).not.toHaveBeenCalled();
+    // C2 moved createPending before MediaRecorder.start(), so by the time
+    // start() throws, the pending row already exists - and is immediately
+    // cleaned up rather than left as an orphan for a future launch.
+    expect(createPending).toHaveBeenCalledTimes(1);
+    expect(deletePending).toHaveBeenCalledWith('r1');
   });
 
   it('getState() returns the same object reference until something changes', async () => {

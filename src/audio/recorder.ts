@@ -39,6 +39,13 @@ export interface RecorderState {
   /** The link captured at start; null when idle. */
   link: RecorderLink | null;
   error: string | null;
+  /**
+   * A28: a lost chunk (one `appendChunk` failure) is reported, never fatal -
+   * the recording keeps going. Distinct from `error`, which accompanies a
+   * terminal state change; `warning` can appear mid-recording and is reset
+   * whenever a new recording starts or the current one ends.
+   */
+  warning: string | null;
 }
 
 export interface MediaRecorderLike {
@@ -103,6 +110,15 @@ export interface Recorder {
   /** Stops, saves and resolves with the saved record (null if nothing was saved). */
   stop(): Promise<RecordingRecord | null>;
   clearError(): void;
+  /**
+   * The id of the recording currently owned by this recorder instance (the
+   * pending row created at `start()`, cleared once `stop()`/`finish()`
+   * settles it), or `null` when idle. Lets a same-process caller - K7's
+   * startup recovery, in particular - recognise and skip a recording that
+   * is actively being written right now, rather than relying on recovery
+   * only ever running before any recorder is live.
+   */
+  getActiveRecordingId(): string | null;
 }
 
 const IDLE_STATE: RecorderState = {
@@ -111,6 +127,7 @@ const IDLE_STATE: RecorderState = {
   elapsedMs: 0,
   link: null,
   error: null,
+  warning: null,
 };
 
 function messageOf(error: unknown): string {
@@ -221,6 +238,16 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
    * `onerror` forcing a stop) - both end up here through `onstop`, so a
    * recording is closed the same way regardless of why MediaRecorder
    * stopped.
+   *
+   * I2: everything from here on runs inside a `try/finally`. `stitchFn` was
+   * previously the one unguarded await in this function (both calls after
+   * it already had their own `try`): on rejection, the tail never ran,
+   * `stopWaiters` was never settled, `await recorder.stop()` hung forever,
+   * `status` stayed `'stopping'` (disabling Stop and refusing a new
+   * `start()`) until a reload, and the bare `void finish()` call in
+   * `onstop` raised an unhandled rejection. The `finally` below guarantees
+   * `recordingId` is cleared and every waiter is resolved regardless of
+   * which step fails.
    */
   async function finish(): Promise<RecordingRecord | null> {
     stopTick();
@@ -239,52 +266,66 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
     stream = null;
 
     let result: RecordingRecord | null = null;
-    if (id === null || startedAt === null) {
-      setState({ ...IDLE_STATE, error: 'Nothing was recorded' });
-    } else {
-      const stitched = await stitchFn(id);
-      if (stitched === null) {
-        try {
-          await deletePendingFn(id);
-        } catch (error) {
-          console.error('[recorder] could not delete an empty pending recording', error);
-        }
+    try {
+      if (id === null || startedAt === null) {
         setState({ ...IDLE_STATE, error: 'Nothing was recorded' });
       } else {
+        let stitched: Blob | null = null;
+        let stitchFailed = false;
         try {
-          const record = await finalizeFn(id, stitched, {
-            endedAt,
-            durationMs: endedAt - startedAt,
-            mimeType: type,
-          });
-          setState({ ...IDLE_STATE });
-          result = record;
-          try {
-            deps.onSaved?.(record);
-          } catch (error) {
-            console.error('[recorder] onSaved threw', error);
-          }
+          stitched = await stitchFn(id);
         } catch (error) {
-          // Deliberately no cleanup here: the pending row and its chunks are
+          stitchFailed = true;
+          // Same as a finalize failure below: the row and its chunks are
           // left exactly as they are, so K7's startup recovery can still
           // find and finish this recording on the next launch.
           setState({ ...IDLE_STATE, error: `Could not save the recording: ${messageOf(error)}` });
         }
+        if (!stitchFailed) {
+          if (stitched === null) {
+            try {
+              await deletePendingFn(id);
+            } catch (error) {
+              console.error('[recorder] could not delete an empty pending recording', error);
+            }
+            setState({ ...IDLE_STATE, error: 'Nothing was recorded' });
+          } else {
+            try {
+              const record = await finalizeFn(id, stitched, {
+                endedAt,
+                durationMs: endedAt - startedAt,
+                mimeType: type,
+              });
+              setState({ ...IDLE_STATE });
+              result = record;
+              try {
+                deps.onSaved?.(record);
+              } catch (error) {
+                console.error('[recorder] onSaved threw', error);
+              }
+            } catch (error) {
+              // Deliberately no cleanup here: the pending row and its
+              // chunks are left exactly as they are, so K7's startup
+              // recovery can still find and finish this recording on the
+              // next launch.
+              setState({ ...IDLE_STATE, error: `Could not save the recording: ${messageOf(error)}` });
+            }
+          }
+        }
       }
+    } finally {
+      recordingId = null;
+      const waiters = stopWaiters;
+      stopWaiters = [];
+      for (const waiter of waiters) waiter(result);
     }
-
-    recordingId = null;
-
-    const waiters = stopWaiters;
-    stopWaiters = [];
-    for (const waiter of waiters) waiter(result);
     return result;
   }
 
   async function start(link: RecorderLink): Promise<void> {
     if (state.status !== 'idle') return;
     stopRequested = false;
-    setState({ error: null, status: 'starting' });
+    setState({ error: null, warning: null, status: 'starting' });
 
     const getUserMedia =
       deps.getUserMedia ?? navigator.mediaDevices?.getUserMedia.bind(navigator.mediaDevices);
@@ -339,23 +380,25 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
     setIntervalFn = deps.setInterval ?? ((fn, ms) => globalThis.setInterval(fn, ms));
     clearIntervalFn = deps.clearInterval ?? ((handle) => globalThis.clearInterval(handle as number));
 
-    const timesliceMs = deps.timesliceMs ?? 1000;
-    try {
-      nextRecorder.start(timesliceMs);
-    } catch (error) {
-      nextStream.getTracks().forEach((track) => track.stop());
-      setState({ status: 'idle', error: `Could not start recording: ${messageOf(error)}` });
-      return;
-    }
-
     const startedAt = nowFn();
+    // `mimeType` is populated at construction time (set by the `options`
+    // passed to `new MediaRecorderCtor(...)` above), so this is available
+    // before `start()` is ever called.
     const type = nextRecorder.mimeType || chosenType || 'audio/webm';
 
-    // K5: the RecordingRecord is created now, before any chunk is persisted
-    // - the link, title and startedAt are durable before the first byte of
-    // audio is. A failure here means recording never really started: stop
-    // the MediaRecorder and the tracks, and report it the same way any
-    // other start-time failure is reported.
+    // K5/C2: the RecordingRecord is created *before* `MediaRecorder.start()`
+    // is ever called - not merely before any chunk is appended. The
+    // previous order called `start()` first and only attached
+    // `ondataavailable`/`onstop`/`onerror` once this resolved, which meant
+    // the one real window in which the recorder could legitimately be
+    // producing data - the moment right after `start()` - had no handler
+    // listening at all. A `dataavailable` delivered then (the very first
+    // one, carrying the container's EBML header, Segment info and Tracks)
+    // would be dropped with no trace, and without it the stitched blob is
+    // undecodable no matter how many later chunks survive. Calling
+    // `start()` only after this resolves and the handlers are attached
+    // closes that window entirely, rather than merely narrowing it: the
+    // real `MediaRecorder` cannot produce data before `start()` runs.
     let pending: RecordingRecord;
     try {
       pending = await createPendingFn({
@@ -366,13 +409,28 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
         mimeType: type,
       });
     } catch (error) {
-      try {
-        nextRecorder.stop();
-      } catch {
-        /* best-effort; nothing is listening to onstop yet */
-      }
       nextStream.getTracks().forEach((track) => track.stop());
       setState({ status: 'idle', error: `Could not start recording: ${messageOf(error)}` });
+      return;
+    }
+
+    // I1: a stop() landing while the await above was pending must not be
+    // silently dropped, the same as the getUserMedia-pending check above -
+    // this is the second (and last) await point before the MediaRecorder
+    // actually starts. Without this, start() would proceed, publish
+    // 'recording', and leave the microphone running after the owner asked
+    // it to stop; stop() itself would have already resolved null, so the
+    // caller (SessionControls) would believe nothing was recording while a
+    // recording was in fact live.
+    if (stopRequested) {
+      stopRequested = false;
+      nextStream.getTracks().forEach((track) => track.stop());
+      try {
+        await deletePendingFn(pending.id);
+      } catch (error) {
+        console.error('[recorder] could not delete an unstarted pending recording', error);
+      }
+      setState({ status: 'idle', error: null });
       return;
     }
 
@@ -384,15 +442,7 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
       if (event.data.size === 0 || recordingId === null) return;
       const id = recordingId;
       const seq = nextSeq++;
-      pendingAppends.push(
-        appendChunkFn(id, seq, event.data).catch((error) => {
-          // A42: audio must never block writing, and one lost chunk must
-          // never abort the recording in progress - storage's own
-          // `stitchRecordingChunks` already tolerates a hole in the
-          // sequence.
-          console.error('[recorder] failed to persist a chunk', error);
-        }),
-      );
+      pendingAppends.push(appendChunkWithRetry(id, seq, event.data));
     };
     nextRecorder.onstop = () => {
       void finish();
@@ -400,6 +450,24 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
     nextRecorder.onerror = () => {
       if (nextRecorder.state === 'recording') nextRecorder.stop();
     };
+
+    const timesliceMs = deps.timesliceMs ?? 1000;
+    try {
+      nextRecorder.start(timesliceMs);
+    } catch (error) {
+      // The pending row already exists (created above) but no audio will
+      // ever arrive for it - clean it up now rather than leaving an orphan
+      // for a future launch's K7 recovery to find and discard.
+      recordingId = null;
+      nextStream.getTracks().forEach((track) => track.stop());
+      try {
+        await deletePendingFn(pending.id);
+      } catch (deleteError) {
+        console.error('[recorder] could not delete an unstarted pending recording', deleteError);
+      }
+      setState({ status: 'idle', error: `Could not start recording: ${messageOf(error)}` });
+      return;
+    }
 
     stream = nextStream;
     mediaRecorder = nextRecorder;
@@ -413,12 +481,39 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
     }, tickMs);
   }
 
+  /**
+   * I3: persists one chunk, with one retry for `seq 0` specifically - it
+   * carries the container's EBML header, Segment info and Tracks, so
+   * losing it makes the whole recording undecodable regardless of how many
+   * later chunks survive, unlike any other chunk (a hole elsewhere in the
+   * sequence is a gap storage's own `stitchRecordingChunks` already
+   * tolerates). A28: a failure that survives the retry is reported through
+   * `state.warning` - never fatal, the recording keeps going - so the
+   * owner can react (e.g. by ending and resuming the session) while the
+   * lecture is still happening, rather than discovering the loss only when
+   * playback or transcription fails later.
+   */
+  function appendChunkWithRetry(id: string, seq: number, blob: Blob): Promise<void> {
+    const attempt = () => appendChunkFn(id, seq, blob);
+    const reportFailure = (error: unknown) => {
+      console.error(`[recorder] failed to persist chunk ${seq}`, error);
+      setState({
+        warning: `Could not save part of the recording (chunk ${seq}): ${messageOf(error)}`,
+      });
+    };
+    if (seq === 0) {
+      return attempt().catch(() => attempt().catch(reportFailure));
+    }
+    return attempt().catch(reportFailure);
+  }
+
   async function stop(): Promise<RecordingRecord | null> {
     if (state.status === 'starting') {
-      // start() is still awaiting getUserMedia - the only await point before
-      // 'recording' is set. Record the request; start() checks it as soon as
-      // getUserMedia resolves and aborts (tracks stopped, back to idle, no
-      // MediaRecorder ever constructed) instead of silently proceeding.
+      // start() is still awaiting one of its two pre-'recording' await
+      // points (getUserMedia, or createPendingFn - I1). Record the
+      // request; start() checks it again after each one and aborts
+      // (tracks stopped, any pending row deleted, back to idle) instead of
+      // silently proceeding to publish 'recording' with the mic still live.
       stopRequested = true;
       return null;
     }
@@ -447,5 +542,8 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
     start,
     stop,
     clearError,
+    getActiveRecordingId() {
+      return recordingId;
+    },
   };
 }

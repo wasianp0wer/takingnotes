@@ -354,6 +354,23 @@ describe('battery (K26, K27)', () => {
     expect(controller.getState().batteryPercent).toBe(82);
   });
 
+  it('a CMD.BATTERY reply arriving after a disconnect is ignored, not resurrecting a cleared percentage', async () => {
+    const transport = connectedFake();
+    const controller = createDeviceController(() => new HuionNoteBLE(transport));
+
+    await controller.connect();
+    transport.emit(batteryFrame(82));
+    expect(controller.getState().batteryPercent).toBe(82);
+
+    transport.dropConnection();
+    expect(controller.getState().batteryPercent).toBeNull();
+
+    // A reply that was already in flight when the drop happened lands late -
+    // gated on isConnected, it must not resurrect a stale number.
+    transport.emit(batteryFrame(55));
+    expect(controller.getState().batteryPercent).toBeNull();
+  });
+
   it('the periodic poll issues a further CMD.BATTERY query', async () => {
     const transport = connectedFake();
     const interval = fakeIntervalPair();

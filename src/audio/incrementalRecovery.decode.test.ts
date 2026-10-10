@@ -60,10 +60,16 @@ const CLUSTER_OFFSETS = [0, 4675, 8911, 13149, 17387, 21637, 25877, 30070, 34354
 /**
  * Only the first 8 "chunks" (bytes 0-34354) ever arrive. The 9th cluster and
  * the trailing Cues element - `ffmpeg`'s finalisation, written only once the
- * whole file is known, the same role `MediaRecorder.stop()`'s own final
- * flush plays in a real recording - are withheld entirely. This is K8's
- * exact risk: a stream truncated mid-flight, with no finalised container,
- * because the process crashed before `stop()` ever ran.
+ * whole file is known - are withheld entirely, modelling the crash: nothing
+ * ever called `stop()`.
+ *
+ * ⚑ This fixture's finalisation is not a faithful stand-in for
+ * `MediaRecorder.stop()`'s: `ffmpeg` writes a known Segment size and a
+ * SeekHead pointing at these Cues, neither of which a real `MediaRecorder`
+ * ever writes (its Segment size is unknown from the first byte, streamed
+ * from the start, and it never writes Cues at all, stop() or no stop()).
+ * See the residual-risk note in `docs/architecture.md` §8.2 for what that
+ * means for this test's real-decode half.
  */
 const DELIVERED_CHUNKS = 8;
 const TRUNCATED_BYTE_LENGTH = CLUSTER_OFFSETS[DELIVERED_CHUNKS]; // 34354

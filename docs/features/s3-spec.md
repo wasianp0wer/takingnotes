@@ -226,44 +226,62 @@ non-vacuous:**
    dependency; not invoked by the application or by `npm test`'s default
    path) and committed as a binary fixture
    (`src/audio/fixtures/truncatable-tone.webm`) representing what a short
-   real recording's bytes look like.
+   real recording's bytes look like. ⚑ This fixture is **`ffmpeg`-authored,
+   not `MediaRecorder`-authored**: it has a known-size `Segment` and a
+   `SeekHead` pointing at the `Cues` element the test withholds. A live
+   `MediaRecorder` writes neither — Chrome's own streaming muxer emits an
+   *unknown*-size `Segment` from the first byte (because it doesn't know the
+   final size when it starts writing) and never writes `Cues` at all, with
+   or without a graceful `stop()`. So the fixture under test is a container
+   claiming more data than is present and advertising an index that was
+   never going to exist either way, which is a different, and arguably
+   stricter, shape than what a real crash actually leaves behind. See the
+   residual-risk note in `architecture.md` §8.2 for what this means for
+   what the test does and doesn't prove.
 2. It slices that fixture into several chunks the way `MediaRecorder`'s
    `timeslice` delivery would, and deliberately **withholds the final
-   chunk's remainder** (the bytes a graceful `stop()` would still be holding
-   when a crash happens) — modelling exactly the K8 risk ("a stream
-   truncated mid-flight has no finalised WebM container"), not byte-level
-   corruption of a chunk that did fully arrive.
+   cluster and the trailing `Cues` element** — modelling the crash itself
+   (nothing ever called `stop()`), though see the caveat above about what
+   that final element represents in a real recording versus this fixture.
 3. It drives this through the **real** `recorder.ts` (fake `MediaRecorder`/
    `getUserMedia`, real chunk persistence) and the **real** recovery path in
    `audioRuntime.ts` against `fake-indexeddb`, so the assembled, recovered
    Blob is produced by the actual K4–K7 code, not hand-built.
-4. It asserts the recovered Blob is **structurally valid enough to be a
-   plausible audio file** (non-trivial size, starts with the real EBML
-   magic bytes `0x1A45DFA3`) and then feeds it through `decodeToPcm16k`
-   with a `decode` dependency that shells out to the system's `ffmpeg` to
-   really decode the bytes to PCM — the same substitution point
-   (`PcmDeps.decode`) the architecture already designates as injectable,
-   just pointed at a real decoder instead of a canned fixture, for this one
-   test only. The assertion is that this resolves with a non-empty,
-   non-silent `Float32Array` whose duration is close to (but necessarily
-   less than) the untruncated recording's — i.e. the audio that did arrive
-   before the crash is recovered and is really decodable, which is the
-   entire point of K4–K8.
-5. **If `ffmpeg` is not on the `PATH` when this test runs, the test fails
-   loudly** (a clear "ffmpeg is required for this test" message), rather
-   than silently skipping or passing. This is the one deliberate deviation
-   from "no new dependency": it is not an `npm` dependency (nothing in
-   `package.json`/`package-lock.json` changes), but it does mean this one
-   test's pass/fail is contingent on a system tool this project has never
-   previously required. This is called out explicitly in the final report
-   as a concern for the owner to weigh — not hidden, and not worked around
-   with a weaker assertion.
+4. **Split into two layers** (fix round 1), so the suite never depends on a
+   system binary to pass:
+   - A **structural check that always runs**, with no external tool: a
+     small, dependency-free EBML/Matroska vint decoder confirms the
+     recovered bytes have a valid header, that every chunk boundary lands
+     on a real Cluster element, that each Cluster's own declared size ends
+     exactly at the next boundary (or the truncation point), and that the
+     byte length matches exactly. This alone catches a stitching
+     regression (wrong order, a dropped chunk, truncation at the wrong
+     byte) on any machine, with or without `ffmpeg`.
+   - A **real-decode check using `ffmpeg`**, conditional on it being found
+     on `PATH` (detected once, at module load). It feeds the recovered
+     bytes through the real, unmodified `decodeToPcm16k` with `ffmpeg`
+     substituted for `AudioContext.decodeAudioData` at exactly the seam the
+     function already injects it through — the same seam every other audio
+     test in this codebase fakes, since `happy-dom` provides no real
+     `AudioContext` at all. The assertion is that this resolves with a
+     non-empty, non-silent `Float32Array`.
+5. **If `ffmpeg` is not on `PATH`, the real-decode tests are skipped** via
+   `it.skipIf`, with an explicit console warning and a `[SKIPPED]` suffix on
+   the test's own title naming exactly what was not verified and how to
+   enable it — never a bare, silent skip. The structural check is
+   unaffected and still runs. **If `ffmpeg` *is* present and the decode
+   genuinely fails, the test still fails loudly** — no silent fallback, no
+   weakened assertion. This is the one place in the suite that optionally
+   depends on something outside `npm` (not a `package.json`/
+   `package-lock.json` change, but a system tool this project has never
+   otherwise required); because it is conditional rather than load-bearing,
+   `npm test` as a whole no longer depends on it to pass.
 
 This is reported as a `DONE_WITH_CONCERNS`-grade compromise, not a silent
 fallback: the test fails first (today, before K4–K7 exist, there is nothing
 in storage to recover at all, so the recovery call itself has nothing to
 act on and the test fails there), and after the fix it exercises real bytes
-through a real decoder and a real recovery path.
+through real stitching logic and, when available, a real decoder.
 
 ## Behavioural rules
 

@@ -280,3 +280,209 @@ once the test was green.
    `node_modules`) cost real time; if other Wave 2 worktrees have the same
    problem, the same fix applies (`git reset --hard phase3` when the branch
    is a strict ancestor; `npm install`).
+
+## Fix round 2 (coordinator review)
+
+Two Criticals, four Importants, plus cheap items. Addressed in full.
+
+### C1 — recovery could delete a lecture another pass just saved
+
+`src/audio/audioRuntime.ts`'s `recoverInterruptedRecordings`:
+
+- **Re-read before delete.** On `stitch(id) === null`, the function now
+  re-reads the row and only deletes when it is *still* `endedAt === null`
+  **and** `byteLength === 0`. A row some other actor (another tab, or a
+  second recovery pass) finalized in between - writing its audio and
+  purging its chunks atomically via `finalizeRecording` - fails that check
+  and is left alone.
+- **`recorder.ts` exposes its active id.** `Recorder` gains
+  `getActiveRecordingId(): string | null` (the closure's own `recordingId`,
+  already tracked for other purposes). `recoverInterruptedRecordings` takes
+  an `activeRecordingId` dep (default:
+  `getAudioRuntime().recorder.getActiveRecordingId()`) and skips any
+  unfinished row that matches it entirely - never stitching, finalizing, or
+  deleting a recording this same process's recorder is actively writing
+  right now.
+
+**Tests** (`src/audio/audioRuntime.test.ts`): one seeds an unfinished row,
+injects a `stitch` override that itself calls the real `finalizeRecording`
+(modelling another actor completing it first) and returns `null`, and
+asserts the row survives as the other actor's save rather than being
+deleted. The other seeds a live, chunked row and passes
+`activeRecordingId: () => pending.id`, asserting the row, its chunks, and
+`enqueue` are all completely untouched.
+
+**Mutation-tested** (two reverted probes against `audioRuntime.ts`):
+removing the re-read guard (bare `deleteRecording` on `null`) turned the
+first test red (`expected undefined to be defined` - the row was gone).
+Removing the `activeRecordingId` skip turned the second red
+(`expected 5000 to be null` - the live row got finalized). Both reverted.
+
+### C2 — `MediaRecorder` was started before its handler existed
+
+`src/audio/recorder.ts`'s `start()` is reordered: construct the
+`MediaRecorder` (needed for its `mimeType`) → resolve deps → `await
+createPendingFn(...)` → re-check `stopRequested` (I1) → attach
+`ondataavailable`/`onstop`/`onerror` → **then** `nextRecorder.start(timesliceMs)`.
+Previously `start()` ran first and the handlers were attached only once
+`createPendingFn` resolved, leaving the one real window in which the
+recorder could legitimately be producing data - immediately after
+`start()` - with nothing listening. Now the real `MediaRecorder` cannot
+produce data before `start()` runs, and `start()` runs only after every
+handler is already attached: the window is closed structurally, not merely
+narrowed.
+
+A `nextRecorder.start()` failure now happens with the pending row already
+existing (created above it); that row is deleted immediately rather than
+left as an orphan for a future launch's K7 recovery.
+
+**Test**: the previously-vacuous "creates the pending record before any
+chunk is appended" test (which asserted `appendChunk` was never called
+after a bare `start()` that never emitted anything - true regardless of
+ordering) is replaced by a test that holds `createPending` pending with a
+manually-resolved promise, confirms the fake `MediaRecorder`'s `state` is
+not `'recording'` yet, emits a chunk anyway (proving no handler exists to
+drop it silently - the structural proof, not an incidental one), resolves
+`createPending`, confirms `state` becomes `'recording'` only then, and
+confirms a chunk emitted after that point is captured as seq 0.
+
+**Mutation-tested**: moved `nextRecorder.start()` back to immediately after
+construction (the old order) → the new C2 test went red
+(`expected 'recording' not to be 'recording'`). Reverted.
+
+Also updated (behaviour now correctly reflects the new order): "reports a
+mediaRecorder.start() failure" now expects `createPending` to have been
+called once and `deletePending` to clean up the resulting orphan, since
+`createPending` now runs before `start()` rather than after.
+
+### I1 — a `stop()` during the `createPending` await was swallowed
+
+A second `stopRequested` check, structurally identical to the existing
+getUserMedia-pending one, runs after `createPendingFn` resolves - the only
+other await point before `MediaRecorder.start()` is ever called. On a hit:
+tracks stop, the now-pointless pending row is deleted (best-effort), state
+returns to idle with no error.
+
+**Test**: holds `createPending` pending, calls `stop()` while it's still
+pending, confirms `status` stays `'starting'`, resolves `createPending`,
+and confirms the mic is released, `deletePending` was called with the
+pending row's id, and the `MediaRecorder`'s `state` never became
+`'recording'`.
+
+**Mutation-tested**: removed the second `stopRequested` check entirely →
+the test went red (`expected 'recording' to be 'idle'` - the recording
+started anyway). Reverted.
+
+### I2 — an unguarded `stitchFn` await could hang `stop()` forever
+
+`finish()`'s body (from the `pendingAppends` await onward) now runs inside
+a `try/finally`; the `finally` always clears `recordingId` and resolves
+every `stopWaiters` entry, regardless of which step inside fails. The
+`stitchFn` call itself also gets its own inner `try/catch` (matching the
+existing pattern for `finalizeFn`/`deletePendingFn`), reporting through
+`state.error` and leaving the row for K7 recovery on rejection.
+
+**Test**: injects a `stitch` that always rejects, confirms `await
+recorder.stop()` resolves (not hangs) with `result: null`, `status: 'idle'`,
+the right error message, `finalize`/`deletePending` both uncalled (left for
+recovery), and - the brick check - that a *new* `start()` succeeds
+immediately after.
+
+**Mutation-tested**: removed the inner `try/catch` around `stitchFn`
+(keeping the outer `try/finally`, so this specifically tests whether the
+inner guard matters on its own) → the test went red on the `status`/`error`
+assertions, *and* vitest separately reported an unhandled rejection for the
+same run - both symptoms the finding named. Reverted.
+
+### I3 — a failed chunk write was invisible, untested, and `seq 0` was not interchangeable
+
+`appendChunkWithRetry()`: `seq 0` (the container header - EBML, Segment
+info, Tracks) gets one retry before being treated as lost; any seq gets a
+non-fatal `state.warning` (new `RecorderState` field, reset on every new
+`start()`) on final failure, in addition to the existing `console.error`.
+The stray `A42` citation in the old comment (no such assumption exists) is
+now `A28`, the actual one ("audio must never block writing... reported,
+never fatal").
+
+**Tests** (four): seq 0 failing once then succeeding on retry (two calls,
+no warning); seq 0 failing on both the attempt and the retry (two calls, a
+warning naming "chunk 0" and the underlying error, recording still live); a
+non-zero seq failing (exactly one call - no retry - a warning naming
+"chunk 1", recording still live); a fresh `start()` clearing a stale
+warning from the previous recording.
+
+**Mutation-tested** (two reverted probes): removing the `seq === 0` retry
+branch turned both seq-0 tests red (`expected "spy" to be called 2 times,
+but got 1`). Separately, removing the `setState({ warning: ... })` call
+from `reportFailure` (keeping the `console.error`) turned three tests red,
+including a `TypeError` on `.toMatch()` receiving `null` instead of a
+string - confirming the warning text itself, not just that *something*
+logged, is what the tests depend on. Both reverted.
+
+### I4 — the residual-risk note disclosed the substituted decoder but not the substituted container
+
+Two corrections:
+
+1. **`docs/architecture.md` §8.2's residual-risk note** now explicitly
+   names the fixture's provenance: it is `ffmpeg`-authored, not
+   `MediaRecorder`-authored - a known-size Segment and a SeekHead pointing
+   at the withheld Cues, neither of which a real `MediaRecorder` ever
+   writes (its Segment size is unknown from the first byte, and it never
+   writes Cues, stop or no stop). The manual check is widened to "capture a
+   real `MediaRecorder` crash-truncation... reopen the app, and confirm the
+   recovered recording both plays and transcribes" rather than just
+   "interrupt a real recording".
+2. **Two incorrect statements, corrected at the source:**
+   `src/audio/incrementalRecovery.decode.test.ts`'s comment describing the
+   withheld Cues as "the role `MediaRecorder.stop()`'s own final flush
+   plays in a real recording" is wrong (`MediaRecorder` never writes Cues)
+   and is rewritten to say so plainly, pointing at the architecture.md note
+   for the full reasoning. This round's own fix-round-1 report entry above
+   (now several commits old) separately claimed the result "matches
+   Matroska's design for streaming output (unknown-size segments...)" -
+   also wrong, since this fixture's Segment is *not* unknown-size; that
+   entry is left as the historical record of what I believed at the time
+   rather than silently rewritten, with this correction serving as the
+   record of what's actually true.
+
+### Cheap items
+
+- `docs/features/s3-spec.md`'s K8 section rewritten to match the fix-round-1
+  structural/conditional-decode split (it still described the old single
+  "fails loudly with no ffmpeg" design) and to carry the same provenance
+  disclosure as the architecture.md note.
+- `controller.ts`'s `device.onBattery` now gates on `device.isConnected`
+  before calling `setState`, so "never a stale number as current" is true
+  by construction. **Test**: a `CMD.BATTERY` reply emitted after
+  `transport.dropConnection()` is confirmed not to resurrect a
+  just-cleared `batteryPercent`. **Mutation-tested**: removed the gate →
+  the test went red (`expected 55 to be null`, got `55`). Reverted.
+- The deleted "clearError clears it"/`track.stopped` assertions are
+  restored into the finalize-failure test (renamed to say so) in
+  `recorder.test.ts`.
+- `docs/architecture.md` §8.2 gains a paragraph on the K28/K29 side effect:
+  `engine.devicePageNum()` stamps `storedPageCount + 1`, which does not
+  rise while streaming (true before S3 too, but S3 is what makes every
+  `0x8A` press reliably create a page rather than only the rare one that
+  happened to coincide with a ROM-count rise) - so a note written across
+  many physical page turns in one sitting now gets many pages all carrying
+  the same frozen `devicePageNum`.
+
+### Gates after this round
+
+96 files / **1190 tests** pass (was 1180). `npx tsc -b` clean. `npm run
+lint`: 0 errors, the same 5 pre-existing warnings. `npm run build`
+succeeds. Off-limits files (`src/storage/*`, `capture/engine.ts`,
+`capture/types.ts`, `SessionControls.tsx`, `package.json`,
+`package-lock.json`): reconfirmed zero diff against the `517fbe6`
+merge-base. Re-verified the `ffmpeg` skip: shadowed it off `PATH` again
+(same scratch-script technique as fix round 1) - the structural test still
+ran and passed, both real-decode tests reported skipped, the file reported
+passed overall; restored real `ffmpeg` and confirmed all 3 pass.
+
+Two cross-unit test files needed the same mechanical fix as everyone who
+touches `Recorder`/`RecorderState` will: `src/audio/RecorderControl.test.tsx`
+and `src/capture/SessionControls.test.tsx` each have a hand-written fake
+`Recorder` that now needs `warning: null` and a `getActiveRecordingId`
+stub. `SessionControls.tsx` itself (off limits, owned by S1) was not
+touched.

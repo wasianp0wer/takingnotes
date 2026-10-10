@@ -286,7 +286,14 @@ export function createDeviceController(
   // recovered by pressing again).
   device.onNextPage = () => emitPageTurn();
   device.onFrame = () => watchdog.noteFrame();
-  device.onBattery = (percent) => setState({ batteryPercent: percent });
+  // K27: gated on isConnected so "never a stale number shown as current" is
+  // true by construction, not merely by an argument about notification
+  // ordering (a disconnect that happened to race a late CMD.BATTERY reply
+  // would otherwise resurrect a battery percentage after it had already
+  // been cleared to null).
+  device.onBattery = (percent) => {
+    if (device.isConnected) setState({ batteryPercent: percent });
+  };
   device.onLog = (line) => logEmitter.emit(line);
   device.onStatus = (status) => {
     setState({
