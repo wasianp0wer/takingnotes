@@ -19,6 +19,7 @@ describe('setting keys', () => {
       'transcription.renderLongEdge': 1024,
       'whisper.model': 'Xenova/whisper-base.en',
       'triage.lookaheadDays': 7,
+      'triage.agendaDays': 7,
       'triage.scratchpad': '',
       'gaps.leadMs': 60_000,
       'gaps.trailMs': 30_000,
@@ -29,10 +30,28 @@ describe('setting keys', () => {
   it('falls back to the default when nothing is stored', async () => {
     expect(await getSettingValue('ollama.model')).toBe('gemma4:12b');
     expect(await getSettingValue('triage.lookaheadDays')).toBe(7);
+    expect(await getSettingValue('triage.agendaDays')).toBe(7);
     expect(await getSettingValue('triage.scratchpad')).toBe('');
     expect(await getSettingValue('gaps.leadMs')).toBe(60_000);
     expect(await getSettingValue('gaps.trailMs')).toBe(30_000);
     expect(await getSettingValue('syllabus.termStart')).toBeNull();
+  });
+
+  it('round-trips triage.agendaDays, including the "All" sentinel (K23)', async () => {
+    await setSettingValue('triage.agendaDays', 14);
+    expect(await getSettingValue('triage.agendaDays')).toBe(14);
+
+    // Infinity is the sentinel for the "All" preset; typeof Infinity is
+    // 'number', same as the default, so it must round-trip with no special case.
+    await setSettingValue('triage.agendaDays', Number.POSITIVE_INFINITY);
+    expect(await getSettingValue('triage.agendaDays')).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it('does not let a change to triage.agendaDays affect triage.lookaheadDays (K24)', async () => {
+    // The two keys must stay fully independent: S2 must never read or write
+    // triage.lookaheadDays.
+    await setSettingValue('triage.agendaDays', 30);
+    expect(await getSettingValue('triage.lookaheadDays')).toBe(7);
   });
 
   it('round-trips a stored value', async () => {
