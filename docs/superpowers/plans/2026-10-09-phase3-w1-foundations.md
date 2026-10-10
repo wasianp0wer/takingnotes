@@ -6,7 +6,7 @@
 
 **Architecture:** Additive schema change (`DB_VERSION` 3 → 4) with one new store, `recordingChunks`, and four new optional record fields, each with a documented absent-reading. Every new field gets its repository writer here rather than in the feature unit that consumes it, so two units cannot invent conflicting APIs for the same column. `resumeNote()` joins the capture engine's existing serial op chain. The notes view's sidebar and toolbar are extracted into two components with explicit slot props — those slots are the Wave 2 mount points.
 
-**Tech Stack:** TypeScript, React 19, `idb` for IndexedDB, Vitest + `@testing-library/react`, Tailwind.
+**Tech Stack:** TypeScript, React 19, `idb` for IndexedDB, Vitest with happy-dom (and React's own `act` + `createRoot` for component tests — no testing-library), Tailwind.
 
 **Spec:** `docs/spec-phase3.md` (decisions K1–K45). Read it alongside this plan. Also relevant: `docs/architecture.md` §3.1 (engine behavioural rules), §6.5 (the engine must not depend on the recorder), §6.7 (mount-point ownership), and `docs/assumptions.md`.
 
@@ -16,7 +16,8 @@
 - **Each `if (oldVersion < N)` block in `src/storage/db.ts` is frozen once shipped.** Add a new block; never edit an existing one. The inlined `createV1Database`/`createV2Database` helpers in `db.test.ts` are frozen with them.
 - **Every new record field is optional with a documented absent-reading**, following `sessionId` (v2) and `gapAnalysis` (v3) in `src/storage/types.ts`. Absent readings: `tags` → `[]`, `titleSource` → `'default'`, `summaryPromptVersion` → `null`, `PageRecord.text` → `undefined`.
 - **The capture engine must not depend on the recorder** (`architecture.md` §6.5). Nothing in `src/capture/` may import from `src/audio/`.
-- **No new runtime dependencies.** Phase 3 adds none.
+- **No new runtime dependencies, and no new dev dependencies.** Phase 3 adds none.
+- **Component tests use this project's own idiom, not `@testing-library/react`** — which is not a dependency and is used nowhere in `src/`. The idiom is `createRoot` from `react-dom/client` plus `act` from `react`, under happy-dom, with DOM queries against a `container` div. `src/notes/NotesView.test.tsx:14-140` is the reference, and its `buttons()` / `buttonByText()` / `click()` helpers are the house pattern.
 - **Commands:** tests `npm test`, typecheck `npx tsc -b`, lint `npm run lint`, build `npm run build`. All four must pass before each commit.
 - **Baseline to preserve:** 1083 tests across 90 files pass on `main`. The count only goes up.
 - **Every new test must be mutation-checked**: after it goes green, break the implementation and confirm the test goes red. Two tests in the Phase 2 session passed vacuously. A test that cannot fail is a plan failure, not a passing step.
@@ -206,7 +207,23 @@ And inside `describe('openNotesDb')`:
   });
 ```
 
-Also update the existing `creates the expected object stores` assertion to include `recordingChunks` in whatever shape that test asserts.
+Also update the existing `creates the expected object stores` assertion (`db.test.ts:72`), which compares a sorted array. `recordingChunks` sorts between `recordingAudio` and `recordings`, because the default sort is by code unit and `'A'` < `'C'` < `'s'`:
+
+```ts
+    expect([...db.objectStoreNames].sort()).toEqual([
+      'events',
+      'gaps',
+      'notes',
+      'pageRenders',
+      'pages',
+      'recordingAudio',
+      'recordingChunks',
+      'recordings',
+      'sessions',
+      'settings',
+      'tasks',
+    ]);
+```
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
@@ -1350,29 +1367,90 @@ git commit -m "feat(capture): resumeNote appends to an existing note and reopens
 
 - [ ] **Step 1: Write the failing `NoteList` tests**
 
-Create `src/notes/NoteList.test.tsx`:
+Create `src/notes/NoteList.test.tsx`. The harness is this project's idiom — `createRoot` + `act`, no testing-library. `NoteList` is presentational and reads no storage, so it needs neither `resetDatabase` nor a settle loop.
 
 ```tsx
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import type { ReactElement } from 'react';
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { NoteList } from '@/notes/NoteList';
 import type { NoteRecord } from '@/storage/types';
 
-function note(overrides: Partial<NoteRecord>): NoteRecord {
+declare global {
+  var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
+}
+
+let container: HTMLDivElement;
+let root: ReturnType<typeof createRoot>;
+
+beforeEach(() => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+});
+
+function note(overrides: Partial<NoteRecord> = {}): NoteRecord {
   return {
-    id: 'n1', title: 'Lecture 1', status: 'complete', deviceId: 'huion',
-    deviceType: 'huion', deviceName: null, startedAt: 1_000, endedAt: 2_000,
-    pageBaseline: 0, pageWidth: null, pageHeight: null, summary: null,
-    summaryModel: null, legacy: false, legacySourceId: null, sessionId: 's1',
+    id: 'n1',
+    title: 'Lecture 1',
+    status: 'complete',
+    deviceId: 'huion',
+    deviceType: 'huion',
+    deviceName: null,
+    startedAt: 1_000,
+    endedAt: 2_000,
+    pageBaseline: 0,
+    pageWidth: null,
+    pageHeight: null,
+    summary: null,
+    summaryModel: null,
+    legacy: false,
+    legacySourceId: null,
+    sessionId: 's1',
     ...overrides,
   };
+}
+
+async function render(ui: ReactElement): Promise<void> {
+  await act(async () => {
+    root.render(ui);
+  });
+}
+
+function buttons(): HTMLButtonElement[] {
+  return Array.from(container.querySelectorAll('button'));
+}
+
+function buttonByText(text: string): HTMLButtonElement {
+  const found = buttons().find((b) => b.textContent?.trim() === text);
+  if (!found) {
+    throw new Error(
+      `no button with text ${JSON.stringify(text)}; have ${JSON.stringify(
+        buttons().map((b) => b.textContent?.trim()),
+      )}`,
+    );
+  }
+  return found;
+}
+
+async function click(el: HTMLElement): Promise<void> {
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
 }
 
 describe('NoteList', () => {
   it('renders each note and reports selection', async () => {
     const onSelect = vi.fn();
-    render(
+    await render(
       <NoteList
         notes={[note({ id: 'a', title: 'Alpha' }), note({ id: 'b', title: 'Beta' })]}
         selectedNoteId="a"
@@ -1380,12 +1458,26 @@ describe('NoteList', () => {
         onSelect={onSelect}
       />,
     );
-    screen.getByRole('button', { name: 'Beta' }).click();
+
+    await click(buttonByText('Beta'));
     expect(onSelect).toHaveBeenCalledWith('b');
   });
 
-  it('renders the filter slot above the list', () => {
-    render(
+  it('marks the selected note for assistive tech', async () => {
+    await render(
+      <NoteList
+        notes={[note({ id: 'a', title: 'Alpha' })]}
+        selectedNoteId="a"
+        activeNoteId={null}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(buttonByText('Alpha').getAttribute('aria-current')).toBe('true');
+  });
+
+  it('renders the filter slot above the list', async () => {
+    await render(
       <NoteList
         notes={[]}
         selectedNoteId={null}
@@ -1394,11 +1486,12 @@ describe('NoteList', () => {
         filter={<div data-testid="filter-slot">filter</div>}
       />,
     );
-    expect(screen.getByTestId('filter-slot')).toBeInTheDocument();
+
+    expect(container.querySelector('[data-testid="filter-slot"]')).not.toBeNull();
   });
 
-  it('renders row actions per note', () => {
-    render(
+  it('renders row actions per note', async () => {
+    await render(
       <NoteList
         notes={[note({ id: 'a', title: 'Alpha' })]}
         selectedNoteId={null}
@@ -1407,11 +1500,12 @@ describe('NoteList', () => {
         rowActions={(n) => <button type="button">Resume {n.title}</button>}
       />,
     );
-    expect(screen.getByRole('button', { name: 'Resume Alpha' })).toBeInTheDocument();
+
+    expect(buttonByText('Resume Alpha')).toBeTruthy();
   });
 
-  it('badges the active, legacy and interrupted states', () => {
-    render(
+  it('badges the active, legacy and interrupted states', async () => {
+    await render(
       <NoteList
         notes={[
           note({ id: 'a', title: 'Active' }),
@@ -1423,16 +1517,18 @@ describe('NoteList', () => {
         onSelect={vi.fn()}
       />,
     );
-    expect(screen.getByText('Recording')).toBeInTheDocument();
-    expect(screen.getByText('Legacy')).toBeInTheDocument();
-    expect(screen.getByText('Interrupted')).toBeInTheDocument();
+
+    expect(container.textContent).toContain('Recording');
+    expect(container.textContent).toContain('Legacy');
+    expect(container.textContent).toContain('Interrupted');
   });
 
-  it('shows the empty state when there are no notes', () => {
-    render(
+  it('shows the empty state when there are no notes', async () => {
+    await render(
       <NoteList notes={[]} selectedNoteId={null} activeNoteId={null} onSelect={vi.fn()} />,
     );
-    expect(screen.getByText(/write on the pad to start one/i)).toBeInTheDocument();
+
+    expect(container.textContent).toContain('write on the pad to start one');
   });
 });
 ```
@@ -1479,15 +1575,49 @@ Expected: PASS
 
 - [ ] **Step 5: Write the failing `NoteToolbar` tests**
 
-Create `src/notes/NoteToolbar.test.tsx`:
+Create `src/notes/NoteToolbar.test.tsx`.
+
+⚑ **`NoteToolbar` mounts `PageTurnControls`**, which calls `useCaptureEngine()` and `useCaptureState()`. The tests must therefore wrap it in a `CaptureProvider` over a real engine built on a fake device controller — the same construction `NotesView.test.tsx` uses. Without the provider every test fails on a context error before asserting anything.
 
 ```tsx
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import type { ReactElement } from 'react';
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { CaptureProvider } from '@/capture/CaptureContext';
+import { createCaptureEngine } from '@/capture/engine';
+import type { LiveCaptureEngine } from '@/capture/engine';
 import { NoteToolbar } from '@/notes/NoteToolbar';
+import type { NoteToolbarProps } from '@/notes/NoteToolbar';
+import { createFakeDeviceController } from '@/test/fakeDeviceController';
+import { resetDatabase } from '@/test/resetDb';
 
-const base = {
+declare global {
+  var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
+}
+
+let container: HTMLDivElement;
+let root: ReturnType<typeof createRoot>;
+let engine: LiveCaptureEngine;
+
+beforeEach(async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  // The engine runs its startup recovery against storage on first subscribe.
+  await resetDatabase();
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  engine = createCaptureEngine({ controller: createFakeDeviceController() });
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+  engine.dispose();
+});
+
+const base: NoteToolbarProps = {
   noteTitle: 'Lecture 1',
   sessionLocked: false,
   hasActiveNote: true,
@@ -1498,45 +1628,68 @@ const base = {
   onGoToPage: vi.fn(),
 };
 
-describe('NoteToolbar', () => {
-  it('shows the note title when no title slot is given', () => {
-    render(<NoteToolbar {...base} />);
-    expect(screen.getByText('Lecture 1')).toBeInTheDocument();
-  });
-
-  it('a title slot replaces the plain title', () => {
-    render(<NoteToolbar {...base} title={<input aria-label="Note title" defaultValue="x" />} />);
-    expect(screen.getByLabelText('Note title')).toBeInTheDocument();
-    expect(screen.queryByText('Lecture 1')).not.toBeInTheDocument();
-  });
-
-  it('renders the meta, actions and banner slots', () => {
-    render(
-      <NoteToolbar
-        {...base}
-        meta={<span data-testid="meta-slot" />}
-        actions={<span data-testid="actions-slot" />}
-        banner={<span data-testid="banner-slot" />}
-      />,
+async function render(props: Partial<NoteToolbarProps> = {}): Promise<void> {
+  await act(async () => {
+    root.render(
+      <CaptureProvider engine={engine}>
+        <NoteToolbar {...base} {...props} />
+      </CaptureProvider>,
     );
-    expect(screen.getByTestId('meta-slot')).toBeInTheDocument();
-    expect(screen.getByTestId('actions-slot')).toBeInTheDocument();
-    expect(screen.getByTestId('banner-slot')).toBeInTheDocument();
+  });
+}
+
+function buttons(): HTMLButtonElement[] {
+  return Array.from(container.querySelectorAll('button'));
+}
+
+function buttonByText(text: string): HTMLButtonElement {
+  const found = buttons().find((b) => b.textContent?.trim() === text);
+  if (!found) {
+    throw new Error(
+      `no button with text ${JSON.stringify(text)}; have ${JSON.stringify(
+        buttons().map((b) => b.textContent?.trim()),
+      )}`,
+    );
+  }
+  return found;
+}
+
+describe('NoteToolbar', () => {
+  it('shows the note title when no title slot is given', async () => {
+    await render();
+    expect(container.textContent).toContain('Lecture 1');
   });
 
-  it('disables New note while a session is locked', () => {
-    render(<NoteToolbar {...base} sessionLocked />);
-    expect(screen.getByRole('button', { name: 'New note' })).toBeDisabled();
+  it('a title slot replaces the plain title', async () => {
+    await render({ title: <input aria-label="Note title" defaultValue="x" /> });
+    expect(container.querySelector('input[aria-label="Note title"]')).not.toBeNull();
+    expect(container.textContent).not.toContain('Lecture 1');
   });
 
-  it('leaves New note enabled when no session is running', () => {
-    render(<NoteToolbar {...base} sessionLocked={false} />);
-    expect(screen.getByRole('button', { name: 'New note' })).toBeEnabled();
+  it('renders the meta, actions and banner slots', async () => {
+    await render({
+      meta: <span data-testid="meta-slot" />,
+      actions: <span data-testid="actions-slot" />,
+      banner: <span data-testid="banner-slot" />,
+    });
+    expect(container.querySelector('[data-testid="meta-slot"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="actions-slot"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="banner-slot"]')).not.toBeNull();
   });
 
-  it('keeps End note enabled while locked, so ending is always reachable', () => {
-    render(<NoteToolbar {...base} sessionLocked hasActiveNote />);
-    expect(screen.getByRole('button', { name: 'End note' })).toBeEnabled();
+  it('disables New note while a session is locked', async () => {
+    await render({ sessionLocked: true });
+    expect(buttonByText('New note').disabled).toBe(true);
+  });
+
+  it('leaves New note enabled when no session is running', async () => {
+    await render({ sessionLocked: false });
+    expect(buttonByText('New note').disabled).toBe(false);
+  });
+
+  it('keeps End note enabled while locked, so ending is always reachable', async () => {
+    await render({ sessionLocked: true, hasActiveNote: true });
+    expect(buttonByText('End note').disabled).toBe(false);
   });
 });
 ```
