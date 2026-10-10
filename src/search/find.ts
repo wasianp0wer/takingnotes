@@ -1,5 +1,14 @@
 import type { SearchCorpus } from '@/search/corpus';
 
+/**
+ * Fix round 3, I4: below this, a query matches so broadly (every note
+ * whose title happens to contain a common letter) that the result is
+ * noise, not a find - and on a semester-sized library, scanning for a
+ * one-character query is exactly the "tens of thousands of segments"
+ * case the coordinator named.
+ */
+export const MIN_QUERY_LENGTH = 2;
+
 export type FindHitSource = 'note-title' | 'note-summary' | 'page-text' | 'audio-segment';
 
 export interface FindHit {
@@ -42,8 +51,13 @@ export function snippetAround(text: string, query: string, radius = 60): string 
  */
 export function findInCorpus(corpus: SearchCorpus, query: string): FindHit[] {
   const q = query.trim().toLowerCase();
-  if (q === '') return [];
+  if (q.length < MIN_QUERY_LENGTH) return [];
   const hits: FindHit[] = [];
+
+  // Fix round 3, I4: hoisted out of the per-segment loop below, which
+  // previously called `corpus.notes.find(...)` - a linear scan - once per
+  // *matching segment* rather than once per `findInCorpus` call.
+  const titleByNoteId = new Map(corpus.notes.map((n) => [n.note.id, n.note.title]));
 
   for (const { note, pages } of corpus.notes) {
     if (note.title.toLowerCase().includes(q)) {
@@ -81,8 +95,7 @@ export function findInCorpus(corpus: SearchCorpus, query: string): FindHit[] {
     for (const segment of segments) {
       if (segment.text.toLowerCase().includes(q)) {
         const noteId = corpus.recordingOwner.get(recording.id) ?? null;
-        const noteTitle =
-          noteId !== null ? corpus.notes.find((n) => n.note.id === noteId)?.note.title ?? null : null;
+        const noteTitle = noteId !== null ? titleByNoteId.get(noteId) ?? null : null;
         hits.push({
           source: 'audio-segment',
           noteId,

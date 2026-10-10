@@ -194,6 +194,58 @@ describe('findInCorpus', () => {
     expect(findInCorpus(corpus, '')).toEqual([]);
     expect(findInCorpus(corpus, '   ')).toEqual([]);
   });
+
+  // Fix round 3, I4: a one-character query against a real library matches
+  // too broadly to be useful, and on a semester-sized corpus is exactly
+  // the "tens of thousands of segments" case named in review.
+  it('returns [] for a query shorter than MIN_QUERY_LENGTH, even a non-blank one', () => {
+    const corpus: SearchCorpus = {
+      ...EMPTY,
+      notes: [makeSearchNote(makeNote({ id: 'n1', title: 'Anything' }))],
+    };
+    expect(findInCorpus(corpus, 'a')).toEqual([]);
+    expect(findInCorpus(corpus, ' a ')).toEqual([]);
+  });
+
+  it('matches once the query reaches MIN_QUERY_LENGTH', () => {
+    const corpus: SearchCorpus = {
+      ...EMPTY,
+      notes: [makeSearchNote(makeNote({ id: 'n1', title: 'An' }))],
+    };
+    expect(findInCorpus(corpus, 'an')).toHaveLength(1);
+  });
+
+  // Fix round 3, I4: attributing an audio-segment hit to its owning note's
+  // title must still pick the *right* note's title out of several, not
+  // just "some" title - the fix hoisted this lookup into a map built once
+  // rather than re-scanning `corpus.notes` per matching segment, and this
+  // pins that the hoisting didn't lose the per-recording attribution.
+  it('attributes an audio hit to the right note\'s title when the corpus has several notes', () => {
+    const corpus: SearchCorpus = {
+      notes: [
+        makeSearchNote(makeNote({ id: 'n1', title: 'Wrong Note' })),
+        makeSearchNote(makeNote({ id: 'n2', title: 'Right Note' })),
+      ],
+      recordings: [
+        makeRecording({
+          id: 'r1',
+          transcript: {
+            text: 'x',
+            segments: [{ startMs: 0, endMs: 1000, text: 'mentions gravity' }],
+            model: 'whisper',
+            language: 'en',
+            status: 'done',
+            error: null,
+            updatedAt: 1,
+          },
+        }),
+      ],
+      recordingOwner: new Map([['r1', 'n2']]),
+    };
+    const hits = findInCorpus(corpus, 'gravity');
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({ noteId: 'n2', noteTitle: 'Right Note' });
+  });
 });
 
 describe('snippetAround', () => {
