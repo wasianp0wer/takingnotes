@@ -419,6 +419,42 @@ describe('NotesView', () => {
     expect(container.textContent).not.toContain('Writing still goes to');
   });
 
+  it('editing the title in the toolbar updates what the sidebar row shows (K20)', async () => {
+    await seedNote({ title: 'Lecture 3' });
+    await render();
+
+    // Two "Lecture 3" buttons exist once K20 is wired - the sidebar's
+    // select button (inside <aside>) and the toolbar's title editor.
+    const titleButton = [...container.querySelectorAll('button')].find(
+      (b) => b.textContent?.trim() === 'Lecture 3' && !b.closest('aside'),
+    );
+    expect(titleButton).toBeDefined();
+
+    await click(titleButton!);
+    const titleInput = container.querySelector('input')!;
+    expect(titleInput).not.toBeNull();
+
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!
+        .set!;
+      setter.call(titleInput, 'The French Revolution');
+      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      titleInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await settle();
+
+    expect(container.textContent).toContain('The French Revolution');
+    expect(
+      [...container.querySelectorAll('li')].some((li) =>
+        li.textContent?.includes('The French Revolution'),
+      ),
+    ).toBe(true);
+  });
+
   it('does not show the banner for a bare, pen-started note (an active note with no locked session)', async () => {
     // Isolates the `sessionLocked` term from `activeNoteId !== null`: a pen
     // stroke with no session running makes a note active without ever

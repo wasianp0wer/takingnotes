@@ -11,6 +11,14 @@ export interface NotesData {
   notes: NoteRecord[];
   /** Pages of the selected note, by `pageIndex`; empty when nothing is selected. */
   pages: PageRecord[];
+  /**
+   * Forces an immediate reload of `notes`. For a write this hook has no other
+   * signal for - a title rename (K20) touches neither capture state nor the
+   * transcription queue, so without this the sidebar would show a stale
+   * title until something unrelated (a page turn, a transcript change)
+   * happened to re-trigger the existing effect.
+   */
+  reloadNotes: () => void;
 }
 
 /**
@@ -35,6 +43,8 @@ export function useNotesData(
   );
   /** Bumped by the queue; the reload effects list it as a dependency. */
   const [revision, setRevision] = useState(0);
+  /** Bumped by `reloadNotes()`, for writes with no other signal (K20). */
+  const [notesRevision, setNotesRevision] = useState(0);
 
   useEffect(() => queue.subscribe(() => setRevision((n) => n + 1)), [queue]);
 
@@ -50,7 +60,7 @@ export function useNotesData(
     return () => {
       live = false;
     };
-  }, [activeNoteId, activePageId, pageIndex, revision]);
+  }, [activeNoteId, activePageId, pageIndex, revision, notesRevision]);
 
   useEffect(() => {
     // No selection means nothing to load - the "no rows" case is derived
@@ -75,5 +85,6 @@ export function useNotesData(
   return {
     notes,
     pages: loadedPages && loadedPages.noteId === selectedNoteId ? loadedPages.rows : [],
+    reloadNotes: () => setNotesRevision((n) => n + 1),
   };
 }

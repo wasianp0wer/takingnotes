@@ -7,6 +7,7 @@ import type { TranscriptionQueue } from '@/transcription/queue';
 import { GapPanel } from '@/notes/GapPanel';
 import { InkCanvas } from '@/notes/InkCanvas';
 import { NoteList } from '@/notes/NoteList';
+import { NoteTitle } from '@/notes/NoteTitle';
 import { NoteToolbar } from '@/notes/NoteToolbar';
 import { ResumeButton } from '@/notes/ResumeButton';
 import { TranscriptPanel } from '@/notes/TranscriptPanel';
@@ -40,7 +41,7 @@ export function NotesView(props?: NotesViewProps) {
   // independently otherwise.
   const [pageIndex, setPageIndex] = useState(0);
 
-  const { notes, pages } = useNotesData(selectedNoteId, queue);
+  const { notes, pages, reloadNotes } = useNotesData(selectedNoteId, queue);
 
   // Resolves the default selection and follows the active note. Both are
   // done here, during render (comparing against state, not a ref - refs
@@ -127,6 +128,16 @@ export function NotesView(props?: NotesViewProps) {
       <div className="flex flex-1 flex-col">
         <NoteToolbar
           noteTitle={selectedNote?.title ?? null}
+          title={
+            selectedNote ? (
+              <NoteTitle
+                key={selectedNote.id}
+                noteId={selectedNote.id}
+                title={selectedNote.title}
+                onRenamed={reloadNotes}
+              />
+            ) : undefined
+          }
           sessionLocked={sessionLocked}
           hasActiveNote={state.activeNoteId !== null}
           onNewNote={() => void engine.startNote()}
