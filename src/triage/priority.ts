@@ -30,6 +30,24 @@ export function priorityScore(task: PriorityInput, now: number): number {
   return Math.round(100 * weight * urgency);
 }
 
+export type ScoreBand = 'red' | 'orange' | 'amber' | 'lime' | 'green';
+
+/**
+ * K22: colour bands on the *printed* score, absolute thresholds (not
+ * urgency-only). Scores run 0-200 (urgency to 2.0, weight 1.0 required / 0.5
+ * optional), so an optional task's score is capped at 100 and can reach
+ * amber/lime/green but never orange or red, however overdue - a deliberate
+ * choice: colour answers "how much does this matter right now", the weighted
+ * question, not "how urgent is this on its own".
+ */
+export function scoreBand(score: number): ScoreBand {
+  if (score >= 140) return 'red';
+  if (score >= 100) return 'orange';
+  if (score >= 60) return 'amber';
+  if (score >= 30) return 'lime';
+  return 'green';
+}
+
 export interface RankedTask {
   task: TaskRecord;
   score: number;

@@ -9,8 +9,17 @@ import { cn } from '@/lib/utils';
 import { endOfLocalDay, localDateTimeFromInputs } from '@/triage/dates';
 import { parseEstimateMinutes } from '@/triage/estimate';
 import { formatDue } from '@/triage/format';
-import { rankTasks } from '@/triage/priority';
+import { rankTasks, scoreBand, type ScoreBand } from '@/triage/priority';
 import type { TaskPatch } from '@/triage/useTriageData';
+
+/** K22: the score's band gets a text colour; the chip's background stays neutral. */
+const BAND_TEXT_CLASS: Record<ScoreBand, string> = {
+  red: 'text-red-600',
+  orange: 'text-orange-600',
+  amber: 'text-amber-600',
+  lime: 'text-lime-600',
+  green: 'text-green-600',
+};
 
 export interface TaskListProps {
   /** Open tasks only; the caller (Task 8's TriageView) filters by status. */
@@ -120,10 +129,7 @@ function TaskRow({
       <span
         data-testid="task-score"
         title="Priority score"
-        className={cn(
-          'rounded-md bg-secondary px-1.5 text-xs tabular-nums',
-          score >= 100 && 'bg-destructive/15 text-destructive',
-        )}
+        className={cn('rounded-md bg-secondary px-1.5 text-xs tabular-nums', BAND_TEXT_CLASS[scoreBand(score)])}
       >
         {score}
       </span>

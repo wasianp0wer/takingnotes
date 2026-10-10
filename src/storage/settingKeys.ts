@@ -17,6 +17,13 @@ export interface SettingValues {
   'whisper.model': string;
   /** F3: how many days ahead deadlines become tasks. */
   'triage.lookaheadDays': number;
+  /**
+   * K23: how far ahead `CalendarPanel`'s agenda looks. Distinct from and
+   * never derived from `triage.lookaheadDays` (K24) - that key drives task
+   * generation, this one drives a view's range, and the two must be free to
+   * diverge. `Number.POSITIVE_INFINITY` is the sentinel for the "All" preset.
+   */
+  'triage.agendaDays': number;
   /** F3: the scratchpad is a single setting, not a store. */
   'triage.scratchpad': string;
   /** P1: how far before a page's first stroke its speech window starts (speech precedes writing). */
@@ -38,6 +45,7 @@ export const SETTING_DEFAULTS: SettingValues = {
   'transcription.renderLongEdge': 1024,
   'whisper.model': 'Xenova/whisper-base.en',
   'triage.lookaheadDays': 7,
+  'triage.agendaDays': 7,
   'triage.scratchpad': '',
   'gaps.leadMs': 60_000,
   'gaps.trailMs': 30_000,
