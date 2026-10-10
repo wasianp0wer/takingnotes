@@ -740,7 +740,13 @@ In `src/capture/engine.ts`'s `recover()`, replace the inline stroke/capturedAt s
           }
 ```
 
-Import `pageEndedAt` alongside the other `@/storage/pages` imports. The existing recovery tests must stay green — this is a refactor with no behaviour change.
+Import `pageEndedAt` alongside the other `@/storage/pages` imports.
+
+⚑ **This is not quite behaviour-preserving, and you should know how.** The old loop took the maximum over *all* pages' stroke ends **and** all pages' `capturedAt` mixed together. `pageEndedAt` decides per page: a page's own latest stroke end, and `capturedAt` only as a fallback when that page has no stroke timestamps at all. The two differ for one shape — a page whose `capturedAt` is later than its own last stroke end — where the old code would have used `capturedAt` and the new code uses the stroke end.
+
+In practice `capturedAt` is when the page was created and its strokes arrive afterwards, so stroke ends are later and the two agree. The per-page rule is also the intended one: it is what `resumeNote` needs in Task 5, and "when did this page last receive writing" is the question both callers are really asking.
+
+So: the existing recovery tests are expected to stay green. If one goes red, **do not edit the test to match** — report it as DONE_WITH_CONCERNS with the test name and the values involved. A red test here means a real case exists that I reasoned was unreachable, and that is mine to rule on, not yours to paper over.
 
 - [ ] **Step 6: Run the engine tests**
 
@@ -1064,7 +1070,6 @@ Add to `src/capture/engine.test.ts`, following the existing harness there for bu
 ```ts
 describe('resumeNote', () => {
   it('reopens the note and its session and appends a page after the last', async () => {
-    const { engine } = makeEngine();
     const noteId = await engine.startNote({ title: 'Lecture 1' });
     await engine.newPage('manual');
     await engine.endNote();
@@ -1090,7 +1095,6 @@ describe('resumeNote', () => {
   });
 
   it('never modifies or re-finalizes an existing page', async () => {
-    const { engine } = makeEngine();
     const noteId = await engine.startNote();
     await engine.endNote();
     await engine.flush();
@@ -1105,7 +1109,10 @@ describe('resumeNote', () => {
 
   it('publishes a fresh sessionStartedAt so the clock measures this sitting', async () => {
     const clock = { t: 1_000 };
-    const { engine } = makeEngine({ now: () => clock.t });
+    // Reassigning the module-level engine is this file's own pattern for a
+    // test needing custom deps (engine.test.ts:184, :200); afterEach
+    // disposes whichever engine is current.
+    engine = createCaptureEngine({ controller: fake, now: () => clock.t });
     const noteId = await engine.startNote();
     await engine.endNote();
     await engine.flush();
@@ -1118,7 +1125,6 @@ describe('resumeNote', () => {
   });
 
   it('creates and links a session for a note that has none', async () => {
-    const { engine } = makeEngine();
     const orphan = await createNote({ title: 'Imported', deviceId: 'legacy', pageBaseline: 0, status: 'complete', sessionId: null });
 
     const ids = await engine.resumeNote(orphan.id);
@@ -1130,7 +1136,6 @@ describe('resumeNote', () => {
   });
 
   it('creates a session when the note names one that no longer exists', async () => {
-    const { engine } = makeEngine();
     const dangling = await createNote({ title: 'Dangling', deviceId: 'huion', pageBaseline: 0, status: 'complete', sessionId: 'ses-gone' });
 
     const ids = await engine.resumeNote(dangling.id);
@@ -1141,7 +1146,6 @@ describe('resumeNote', () => {
   });
 
   it('opens page 0 for a note with no pages', async () => {
-    const { engine } = makeEngine();
     const bare = await createNote({ title: 'Bare', deviceId: 'huion', pageBaseline: 0, status: 'complete' });
 
     await engine.resumeNote(bare.id);
@@ -1152,7 +1156,6 @@ describe('resumeNote', () => {
   });
 
   it('is a no-op for the note that is already open', async () => {
-    const { engine } = makeEngine();
     const noteId = await engine.startNote();
     await engine.flush();
     const openPageId = engine.getState().activePageId;
@@ -1168,7 +1171,6 @@ describe('resumeNote', () => {
   });
 
   it('ends a different open note before reopening', async () => {
-    const { engine } = makeEngine();
     const first = await engine.startNote({ title: 'First' });
     await engine.endNote();
     await engine.flush();
@@ -1183,7 +1185,6 @@ describe('resumeNote', () => {
   });
 
   it('finalizes a page left open, at the time the writing stopped', async () => {
-    const { engine } = makeEngine();
     const note = await createNote({ title: 'Interrupted', deviceId: 'huion', pageBaseline: 0, status: 'interrupted' });
     const open = await createPage({
       noteId: note.id, pageIndex: 0, devicePageNum: null, source: 'live',
@@ -1197,7 +1198,6 @@ describe('resumeNote', () => {
   });
 
   it('rejects an unknown note and leaves nothing open', async () => {
-    const { engine } = makeEngine();
     await expect(engine.resumeNote('no-such-note')).rejects.toThrow(/not found/i);
     await engine.flush();
     expect(engine.getState().activeNoteId).toBeNull();
@@ -1205,7 +1205,14 @@ describe('resumeNote', () => {
 });
 ```
 
-Adapt `makeEngine()` to whatever the existing file calls its harness, and import `createNote`, `getNote`, `getSession`, `getPage`, `createPage`, `listPages` and `sessionStartedAtOf` as that file already does for its other tests.
+These use the harness `engine.test.ts` already has: module-level `fake` and `engine`, both built in its `beforeEach`. There is no makeEngine helper in that file — do not add one.
+
+Every symbol these tests need is **already imported** at the top of that file: `createCaptureEngine`, `sessionStartedAtOf`, `createNote`, `getNote`, `createPage`, `getPage`, `listPages`, `getSession`. Add no imports.
+
+Two existing features of that file matter here:
+
+- It `vi.mock`s `@/storage/sessions` and `@/storage/notes` so a test can fail a write on demand, via the `hooks.failSessionWrites` / `hooks.failNoteWrites` countdowns. Both are reset to `0` in `beforeEach`, so `createSession` and `createNote` pass straight through for your tests. Leave the mocks alone.
+- `afterEach` disposes whichever engine is current, so a test that reassigns `engine` needs no cleanup of its own.
 
 - [ ] **Step 3: Run to verify they fail**
 
