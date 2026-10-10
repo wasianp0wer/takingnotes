@@ -119,6 +119,61 @@ export async function getRecordingAudio(id: string): Promise<Blob | null> {
   return new Blob([record.data], { type: record.type });
 }
 
+/**
+ * K6: the atomic close of a recording. Writes the stitched `audio`, patches
+ * the row (`endedAt`, `durationMs`, `byteLength` derived from the blob, and
+ * `mimeType` - defaulting to the blob's own type, same as `createRecording`)
+ * and deletes that recording's chunk rows, all inside one transaction.
+ *
+ * Doing the three writes as one is what makes K6's ordering claim true by
+ * construction ("chunks are only deleted once the stitched blob is durably
+ * written"): with these as separate transactions, a crash between the audio
+ * write and the chunk delete would leave a row with `endedAt === null`, zero
+ * chunks, and a complete stitched recording already on disk - which startup
+ * recovery (K7) would then read as an empty, abandoned row and delete, taking
+ * a finished lecture with it. One transaction makes that window impossible:
+ * either all three land, or none do.
+ */
+export async function finalizeRecording(
+  id: string,
+  audio: Blob,
+  patch: { endedAt: number; durationMs: number; mimeType?: string },
+): Promise<RecordingRecord> {
+  const data = await audio.arrayBuffer();
+  const type = patch.mimeType ?? audio.type;
+
+  const db = await openNotesDb();
+  const tx = db.transaction(['recordings', 'recordingAudio', 'recordingChunks'], 'readwrite');
+  const recordings = tx.objectStore('recordings');
+  const existing = await recordings.get(id);
+  if (!existing) {
+    tx.abort();
+    await tx.done.catch(() => undefined);
+    throw new Error(`Recording not found: ${id}`);
+  }
+
+  const merged: RecordingRecord = {
+    ...existing,
+    endedAt: patch.endedAt,
+    durationMs: patch.durationMs,
+    byteLength: data.byteLength,
+    mimeType: type,
+    id: existing.id,
+  };
+
+  await tx.objectStore('recordingAudio').put({ data, type }, id);
+  await recordings.put(merged);
+
+  // Same orphan-avoiding scan as `deleteRecording`: the index is on
+  // `recordingId` only, so the keys are read back then deleted one by one.
+  const chunkStore = tx.objectStore('recordingChunks');
+  const keys = await chunkStore.index('by-recording').getAllKeys(IDBKeyRange.only(id));
+  for (const key of keys) await chunkStore.delete(key);
+
+  await tx.done;
+  return merged;
+}
+
 /** Deletes the record, its bytes and any chunks left over, in one transaction. */
 export async function deleteRecording(id: string): Promise<void> {
   const db = await openNotesDb();

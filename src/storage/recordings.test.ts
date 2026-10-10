@@ -4,6 +4,7 @@ import { openNotesDb } from '@/storage/db';
 import {
   createRecording,
   deleteRecording,
+  finalizeRecording,
   getRecording,
   getRecordingAudio,
   listRecordings,
@@ -189,5 +190,85 @@ describe('unfinished recordings', () => {
     await appendRecordingChunk(rec.id, 0, new Blob(['a'], { type: 'audio/webm' }));
     await deleteRecording(rec.id);
     expect(await listRecordingChunks(rec.id)).toEqual([]);
+  });
+});
+
+describe('finalizeRecording', () => {
+  it('writes the audio, patches the row and removes the chunks', async () => {
+    const created = await createRecording(
+      { sessionId: 's1', noteId: 'n1', title: 'Lecture', startedAt: 1_000, durationMs: 0, endedAt: null },
+      new Blob([], { type: 'audio/webm' }),
+    );
+    await appendRecordingChunk(created.id, 0, new Blob(['a'], { type: 'audio/webm' }));
+    await appendRecordingChunk(created.id, 1, new Blob(['b'], { type: 'audio/webm' }));
+
+    const stitched = new Blob(['ab'], { type: 'audio/webm' });
+    const finalized = await finalizeRecording(created.id, stitched, {
+      endedAt: 5_000,
+      durationMs: 4_000,
+    });
+
+    expect(finalized.endedAt).toBe(5_000);
+    expect(finalized.durationMs).toBe(4_000);
+    expect(finalized.byteLength).toBe(2);
+    expect(finalized.mimeType).toBe('audio/webm');
+
+    const loaded = await getRecording(created.id);
+    expect(loaded).toEqual(finalized);
+
+    const blob = await getRecordingAudio(created.id);
+    expect(new Uint8Array(await blob!.arrayBuffer())).toEqual(new Uint8Array([97, 98]));
+
+    expect(await listRecordingChunks(created.id)).toEqual([]);
+  });
+
+  it('honors an explicit mimeType patch over the stitched blob\'s own type', async () => {
+    const created = await createRecording(
+      { title: 'Lecture', startedAt: 1_000, durationMs: 0, endedAt: null },
+      new Blob([], { type: '' }),
+    );
+
+    const finalized = await finalizeRecording(created.id, new Blob(['x'], { type: '' }), {
+      endedAt: 2_000,
+      durationMs: 1_000,
+      mimeType: 'audio/webm;codecs=opus',
+    });
+
+    expect(finalized.mimeType).toBe('audio/webm;codecs=opus');
+    expect((await getRecordingAudio(created.id))!.type).toBe('audio/webm;codecs=opus');
+  });
+
+  it('is harmless to finalize the same recording a second time', async () => {
+    const created = await createRecording(
+      { title: 'Lecture', startedAt: 1_000, durationMs: 0, endedAt: null },
+      new Blob([], { type: 'audio/webm' }),
+    );
+    await appendRecordingChunk(created.id, 0, new Blob(['a'], { type: 'audio/webm' }));
+
+    await finalizeRecording(created.id, new Blob(['a'], { type: 'audio/webm' }), {
+      endedAt: 5_000,
+      durationMs: 4_000,
+    });
+    const second = await finalizeRecording(created.id, new Blob(['ab'], { type: 'audio/webm' }), {
+      endedAt: 6_000,
+      durationMs: 5_000,
+    });
+
+    expect(second.endedAt).toBe(6_000);
+    expect(second.byteLength).toBe(2);
+    expect(await listRecordingChunks(created.id)).toEqual([]);
+  });
+
+  it('rejects a missing id and leaves storage untouched', async () => {
+    await expect(
+      finalizeRecording('missing', new Blob(['x'], { type: 'audio/webm' }), {
+        endedAt: 1_000,
+        durationMs: 500,
+      }),
+    ).rejects.toThrow(/not found/i);
+
+    const db = await openNotesDb();
+    expect(await db.count('recordings')).toBe(0);
+    expect(await db.count('recordingAudio')).toBe(0);
   });
 });
