@@ -111,6 +111,21 @@ export async function listUnfinishedRecordings(): Promise<RecordingRecord[]> {
   return all.filter((recording) => recording.endedAt === null);
 }
 
+/**
+ * The complement of `listUnfinishedRecordings`: every recording whose
+ * finalisation completed. Since K5, a `RecordingRecord` exists from the
+ * moment recording starts, with `endedAt: null` and a zero-byte
+ * `recordingAudio` row - so `listRecordings()` alone no longer means "ready to
+ * use". Anything that treats a row as finished work (transcription, playback
+ * lists, gap-analysis recording selection) must filter through this rather
+ * than inventing its own `endedAt !== null` check. Newest first, matching
+ * `listRecordings`.
+ */
+export async function listFinishedRecordings(): Promise<RecordingRecord[]> {
+  const all = await listRecordings();
+  return all.filter((recording) => recording.endedAt !== null);
+}
+
 /** Reconstructs the audio as a `Blob`; `null` when there are no bytes for that id. */
 export async function getRecordingAudio(id: string): Promise<Blob | null> {
   const db = await openNotesDb();

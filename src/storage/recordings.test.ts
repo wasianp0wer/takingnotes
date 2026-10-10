@@ -7,6 +7,7 @@ import {
   finalizeRecording,
   getRecording,
   getRecordingAudio,
+  listFinishedRecordings,
   listRecordings,
   listRecordingsBySession,
   listUnfinishedRecordings,
@@ -168,6 +169,10 @@ describe('recordings repository', () => {
 
 describe('unfinished recordings', () => {
   it('lists only those with no endedAt, newest first', async () => {
+    const earlierOpen = await createRecording(
+      { sessionId: 's1', noteId: 'n1', title: 'Earlier open', startedAt: 500, durationMs: 0, endedAt: null },
+      new Blob([], { type: 'audio/webm' }),
+    );
     const open = await createRecording(
       { sessionId: 's1', noteId: 'n1', title: 'Open', startedAt: 2_000, durationMs: 0, endedAt: null },
       new Blob([], { type: 'audio/webm' }),
@@ -179,7 +184,7 @@ describe('unfinished recordings', () => {
     await updateRecording(closed.id, { endedAt: 1_500 });
 
     const unfinished = await listUnfinishedRecordings();
-    expect(unfinished.map((r) => r.id)).toEqual([open.id]);
+    expect(unfinished.map((r) => r.id)).toEqual([open.id, earlierOpen.id]);
   });
 
   it('deleting a recording drops its chunks too', async () => {
@@ -190,6 +195,29 @@ describe('unfinished recordings', () => {
     await appendRecordingChunk(rec.id, 0, new Blob(['a'], { type: 'audio/webm' }));
     await deleteRecording(rec.id);
     expect(await listRecordingChunks(rec.id)).toEqual([]);
+  });
+});
+
+describe('listFinishedRecordings', () => {
+  it('excludes rows with no endedAt and returns the rest newest first', async () => {
+    const open = await createRecording(
+      { sessionId: 's1', noteId: 'n1', title: 'Open', startedAt: 3_000, durationMs: 0, endedAt: null },
+      new Blob([], { type: 'audio/webm' }),
+    );
+    const earlierFinished = await createRecording(
+      { sessionId: 's1', noteId: 'n1', title: 'Earlier finished', startedAt: 1_000, durationMs: 500 },
+      new Blob(['y'], { type: 'audio/webm' }),
+    );
+    await updateRecording(earlierFinished.id, { endedAt: 1_500 });
+    const laterFinished = await createRecording(
+      { sessionId: 's1', noteId: 'n1', title: 'Later finished', startedAt: 2_000, durationMs: 500 },
+      new Blob(['z'], { type: 'audio/webm' }),
+    );
+    await updateRecording(laterFinished.id, { endedAt: 2_500 });
+
+    const finished = await listFinishedRecordings();
+    expect(finished.map((r) => r.id)).toEqual([laterFinished.id, earlierFinished.id]);
+    expect(finished.some((r) => r.id === open.id)).toBe(false);
   });
 });
 
