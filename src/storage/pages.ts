@@ -8,6 +8,20 @@ import type {
   TranscriptRecord,
 } from '@/storage/types';
 
+/**
+ * A page's searchable text only, with no `strokes`, `render` or
+ * `gapAnalysis` (fix round 2, Fix 3b). `listAllPageText`'s projection type.
+ */
+export interface PageTextProjection {
+  id: string;
+  noteId: string;
+  pageIndex: number;
+  /** The typed text, present only on a `source: 'typed'` page (K32). */
+  text?: string;
+  /** The transcribed (or, for a typed page, mirrored - K33) text, if any. */
+  transcript: TranscriptRecord | null;
+}
+
 export interface CreatePageInput {
   noteId: string;
   pageIndex: number;
@@ -58,6 +72,35 @@ export async function listPages(noteId: string): Promise<PageRecord[]> {
   const db = await openNotesDb();
   const pages = await db.getAllFromIndex('pages', 'by-note', IDBKeyRange.only(noteId));
   return pages.sort((a, b) => a.pageIndex - b.pageIndex);
+}
+
+/**
+ * Every page in the database, projected down to just its searchable text
+ * (fix round 2, Fix 3b) - for a corpus-wide plain-text scan (S6), which has
+ * no note to key a `by-note` lookup on and would otherwise mean one
+ * `listPages` call per note plus every page's `strokes` loaded into memory
+ * at once: for a semester, megabytes of ink held onto to search a few
+ * kilobytes of text. `listPages` itself is unchanged and keeps returning
+ * whole records - its callers (page navigation, transcription, gap
+ * analysis) need the ink, this one doesn't.
+ *
+ * Still one scan of the whole `pages` store under the hood (`idb`/IndexedDB
+ * has no server-side column projection), so the heavy fields are loaded
+ * transiently either way; what this buys is a single bulk read instead of
+ * one indexed query per note, and a result list a search can hold for its
+ * whole run without also pinning every page's strokes in memory for that
+ * same stretch.
+ */
+export async function listAllPageText(): Promise<PageTextProjection[]> {
+  const db = await openNotesDb();
+  const pages = await db.getAll('pages');
+  return pages.map((page) => ({
+    id: page.id,
+    noteId: page.noteId,
+    pageIndex: page.pageIndex,
+    text: page.text,
+    transcript: page.transcript,
+  }));
 }
 
 /**

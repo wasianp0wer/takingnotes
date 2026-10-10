@@ -1,5 +1,6 @@
 import { openNotesDb } from '@/storage/db';
 import { newId } from '@/storage/id';
+import { getNote } from '@/storage/notes';
 import type { AudioTranscriptRecord, RecordingRecord } from '@/storage/types';
 
 export interface CreateRecordingInput {
@@ -32,6 +33,9 @@ export async function createRecording(
     sessionId: input.sessionId ?? null,
     noteId: input.noteId ?? null,
     title: input.title,
+    // Always a number, never left to the caller to omit: `listRecordings()`
+    // (and so `recordingsForNote`) reads the `by-started` index, which
+    // silently skips any row with an invalid key.
     startedAt: input.startedAt ?? Date.now(),
     endedAt: input.endedAt ?? null,
     durationMs: input.durationMs,
@@ -124,6 +128,42 @@ export async function listUnfinishedRecordings(): Promise<RecordingRecord[]> {
 export async function listFinishedRecordings(): Promise<RecordingRecord[]> {
   const all = await listRecordings();
   return all.filter((recording) => recording.endedAt !== null);
+}
+
+/**
+ * Every *finished* recording linked to a note, directly (`recording.noteId`)
+ * or through the note's session (K12/A32: a session may hold several). This
+ * is the one place that knows both link paths - lifted from `gaps/analyzer.ts`'s
+ * module-private `candidateRecordings` (fix round 2, Fix 3a) so search has a
+ * public way to attribute an audio-transcript hit back to a note without
+ * re-deriving the two-path logic a second time. Anything that needs "this
+ * note's recordings" should call this rather than inventing its own
+ * `noteId`/`sessionId` check, the same instruction `listFinishedRecordings`
+ * already carries for "finished work".
+ *
+ * Only *finished* recordings qualify (`listFinishedRecordings()`, not
+ * `listRecordings()`): since K5 a `RecordingRecord` exists from the moment
+ * recording starts, so a still-recording row would otherwise be read as
+ * ready to use. Results are de-duplicated by id (a recording can match both
+ * link paths at once) with no further ordering guarantee.
+ *
+ * This completeness depends on every recording carrying a numeric
+ * `startedAt` - `listRecordings()` reads the `by-started` index, which skips
+ * a row with an invalid key. `createRecording` always assigns one (see its
+ * own comment), so that holds today; a future write path that bypasses
+ * `createRecording` would silently break it.
+ */
+export async function recordingsForNote(noteId: string): Promise<RecordingRecord[]> {
+  const note = await getNote(noteId);
+  const finished = await listFinishedRecordings();
+  const candidates = new Map<string, RecordingRecord>();
+  for (const recording of finished) {
+    const linkedDirectly = recording.noteId === noteId;
+    const linkedViaSession =
+      typeof note?.sessionId === 'string' && recording.sessionId === note.sessionId;
+    if (linkedDirectly || linkedViaSession) candidates.set(recording.id, recording);
+  }
+  return [...candidates.values()];
 }
 
 /** Reconstructs the audio as a `Blob`; `null` when there are no bytes for that id. */

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { openNotesDb } from '@/storage/db';
+import { createNote } from '@/storage/notes';
 import {
   createRecording,
   deleteRecording,
@@ -11,6 +12,7 @@ import {
   listRecordings,
   listRecordingsBySession,
   listUnfinishedRecordings,
+  recordingsForNote,
   setRecordingTranscript,
   updateRecording,
 } from '@/storage/recordings';
@@ -298,5 +300,74 @@ describe('finalizeRecording', () => {
     const db = await openNotesDb();
     expect(await db.count('recordings')).toBe(0);
     expect(await db.count('recordingAudio')).toBe(0);
+  });
+});
+
+describe('recordingsForNote (fix round 2, Fix 3a)', () => {
+  it('includes a recording linked directly by noteId', async () => {
+    const note = await createNote({ title: 'Note', deviceId: 'huion', pageBaseline: 0 });
+    const linked = await createRecording(
+      { title: 'Direct', noteId: note.id, startedAt: 1_000, durationMs: 1_000, endedAt: 2_000 },
+      audio(),
+    );
+    await createRecording(
+      { title: 'Unrelated', startedAt: 1_000, durationMs: 1_000, endedAt: 2_000 },
+      audio(),
+    );
+
+    expect((await recordingsForNote(note.id)).map((r) => r.id)).toEqual([linked.id]);
+  });
+
+  it('includes a recording linked only through the note\'s session (K12/A32)', async () => {
+    const note = await createNote({
+      title: 'Note',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      sessionId: 'sess-1',
+    });
+    const linked = await createRecording(
+      { title: 'Via session', sessionId: 'sess-1', startedAt: 1_000, durationMs: 1_000, endedAt: 2_000 },
+      audio(),
+    );
+
+    expect((await recordingsForNote(note.id)).map((r) => r.id)).toEqual([linked.id]);
+  });
+
+  it('de-duplicates a recording that matches both link paths at once', async () => {
+    const note = await createNote({
+      title: 'Note',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      sessionId: 'sess-1',
+    });
+    const linked = await createRecording(
+      {
+        title: 'Both',
+        noteId: note.id,
+        sessionId: 'sess-1',
+        startedAt: 1_000,
+        durationMs: 1_000,
+        endedAt: 2_000,
+      },
+      audio(),
+    );
+
+    expect((await recordingsForNote(note.id)).map((r) => r.id)).toEqual([linked.id]);
+  });
+
+  it('excludes a linked recording that has not finished yet', async () => {
+    const note = await createNote({ title: 'Note', deviceId: 'huion', pageBaseline: 0 });
+    await createRecording(
+      { title: 'Still recording', noteId: note.id, startedAt: 1_000, durationMs: 0, endedAt: null },
+      new Blob([], { type: 'audio/webm' }),
+    );
+
+    expect(await recordingsForNote(note.id)).toEqual([]);
+  });
+
+  it('returns nothing for a note with no linked recording at all', async () => {
+    const note = await createNote({ title: 'Lonely', deviceId: 'huion', pageBaseline: 0 });
+
+    expect(await recordingsForNote(note.id)).toEqual([]);
   });
 });

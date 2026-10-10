@@ -10,7 +10,7 @@ keeps product decisions in `docs/spec*.md` and per-feature specs in
 `docs/features/*-spec.md`, and a future session will look there, so the project
 convention wins.
 
-Decisions are numbered **K1–K45** (Phase 2 used J). New assumptions continue
+Decisions are numbered **K1–K46** (Phase 2 used J). New assumptions continue
 the shared list at **A31**.
 
 ## Why Phase 3 exists
@@ -338,6 +338,19 @@ first contact, and the prompt is versioned (K18) so that tuning is traceable.
 **K44** A note with no summary (transcription failed, K19) is reachable by Find
 but invisible to smart search's screening stage. It is not silently dropped: the
 results state how many notes could not be screened.
+
+**K46** ⚑ (fix round 2, Fix 3c) `summary` is `null` for three populations, not
+just K44's: legacy notes (excluded from naming by design), a note whose page
+transcription failed (K19 - deliberate, no summary from partial content), and -
+until the fix for Important 1 landed - a note that ended on a typed page before
+that fix shipped. Smart search's screening stage (K42 stage 1) reads summaries,
+so a summary-less note needs a stated fallback or the owner can search for a
+real lecture and have the app behave as if it does not exist. The fallback:
+smart search screens a summary-less note on its title plus its page text
+instead of its summary, and the result still states how many notes could not
+be screened by summary (K44's reporting, extended to cover the fallback path
+too, not narrowed by it). This is a decision, not an implementation - S6 builds
+it.
 
 ---
 

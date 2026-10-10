@@ -10,6 +10,7 @@ import {
   getPage,
   getPageRender,
   isTypedPage,
+  listAllPageText,
   listPages,
   pageEndedAt,
   setPageRender,
@@ -501,5 +502,45 @@ describe('setPageGapAnalysis', () => {
 
   it('rejects a missing page', async () => {
     await expect(setPageGapAnalysis('nope', meta())).rejects.toThrow('Page not found: nope');
+  });
+});
+
+describe('listAllPageText (fix round 2, Fix 3b)', () => {
+  it('returns no-strokes projections across every note, not scoped to one', async () => {
+    const noteA = await createNote({ title: 'A', deviceId: 'huion:abc', pageBaseline: 0 });
+    const pageA = await createPage({
+      noteId: noteA.id,
+      pageIndex: 0,
+      devicePageNum: null,
+      source: 'live',
+      strokes: [{ points: [{ x: 0.1, y: 0.1, pressure: 0.5 }] }],
+    });
+    await setPageTranscript(pageA.id, {
+      markdown: 'Notes about Newton.',
+      model: 'm',
+      promptVersion: 'v1',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
+
+    const noteB = await createNote({ title: 'B', deviceId: 'huion:abc', pageBaseline: 0 });
+    const typed = await createTypedPage({ noteId: noteB.id, pageIndex: 0, text: 'Typed page text.' });
+
+    const projections = await listAllPageText();
+    expect(projections).toHaveLength(2);
+
+    const projA = projections.find((p) => p.id === pageA.id);
+    expect(projA).toMatchObject({ noteId: noteA.id, pageIndex: 0 });
+    expect(projA?.transcript?.markdown).toBe('Notes about Newton.');
+    expect(projA).not.toHaveProperty('strokes');
+
+    const projB = projections.find((p) => p.id === typed.id);
+    expect(projB).toMatchObject({ noteId: noteB.id, text: 'Typed page text.' });
+    expect(projB?.transcript?.markdown).toBe('Typed page text.');
+  });
+
+  it('returns an empty array when there are no pages', async () => {
+    expect(await listAllPageText()).toEqual([]);
   });
 });

@@ -13,9 +13,8 @@ import { overlapMs, segmentsInWindow, speechTextOf, speechWindowForPage } from '
 import type { SpeechWindow } from '@/gaps/window';
 import type { TextGenerator } from '@/llm/ollamaText';
 import { createGaps, deleteGapsByPage, listGapsByPage } from '@/storage/gaps';
-import { getNote } from '@/storage/notes';
 import { getPage, listPages, setPageGapAnalysis } from '@/storage/pages';
-import { listFinishedRecordings } from '@/storage/recordings';
+import { recordingsForNote } from '@/storage/recordings';
 import type {
   GapAnalysisMeta,
   GapAnalysisStatus,
@@ -65,26 +64,14 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 /**
- * Every finished recording linked to a note, directly (`recording.noteId`)
- * or through the note's session (K12: a session may hold several - A32).
- * Only *finished* recordings are candidates (`listFinishedRecordings()`, not
- * `listRecordings()` - architecture.md §8.2): since K5 a `RecordingRecord`
- * exists from the moment recording starts, so a still-recording row would
- * otherwise be read as ready to compare against. `recordings` has no
- * `by-note` index, so the direct link is found by filtering the metadata
- * listing - which is cheap, the audio bytes living in their own store.
+ * Every finished recording linked to a note, directly or through the note's
+ * session (K12/A32). This used to be its own module-private scan; it now
+ * just forwards to `recordingsForNote` (`src/storage/recordings.ts`, fix
+ * round 2, Fix 3a), the one place that knows both link paths, so search can
+ * share the exact same definition rather than growing a second one.
  */
 async function candidateRecordings(noteId: string): Promise<RecordingRecord[]> {
-  const note = await getNote(noteId);
-  const finished = await listFinishedRecordings();
-  const candidates = new Map<string, RecordingRecord>();
-  for (const recording of finished) {
-    const linkedDirectly = recording.noteId === noteId;
-    const linkedViaSession =
-      typeof note?.sessionId === 'string' && recording.sessionId === note.sessionId;
-    if (linkedDirectly || linkedViaSession) candidates.set(recording.id, recording);
-  }
-  return [...candidates.values()];
+  return recordingsForNote(noteId);
 }
 
 /**

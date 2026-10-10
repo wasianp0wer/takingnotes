@@ -1114,3 +1114,29 @@ renders an empty list, which would otherwise read to the user as "you have no
 notes" rather than "no notes match this filter" - that distinction belongs in
 the `filter` slot S5 already owns (e.g. "3 notes hidden by this filter"), not
 in a rewrite of `NoteList`'s own empty-state copy.
+
+### 8.5 Two data-access helpers for S6 (fix round 2, Fix 3)
+
+Settled ahead of S6 so it does not have to re-derive either on day one:
+
+- **`recordingsForNote(noteId): Promise<RecordingRecord[]>`**
+  (`src/storage/recordings.ts`) - every *finished* recording linked to a note,
+  directly (`recording.noteId`) or through the note's session (K12/A32),
+  de-duplicated by id. This is the one place that knows both link paths;
+  `gaps/analyzer.ts`'s `candidateRecordings` now just forwards to it. S6 uses
+  this, not its own `noteId`/`sessionId` check, to attribute an audio-transcript
+  hit back to a note.
+- **`listAllPageText(): Promise<PageTextProjection[]>`**
+  (`src/storage/pages.ts`) - every page in the database projected down to
+  `{ id, noteId, pageIndex, text, transcript }`, with no `strokes`, `render` or
+  `gapAnalysis`. `listPages` is unchanged and still returns whole records for
+  its existing callers (page navigation, transcription, gap analysis); a
+  corpus-wide plain-text scan has no note to key a `by-note` lookup on and
+  needs none of the ink, so S6's Find mode should read pages through this,
+  not `listPages` per note.
+
+K46 (`docs/spec-phase3.md`) records the product decision for the third case
+this fix round surfaced: a summary-less note (legacy, failed transcription, or
+- before fix round 2's Important 1 - a note that ended on a typed page) is
+screened by smart search on its title plus page text instead of being
+invisible to it.
