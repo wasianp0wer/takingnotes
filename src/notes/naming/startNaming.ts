@@ -17,7 +17,7 @@ let queue: NamingQueue | null = null;
  * call. Never stopped, for the same reason the transcription queue never is.
  */
 export function ensureNamingQueue(
-  engine: Pick<CaptureEngine, 'subscribePageFinalized'>,
+  engine: Pick<CaptureEngine, 'subscribePageFinalized' | 'subscribeNoteEnded'>,
   transcriptionQueue: Pick<TranscriptionQueue, 'subscribe'>,
 ): NamingQueue {
   if (queue) return queue;

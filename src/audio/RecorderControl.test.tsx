@@ -98,6 +98,9 @@ function createFakeCaptureEngine(state: CaptureState): CaptureEngine {
     subscribePageFinalized: () => {
       throw new Error('subscribePageFinalized is not exercised through this double');
     },
+    subscribeNoteEnded: () => {
+      throw new Error('subscribeNoteEnded is not exercised through this double');
+    },
     dispose: () => {
       throw new Error('dispose is not exercised through this double');
     },

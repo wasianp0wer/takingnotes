@@ -70,6 +70,17 @@ export interface CaptureEngine {
   subscribeInk(fn: () => void): () => void;
   /** Fires once per page after it is finalized and persisted. F1's transcription queue listens here. */
   subscribePageFinalized(fn: (pageId: string) => void): () => void;
+  /**
+   * Fires once per note, after `closeNote` has marked it `complete` (and its
+   * session `ended`), with the note's id. This is "the note ended" as its
+   * own honest signal - fix round 2, Important 1 - rather than something
+   * inferred from page events: `closeNote` on a note whose active page is
+   * typed finalizes that page without ever emitting `pageFinalized` (typed
+   * pages intentionally never do, see `finalizeTypedPage`), which otherwise
+   * left auto-naming with nothing to subscribe to for a note that ends on a
+   * typed page. A subscriber that reads the note here sees its final state.
+   */
+  subscribeNoteEnded(fn: (noteId: string) => void): () => void;
 
   dispose(): void;
 }

@@ -971,6 +971,69 @@ describe('capture engine', () => {
   });
 });
 
+describe('subscribeNoteEnded (fix round 2, Important 1)', () => {
+  it('fires after endNote marks the note complete, with the finalized note id', async () => {
+    const noteId = await engine.startNote();
+    const ended: string[] = [];
+    engine.subscribeNoteEnded((id) => ended.push(id));
+
+    await engine.endNote();
+
+    expect(ended).toEqual([noteId]);
+    // "After the note is marked complete" (engine.ts's own doc comment on
+    // `subscribeNoteEnded`) is checkable: by the time the subscriber ran,
+    // the write was already on disk.
+    expect((await getNote(noteId))!.status).toBe('complete');
+  });
+
+  it('fires for a note that ends on a typed active page, which pageFinalized never does', async () => {
+    // The sharpest finding (fix round 2, Important 1): a live page's close
+    // emits `pageFinalized`, but `finalizeTypedPage` deliberately never
+    // does (it would make the transcription queue's `markPending` overwrite
+    // the typed page's already-`done` transcript). Before this fix, ending
+    // a note on a typed page emitted nothing at all.
+    const noteId = await engine.startNote();
+    stroke(fake, [[0.1, 0.1]]);
+    await engine.flush();
+    // newTypedPage finalizes the live page above - that pageFinalized has
+    // already fired by the time the subscriptions below are set up, so
+    // `finalized` staying empty is a real assertion about the *typed* page
+    // endNote is about to close, not a vacuous one.
+    await engine.newTypedPage();
+    const finalized: string[] = [];
+    const ended: string[] = [];
+    engine.subscribePageFinalized((id) => finalized.push(id));
+    engine.subscribeNoteEnded((id) => ended.push(id));
+
+    await engine.endNote();
+
+    expect(finalized).toEqual([]);
+    expect(ended).toEqual([noteId]);
+    expect((await getNote(noteId))!.status).toBe('complete');
+  });
+
+  it('fires for a typed-only note - the pad never worked this sitting', async () => {
+    const noteId = await engine.startNote();
+    await engine.newTypedPage();
+    const ended: string[] = [];
+    engine.subscribeNoteEnded((id) => ended.push(id));
+
+    await engine.endNote();
+
+    expect(ended).toEqual([noteId]);
+  });
+
+  it('does not fire when endNote is a no-op (idle)', async () => {
+    await engine.start();
+    const ended: string[] = [];
+    engine.subscribeNoteEnded((id) => ended.push(id));
+
+    await engine.endNote();
+
+    expect(ended).toEqual([]);
+  });
+});
+
 describe('resumeNote', () => {
   it('reopens the note and its session and appends a page after the last', async () => {
     const noteId = await engine.startNote({ title: 'Lecture 1' });

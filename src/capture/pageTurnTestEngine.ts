@@ -91,6 +91,8 @@ export function createStubCaptureEngine(initial: Partial<CaptureState> = {}): St
     getLiveStrokes: () => NO_STROKES,
     subscribeInk: (fn) => inkEmitter.subscribe(fn),
     subscribePageFinalized: (fn) => finalizedEmitter.subscribe(fn),
+    // Not exercised through this double.
+    subscribeNoteEnded: () => () => {},
     dispose() {},
   };
   return engine;

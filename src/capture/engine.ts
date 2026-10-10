@@ -139,6 +139,7 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
   const stateEmitter = createEmitter<LiveCaptureState>();
   const inkEmitter = createEmitter<void>();
   const pageFinalizedEmitter = createEmitter<string>();
+  const noteEndedEmitter = createEmitter<string>();
 
   let state: LiveCaptureState = { ...idleState };
   let disposed = false;
@@ -222,6 +223,10 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
 
   function emitPageFinalized(pageId: string) {
     if (!disposed) pageFinalizedEmitter.emit(pageId);
+  }
+
+  function emitNoteEnded(noteId: string) {
+    if (!disposed) noteEndedEmitter.emit(noteId);
   }
 
   /**
@@ -364,6 +369,14 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
       }
       setState({ ...idleState });
       if (finalizedId !== null) emitPageFinalized(finalizedId);
+      // After the note is marked complete and the session ended (fix round
+      // 2, Important 1): a note whose active page was typed never produces
+      // a `finalizedId` here (see `finalizeTypedPage`), so this is the only
+      // event a note ending on a typed page emits at all. Fired
+      // unconditionally - the same "best effort" standard `emitPageFinalized`
+      // above already keeps if the storage writes just above failed and were
+      // logged rather than thrown.
+      if (noteId !== null) emitNoteEnded(noteId);
     });
   }
 
@@ -923,6 +936,10 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     subscribePageFinalized(fn) {
       void start();
       return pageFinalizedEmitter.subscribe(fn);
+    },
+    subscribeNoteEnded(fn) {
+      void start();
+      return noteEndedEmitter.subscribe(fn);
     },
 
     dispose() {

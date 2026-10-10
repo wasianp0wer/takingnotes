@@ -9,7 +9,7 @@ import type { NoteRecord, PageRecord } from '@/storage/types';
 import type { TranscriptionQueue } from '@/transcription/queue';
 
 export interface NamingQueueDeps {
-  engine: Pick<CaptureEngine, 'subscribePageFinalized'>;
+  engine: Pick<CaptureEngine, 'subscribePageFinalized' | 'subscribeNoteEnded'>;
   transcriptionQueue: Pick<TranscriptionQueue, 'subscribe'>;
   getSettings(): Promise<{ baseUrl: string; model: string }>;
   createGenerator(baseUrl: string): TextGenerator;
@@ -100,6 +100,7 @@ export function createNamingQueue(deps: NamingQueueDeps): NamingQueue {
   let stopped = false;
   let unsubPageFinalized: (() => void) | null = null;
   let unsubTranscriptChange: (() => void) | null = null;
+  let unsubNoteEnded: (() => void) | null = null;
   let idleWaiters: Array<() => void> = [];
 
   function settleIdle(): void {
@@ -200,6 +201,19 @@ export function createNamingQueue(deps: NamingQueueDeps): NamingQueue {
     }
   }
 
+  /**
+   * The third trigger (fix round 2, Important 1): `closeNote` emits this
+   * directly with the note id, so there is no page to look up first - unlike
+   * `handlePageEvent`, which has to go by way of a page to find its note.
+   * Handles the one reachable shape the other two triggers miss entirely: a
+   * note that ends on a typed active page, for which the engine deliberately
+   * never emits `pageFinalized` (see `finalizeTypedPage`'s comment in
+   * `src/capture/engine.ts`).
+   */
+  async function handleNoteEndedEvent(noteId: string): Promise<void> {
+    await maybeEnqueue(noteId);
+  }
+
   return {
     async start() {
       if (started || stopped) return;
@@ -214,6 +228,10 @@ export function createNamingQueue(deps: NamingQueueDeps): NamingQueue {
       // lets tests await a fired event's own handling instead of racing it.
       unsubPageFinalized = deps.engine.subscribePageFinalized(handlePageEvent);
       unsubTranscriptChange = deps.transcriptionQueue.subscribe(handlePageEvent);
+      // Third trigger (fix round 2, Important 1): "the note ended" as its
+      // own honest signal, rather than inferred from a page event that a
+      // typed-page ending never produces.
+      unsubNoteEnded = deps.engine.subscribeNoteEnded(handleNoteEndedEvent);
 
       for (const note of await listNotes()) {
         if (note.summary !== null) continue;
@@ -231,6 +249,8 @@ export function createNamingQueue(deps: NamingQueueDeps): NamingQueue {
       unsubPageFinalized = null;
       unsubTranscriptChange?.();
       unsubTranscriptChange = null;
+      unsubNoteEnded?.();
+      unsubNoteEnded = null;
       settleIdle();
     },
   };

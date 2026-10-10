@@ -138,7 +138,7 @@ describe('noteReadyForNaming', () => {
 });
 
 interface Deps {
-  engine: { subscribePageFinalized: ReturnType<typeof vi.fn> };
+  engine: { subscribePageFinalized: ReturnType<typeof vi.fn>; subscribeNoteEnded: ReturnType<typeof vi.fn> };
   transcriptionQueue: { subscribe: ReturnType<typeof vi.fn> };
   generator: FakeTextGenerator;
   queue: NamingQueue;
@@ -152,11 +152,14 @@ interface Deps {
    */
   firePageFinalized: (pageId: string) => Promise<void>;
   fireTranscriptChange: (pageId: string) => Promise<void>;
+  /** Fires the engine's `subscribeNoteEnded` trigger (fix round 2, Important 1). */
+  fireNoteEnded: (noteId: string) => Promise<void>;
 }
 
 function setup(): Deps {
   const pageFinalizedHandlers: Array<(pageId: string) => Promise<void>> = [];
   const transcriptChangeHandlers: Array<(pageId: string) => Promise<void>> = [];
+  const noteEndedHandlers: Array<(noteId: string) => Promise<void>> = [];
   const generator = createFakeTextGenerator([RESULT]);
 
   const engine = {
@@ -165,6 +168,13 @@ function setup(): Deps {
       return () => {
         const i = pageFinalizedHandlers.indexOf(fn);
         if (i >= 0) pageFinalizedHandlers.splice(i, 1);
+      };
+    }),
+    subscribeNoteEnded: vi.fn((fn: (noteId: string) => Promise<void>) => {
+      noteEndedHandlers.push(fn);
+      return () => {
+        const i = noteEndedHandlers.indexOf(fn);
+        if (i >= 0) noteEndedHandlers.splice(i, 1);
       };
     }),
   };
@@ -193,6 +203,7 @@ function setup(): Deps {
     firePageFinalized: (pageId) => Promise.all(pageFinalizedHandlers.map((fn) => fn(pageId))).then(() => undefined),
     fireTranscriptChange: (pageId) =>
       Promise.all(transcriptChangeHandlers.map((fn) => fn(pageId))).then(() => undefined),
+    fireNoteEnded: (noteId) => Promise.all(noteEndedHandlers.map((fn) => fn(noteId))).then(() => undefined),
   };
 }
 
@@ -355,16 +366,68 @@ describe('createNamingQueue', () => {
 
   it('never enqueues a note whose joined page text is entirely blank', async () => {
     const created = await createNote({ title: 'Note A', deviceId: 'huion', pageBaseline: 0, status: 'complete' });
-    const typed = await createTypedPage({ noteId: created.id, pageIndex: 0, text: '' });
+    await createTypedPage({ noteId: created.id, pageIndex: 0, text: '' });
 
     const d = setup();
     await d.queue.start();
-    await d.firePageFinalized(typed.id);
+    // fix round 2 (Fix 4): the real engine never emits `pageFinalized` for a
+    // typed page (see `finalizeTypedPage`) - `subscribeNoteEnded` is the
+    // trigger a typed page's note end actually produces.
+    await d.fireNoteEnded(created.id);
     await d.queue.idle();
 
     expect(d.generator.calls).toEqual([]);
     const updated = await getNote(created.id);
     expect(updated?.summary).toBeNull();
+  });
+
+  it('names a note on a subscribeNoteEnded event, for a note that ends on a typed page (fix round 2, Important 1)', async () => {
+    // This is the scenario the fix exists for: a note whose last page is
+    // typed never gets `pageFinalized` for that page, so without this
+    // trigger the note would sit unnamed until the next app start's
+    // startup scan (`start()`'s own re-derivation from `summary === null`,
+    // covered separately below).
+    //
+    // The note is created *after* `start()`, deliberately: creating it
+    // first would let `start()`'s own startup scan enqueue it too, and the
+    // test would pass even with the `subscribeNoteEnded` wiring deleted
+    // outright - exactly the vacuous shape the project has shipped before.
+    // Isolating the trigger this way is what a mutation check (removing the
+    // subscription in `start()`) actually catches.
+    const d = setup();
+    await d.queue.start();
+
+    const created = await createNote({ title: 'Note A', deviceId: 'huion', pageBaseline: 0, status: 'complete' });
+    await createTypedPage({ noteId: created.id, pageIndex: 0, text: 'Typed notes about Newton.' });
+
+    await d.fireNoteEnded(created.id);
+    await d.queue.idle();
+
+    expect(d.generator.calls).toHaveLength(1);
+    expect(d.generator.calls[0].prompt).toContain('Typed notes about Newton.');
+    const updated = await getNote(created.id);
+    expect(updated?.title).toBe('Newton on motion');
+    expect(updated?.summary).toBe('Covers the three laws.');
+  });
+
+  it('does not enqueue on subscribeNoteEnded when the note is not actually ready (e.g. a page is still transcribing)', async () => {
+    const created = await createNote({ title: 'Note A', deviceId: 'huion', pageBaseline: 0, status: 'complete' });
+    const page = await createPage({ noteId: created.id, pageIndex: 0, devicePageNum: 1, source: 'live', strokes: [] });
+    await setPageTranscript(page.id, {
+      markdown: '',
+      model: MODEL,
+      promptVersion: 'gemma-v1',
+      status: 'pending',
+      error: null,
+      updatedAt: 0,
+    });
+
+    const d = setup();
+    await d.queue.start();
+    await d.fireNoteEnded(created.id);
+    await d.queue.idle();
+
+    expect(d.generator.calls).toEqual([]);
   });
 
   it('de-duplicates two eligible events for the same note into one generator call', async () => {

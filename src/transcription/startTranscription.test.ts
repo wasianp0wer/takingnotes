@@ -81,6 +81,9 @@ beforeEach(async () => {
       subscribeCount += 1;
       return pageFinalized.subscribe(fn);
     },
+    subscribeNoteEnded: () => {
+      throw new Error('subscribeNoteEnded is not exercised through this double');
+    },
     dispose: () => {
       throw new Error('dispose is not exercised through this double');
     },

@@ -5,7 +5,10 @@ import { resetDatabase } from '@/test/resetDb';
 import type { TranscriptionQueue } from '@/transcription/queue';
 
 function fakeEngine() {
-  return { subscribePageFinalized: vi.fn(() => () => {}) };
+  return {
+    subscribePageFinalized: vi.fn(() => () => {}),
+    subscribeNoteEnded: vi.fn(() => () => {}),
+  };
 }
 
 function fakeTranscriptionQueue(): Pick<TranscriptionQueue, 'subscribe'> {
