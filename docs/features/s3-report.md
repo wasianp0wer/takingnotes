@@ -3,6 +3,98 @@
 Worktree: `/Users/maddiepersonal/takingnotes/.claude/worktrees/agent-ae6cdce27cee7bb8c`
 Branch: `worktree-agent-ae6cdce27cee7bb8c` (branched from `phase3` at `517fbe6`)
 
+## Fix round 1 (coordinator review)
+
+Two findings, both flowing from concerns I raised myself in the original
+report. Both addressed; status moves from the original DONE_WITH_CONCERNS
+to a cleaner DONE_WITH_CONCERNS (the `ffmpeg` dependency is now opt-in for
+one extra layer of proof, not load-bearing for the suite passing - see
+below - but it's still worth the owner knowing it's there).
+
+### Finding 1 — the suite must no longer depend on a system binary to pass
+
+`src/audio/incrementalRecovery.decode.test.ts` is split into two layers:
+
+1. **A structural check that runs unconditionally, with no `ffmpeg` or any
+   other external tool.** `assertStructurallyValidStitchedWebm()` parses
+   the recovered bytes as EBML/Matroska by hand (a hand-rolled, dependency-
+   free vint decoder - `vintLength`/`readElementSize`, about 25 lines):
+   - a valid EBML header at the front (the magic bytes);
+   - every chunk boundary (where the recorder split deliveries) lands on a
+     real Cluster element id;
+   - each of those Clusters is *complete*: decoding its own EBML size field
+     places its end **exactly** at the next chunk boundary (or, for the
+     last one, exactly at the truncation point) - never short, never long;
+   - the overall byte length matches exactly what withholding the final
+     cluster and the Cues trailer should leave.
+
+   This test alone guards S3's own stitching logic hermetically and can
+   never be skipped.
+
+2. **The `ffmpeg` real-decode check, now conditional.** `detectFfmpeg()`
+   runs once at module load (`spawnSync('ffmpeg', ['-version'])`). When
+   `ffmpeg` is missing, both `ffmpeg`-dependent tests are skipped via
+   `it.skipIf`, a console warning fires with the full reason and exactly
+   how to enable it (`FFMPEG_MISSING_MESSAGE` - not a bare skip), and the
+   skipped tests' own titles carry a `[SKIPPED - ...]` suffix so it's
+   visible in the test list too, not only in the console. When `ffmpeg`
+   *is* present and decode fails, it still fails loudly - no change there.
+
+   `npm test` as a whole no longer depends on `ffmpeg` to pass: on a
+   machine without it, the structural test still runs and still catches a
+   stitching regression; only the extra, stronger "real decoder accepts
+   this" proof is unverified that run, and the run says so plainly.
+
+**Verified the skip actually skips** (not just read the code): shadowed
+`ffmpeg` by prepending a scratch directory containing a fake `ffmpeg` script
+that exits 127 to `PATH` (the coordinator's suggested approach), then ran
+`npx vitest run src/audio/incrementalRecovery.decode.test.ts` with that
+`PATH`. Result: the console warning printed verbatim, the structural test
+ran and passed, and both `ffmpeg` tests reported as skipped (`1 passed | 2
+skipped (3)`) - the file as a whole still reports as passed, not failed.
+Then re-ran with the real `ffmpeg` back on `PATH` and confirmed all 3 pass
+again.
+
+**Mutation-tested the new structural check specifically** (two separate
+probes against `src/storage/recordingChunks.ts`'s `seq` sort, each a local,
+reverted probe - the file is unchanged in this commit):
+- Reversed the sort entirely → caught, but only by the EBML-header-at-front
+  assertion (the header chunk landed last).
+- A second, subtler probe that swaps only chunks `seq 3` and `seq 5` while
+  leaving chunk 0 (the header) untouched → the header assertion is
+  satisfied, but the new per-boundary Cluster-id-and-size check catches it
+  on its own: `"Cluster at byte 13149 should be complete, ending exactly at
+  the next chunk boundary: expected 17389 to be 17387"`. This confirms the
+  new structural logic pulls real, independent weight rather than being
+  redundant with the header check.
+
+Both probes reverted immediately after confirming.
+
+### Finding 2 — residual-risk note in the architecture doc
+
+Added to `docs/architecture.md` §8.2, directly after the
+`finalizeRecording`/invariant bullets (the incremental-audio subsection):
+a "Known limitation, with a named next step" paragraph stating plainly what
+K8 verifies (structural validity, plus - when `ffmpeg` is available - real
+decodability under `ffmpeg`), what it does not (the browser's own
+`AudioContext.decodeAudioData` on the same truncated bytes - `ffmpeg` is
+known to be more tolerant of damaged containers than a browser may be), the
+contingency if a browser ever refuses (a remux step, not built since no
+failing test has asked for it), the fact that the raw bytes are preserved
+and recoverable either way (strictly better than A11's total loss), and the
+one manual check that would close the residual risk (interrupt a real
+recording on real hardware, reopen, confirm it plays and transcribes).
+
+### Gates after this round
+
+96 files / **1180 tests** pass (was 1179 - net +1, from splitting one test
+into a structural test plus two conditional `ffmpeg` tests).
+`npx tsc -b` clean. `npm run lint`: 0 errors, 5 pre-existing warnings
+(unchanged from before this round). `npm run build` succeeds. Off-limits
+files (`src/storage/*`, `capture/engine.ts`, `capture/types.ts`,
+`SessionControls.tsx`, `package.json`, `package-lock.json`): confirmed
+zero diff again.
+
 ## Status: DONE_WITH_CONCERNS
 
 Everything in the brief is implemented and tested, including K8's mandatory

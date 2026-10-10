@@ -915,6 +915,28 @@ chunks and unfinished-recording lookup:
   that recording (a recording deleted while still open would otherwise leave
   orphaned chunk rows, since nothing else scans for them).
 
+**Known limitation, with a named next step: K8's decode proof covers the
+bytes, not the browser.** S3's mandatory test
+(`src/audio/incrementalRecovery.decode.test.ts`) proves that a stitched,
+truncated recording (crashed before `stop()` ever ran, so the container was
+never finalised) is a structurally valid, decodable Opus/WebM stream: it
+parses as well-formed Matroska up to the truncation point, and the system's
+`ffmpeg` - substituted at `decodeToPcm16k`'s injectable `decode` seam
+(`src/audio/pcm.ts:66`), because `happy-dom` provides no real
+`AudioContext` for this test suite to call the genuine article - decodes it
+to real, non-silent PCM. **What this does not prove is that the browser's
+own `AudioContext.decodeAudioData` accepts the same bytes.** `ffmpeg` is
+known to be tolerant of damaged/streamed containers; a browser's decoder
+may be stricter. If it turns out to reject a truncated recording that
+`ffmpeg` accepts, the contingency is a remux step before decode (anticipated
+by K8 and deliberately not built, since no failing test has asked for it) -
+and either way the raw bytes are preserved and recoverable in
+`recordingAudio`, so the owner is strictly better off than before S3 (where
+an interruption lost the whole recording outright). The one manual check
+that would close this residual risk: interrupt a real recording on real
+hardware, reopen the app, and confirm the recovered recording both plays
+and transcribes.
+
 ### 8.3 `resumeNote`'s contract
 
 Declared on `CaptureEngine` in `src/capture/types.ts`:
