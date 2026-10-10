@@ -1,62 +1,19 @@
 import { useState } from 'react';
 
 import { useCaptureEngine, useCaptureState } from '@/capture/CaptureContext';
-import { PageTurnControls } from '@/capture/PageTurnControls';
-import { Button } from '@/components/ui/button';
-import { cn } from '@/lib/utils';
-import type { NoteRecord } from '@/storage/types';
+import { sessionStartedAtOf } from '@/capture/engine';
 import { ensureTranscriptionQueue } from '@/transcription/startTranscription';
 import type { TranscriptionQueue } from '@/transcription/queue';
 import { GapPanel } from '@/notes/GapPanel';
 import { InkCanvas } from '@/notes/InkCanvas';
+import { NoteList } from '@/notes/NoteList';
+import { NoteToolbar } from '@/notes/NoteToolbar';
 import { TranscriptPanel } from '@/notes/TranscriptPanel';
 import { useNotesData } from '@/notes/useNotesData';
 
 export interface NotesViewProps {
   /** Tests only - a real mount builds its own via `ensureTranscriptionQueue`. */
   queue?: TranscriptionQueue;
-}
-
-function Badge({ children }: { children: string }) {
-  return (
-    <span className="rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent-foreground">
-      {children}
-    </span>
-  );
-}
-
-function NoteListItem({
-  note,
-  selected,
-  active,
-  onSelect,
-}: {
-  note: NoteRecord;
-  selected: boolean;
-  active: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <li className={cn('border-b border-border px-4 py-2', selected && 'bg-accent')}>
-      {/* The button's text is exactly the title - the date and badges sit
-          beside it rather than inside it, so selecting a note by its title
-          text never has to account for what else is on the row. */}
-      <button
-        type="button"
-        aria-current={selected ? 'true' : undefined}
-        onClick={onSelect}
-        className="block w-full text-left text-sm font-medium hover:underline"
-      >
-        {note.title}
-      </button>
-      <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
-        <span>{new Date(note.startedAt).toLocaleDateString()}</span>
-        {note.legacy && <Badge>Legacy</Badge>}
-        {active && <Badge>Recording</Badge>}
-        {note.status === 'interrupted' && <Badge>Interrupted</Badge>}
-      </div>
-    </li>
-  );
 }
 
 /**
@@ -137,75 +94,30 @@ export function NotesView(props?: NotesViewProps) {
     pageHeight: selectedNote?.pageHeight ?? null,
   };
 
+  // K15: a session locks you into its note, so New note must be disabled
+  // while one is running.
+  const sessionLocked = sessionStartedAtOf(state) !== null;
+
   return (
     <div className="flex h-full">
-      <aside className="w-64 shrink-0 overflow-y-auto border-r border-border">
-        <h2 className="px-4 py-3 text-sm font-medium">Notes</h2>
-        {notes.length === 0 ? (
-          <p className="px-4 text-sm text-muted-foreground">
-            No notes yet — write on the pad to start one.
-          </p>
-        ) : (
-          <ul>
-            {notes.map((note) => (
-              <NoteListItem
-                key={note.id}
-                note={note}
-                selected={note.id === selectedNoteId}
-                active={note.id === state.activeNoteId}
-                onSelect={() => selectNote(note.id)}
-              />
-            ))}
-          </ul>
-        )}
-      </aside>
+      <NoteList
+        notes={notes}
+        selectedNoteId={selectedNoteId}
+        activeNoteId={state.activeNoteId}
+        onSelect={selectNote}
+      />
 
       <div className="flex flex-1 flex-col">
-        <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2">
-          <span className="text-sm font-medium">
-            {selectedNote ? selectedNote.title : 'No note selected'}
-          </span>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={() => void engine.startNote()}>
-              New note
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={state.activeNoteId === null}
-              onClick={() => void engine.endNote()}
-            >
-              End note
-            </Button>
-            {pages.length > 0 && (
-              <>
-                <Button
-                  variant="outline"
-                  size="icon-sm"
-                  aria-label="Previous page"
-                  disabled={viewedIndex <= 0}
-                  onClick={() => goToPage(viewedIndex - 1)}
-                >
-                  ‹
-                </Button>
-                <span className="text-sm text-muted-foreground">
-                  Page {viewedIndex + 1} of {pages.length}
-                </span>
-                <Button
-                  variant="outline"
-                  size="icon-sm"
-                  aria-label="Next page"
-                  disabled={viewedIndex >= pages.length - 1}
-                  onClick={() => goToPage(viewedIndex + 1)}
-                >
-                  ›
-                </Button>
-              </>
-            )}
-            {/* F4's only mount point (docs/architecture.md §4) - must stay mounted. */}
-            <PageTurnControls />
-          </div>
-        </div>
+        <NoteToolbar
+          noteTitle={selectedNote?.title ?? null}
+          sessionLocked={sessionLocked}
+          hasActiveNote={state.activeNoteId !== null}
+          onNewNote={() => void engine.startNote()}
+          onEndNote={() => void engine.endNote()}
+          pageCount={pages.length}
+          viewedIndex={viewedIndex}
+          onGoToPage={goToPage}
+        />
 
         <div className="flex flex-1 overflow-hidden">
           <div className="flex flex-1 items-start justify-center overflow-auto p-4">
