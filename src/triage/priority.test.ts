@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { TaskRecord } from '@/storage/types';
-import { effectiveEstimateMinutes, priorityScore, rankTasks } from '@/triage/priority';
+import { effectiveEstimateMinutes, priorityScore, rankTasks, scoreBand } from '@/triage/priority';
 
 const NOW = new Date(2026, 8, 28, 9).getTime();
 const HOUR = 3_600_000;
@@ -72,6 +72,32 @@ describe('estimates', () => {
     expect(priorityScore({ ...t, estimatedMinutes: Number.NaN }, NOW)).toBe(
       priorityScore({ ...t, estimatedMinutes: 60 }, NOW),
     );
+  });
+});
+
+describe('scoreBand - K22 absolute bands on the printed score', () => {
+  it('139 is orange, 140 is red', () => {
+    expect(scoreBand(139)).toBe('orange');
+    expect(scoreBand(140)).toBe('red');
+  });
+  it('99 is amber, 100 is orange', () => {
+    expect(scoreBand(99)).toBe('amber');
+    expect(scoreBand(100)).toBe('orange');
+  });
+  it('59 is lime, 60 is amber', () => {
+    expect(scoreBand(59)).toBe('lime');
+    expect(scoreBand(60)).toBe('amber');
+  });
+  it('29 is green, 30 is lime', () => {
+    expect(scoreBand(29)).toBe('green');
+    expect(scoreBand(30)).toBe('lime');
+  });
+  it('0 is green; 200 (the max possible score) is red', () => {
+    expect(scoreBand(0)).toBe('green');
+    expect(scoreBand(200)).toBe('red');
+  });
+  it('a defensive negative score is green, not a crash', () => {
+    expect(scoreBand(-5)).toBe('green');
   });
 });
 
