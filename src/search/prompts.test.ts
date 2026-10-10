@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { getBandPrompt, getScreenPrompt } from '@/search/prompts';
+import {
+  BAND_LABELS,
+  getBandPrompt,
+  getScreenPrompt,
+  SCREEN_EXAMPLE_INDICES,
+} from '@/search/prompts';
 import { validateBandResult, validateScreenIndices } from '@/search/validate';
 
 describe('search prompts', () => {
@@ -34,22 +39,40 @@ describe('search prompts', () => {
     expect(text).toContain('discusses entropy at length');
   });
 
-  it("round-trips a worked screen reply, written from the prompt's own stated shape, through its validator", () => {
+  it("round-trips the screen prompt's own literal worked example through its validator (fix round 3, I3)", () => {
     const spec = getScreenPrompt();
     expect(spec.system).toContain('JSON array of integers');
-    // The example is `[1, 4, 7]` per the prompt's own wording.
-    const reply = '[1, 3]';
+    // `SCREEN_EXAMPLE_INDICES` is the literal array interpolated into the
+    // prompt's own wording (see prompts.ts) - not a hand-typed stand-in
+    // that could silently diverge from what the prompt actually shows.
+    expect(spec.system).toContain(`[${SCREEN_EXAMPLE_INDICES.join(', ')}]`);
+    const reply = JSON.stringify(SCREEN_EXAMPLE_INDICES);
     const parsed = JSON.parse(reply) as unknown;
-    expect(validateScreenIndices(parsed, 5)).toEqual([1, 3]);
+    const validIndices = new Set<number>(SCREEN_EXAMPLE_INDICES);
+    expect(validateScreenIndices(parsed, validIndices)).toEqual([...SCREEN_EXAMPLE_INDICES].sort((a, b) => a - b));
   });
 
-  it("round-trips a worked band reply, written from the prompt's own stated shape, through its validator", () => {
+  it("round-trips a worked band reply through its validator", () => {
     const spec = getBandPrompt();
     expect(spec.system).toContain('"band"');
     expect(spec.system).toContain('"reason"');
     const reply = '{"band": "strong", "reason": "mentions recursion directly"}';
     const parsed = JSON.parse(reply) as unknown;
     expect(validateBandResult(parsed)).toEqual({ band: 'strong', reason: 'mentions recursion directly' });
+  });
+
+  // Fix round 3, I3: the band prompt's wording is built from `BAND_LABELS`
+  // (see prompts.ts's `BAND_RULE_LIST`), and `validateBandResult`'s
+  // accepted set is built from the same array. This test imports
+  // `BAND_LABELS` rather than typing out "strong"/"moderate"/"weak"/"none"
+  // by hand, so it automatically covers whatever the prompt actually
+  // claims the model may answer with - a pass that renames or adds a band
+  // changes this one array, and this test (and the validator) pick the
+  // change up without being edited.
+  it.each(BAND_LABELS)('every label the band prompt quotes ("%s") round-trips through validateBandResult to itself', (label) => {
+    const spec = getBandPrompt();
+    expect(spec.system).toContain(`"${label}"`);
+    expect(validateBandResult({ band: label, reason: 'x' }).band).toBe(label);
   });
 
   it('prompt versions are stable, non-empty and distinct from each other and from every existing registry', () => {

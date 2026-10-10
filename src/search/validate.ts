@@ -1,7 +1,7 @@
-export type SmartSearchBand = 'strong' | 'moderate' | 'weak';
+import { BAND_LABELS, type BandLabel } from '@/search/prompts';
 
 export interface BandResult {
-  band: SmartSearchBand | 'none';
+  band: BandLabel;
   reason: string;
 }
 
@@ -15,7 +15,8 @@ export const SEARCH_REASON_MAX = 500;
 /** The keys a model reaches for when it wraps its array in an object. */
 const WRAPPER_KEYS = ['indices', 'candidates', 'relevant', 'matches', 'ids'];
 
-const BAND_VALUES: ReadonlySet<string> = new Set(['strong', 'moderate', 'weak', 'none']);
+/** Fix round 3, I3: built from the same `BAND_LABELS` the prompt's own wording is built from - see prompts.ts. */
+const BAND_VALUES: ReadonlySet<string> = new Set(BAND_LABELS);
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -32,14 +33,21 @@ function toIndex(row: unknown): number | null {
 
 /**
  * The screen stage's `validate` (docs/architecture.md §6.4): the model's
- * JSON is untrusted input. A row outside `1..candidateCount`, or not a
+ * JSON is untrusted input. `validIndices` is the exact set of indices this
+ * particular call actually offered - fix round 3, I2: once the screen call
+ * is batched, a plain `1..candidateCount` range would wrongly accept an
+ * index that belongs to a *different* batch's prompt, one this call never
+ * showed the model. A row naming an index outside that set, or not a
  * number at all, is dropped rather than cast - one bad entry costs one
  * candidate, not the whole screen. A non-array, non-wrapper value throws:
  * the model did not do the task, which must not look like "found nothing".
  * An empty result (nothing survived, or the array was empty) is a valid,
  * non-throwing "no candidates".
  */
-export function validateScreenIndices(value: unknown, candidateCount: number): number[] {
+export function validateScreenIndices(
+  value: unknown,
+  validIndices: ReadonlySet<number>,
+): number[] {
   let rows: unknown[];
   if (Array.isArray(value)) {
     rows = value;
@@ -56,7 +64,7 @@ export function validateScreenIndices(value: unknown, candidateCount: number): n
   const seen = new Set<number>();
   for (const row of rows) {
     const index = toIndex(row);
-    if (index === null || index < 1 || index > candidateCount) continue;
+    if (index === null || !validIndices.has(index)) continue;
     seen.add(index);
   }
   return [...seen].sort((a, b) => a - b);
@@ -75,7 +83,7 @@ export function validateBandResult(value: unknown): BandResult {
     throw new Error('The model did not return a JSON object with "band" and "reason".');
   }
   const raw = typeof value.band === 'string' ? value.band.trim().toLowerCase() : '';
-  const band = (BAND_VALUES.has(raw) ? raw : 'none') as SmartSearchBand | 'none';
+  const band = (BAND_VALUES.has(raw) ? raw : 'none') as BandLabel;
   const reason = typeof value.reason === 'string' ? cap(value.reason, SEARCH_REASON_MAX) : '';
   return { band, reason };
 }
