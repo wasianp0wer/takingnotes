@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { CalendarEventRecord } from '@/storage/types';
-import { AGENDA_DAYS, CalendarPanel } from '@/triage/CalendarPanel';
+import { AGENDA_DAYS, CalendarPanel, parseAgendaDays } from '@/triage/CalendarPanel';
 import { click, mount, typeInto } from '@/triage/testing';
 
 const at = (y: number, m: number, d: number, h = 0, min = 0) => new Date(y, m, d, h, min).getTime();
@@ -31,6 +31,20 @@ const DEADLINE_OCT6 = event({ id: 'e4', title: 'Term paper due', kind: 'deadline
 const EVENT_SEP2 = event({ id: 'e5', title: 'Concert', kind: 'event', startsAt: at(2026, 8, 2, 19) });
 
 const EVENTS = [DEADLINE_SEP29, ALLDAY_SEP29, EVENT_OCT5, DEADLINE_OCT6, EVENT_SEP2];
+
+describe('parseAgendaDays (K23 custom horizon validation)', () => {
+  it('rejects an empty string', () => expect(parseAgendaDays('')).toBeNull());
+  it('rejects zero', () => expect(parseAgendaDays('0')).toBeNull());
+  it('rejects a negative number', () => expect(parseAgendaDays('-5')).toBeNull());
+  it('rejects a non-numeric string', () => expect(parseAgendaDays('abc')).toBeNull());
+  it('rejects anything over 365', () => expect(parseAgendaDays('366')).toBeNull());
+  it('accepts exactly 365', () => expect(parseAgendaDays('365')).toBe(365));
+  it('accepts 1', () => expect(parseAgendaDays('1')).toBe(1));
+  it('floors a fractional value that is still in range', () => expect(parseAgendaDays('7.9')).toBe(7));
+  it('rejects a fractional value that floors to zero', () => expect(parseAgendaDays('0.5')).toBeNull());
+  it('trims surrounding whitespace', () => expect(parseAgendaDays('  14  ')).toBe(14));
+  it('rejects a literal "Infinity"', () => expect(parseAgendaDays('Infinity')).toBeNull());
+});
 
 describe('CalendarPanel', () => {
   it('AGENDA_DAYS is 8 (today plus the next 7 days)', () => {

@@ -20,6 +20,25 @@ export interface CalendarPanelProps {
 /** Today plus the next 7 days. */
 export const AGENDA_DAYS = 8;
 
+/** The upper bound the K23 custom horizon field accepts. */
+export const MAX_CUSTOM_AGENDA_DAYS = 365;
+
+/**
+ * K23: validates the agenda horizon's Custom… field. Empty, zero, negative,
+ * non-numeric and anything over 365 are all rejected (null). A fractional
+ * value floors, then is re-checked against the same rules, so `7.9` commits
+ * as `7` but `0.5` (which floors to `0`) is still rejected.
+ */
+export function parseAgendaDays(input: string): number | null {
+  const trimmed = input.trim();
+  if (trimmed === '') return null;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n)) return null;
+  const days = Math.floor(n);
+  if (days <= 0 || days > MAX_CUSTOM_AGENDA_DAYS) return null;
+  return days;
+}
+
 /** A cell shows at most this many dots, so a busy day never overflows. */
 const MAX_DOTS = 3;
 
