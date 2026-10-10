@@ -146,7 +146,12 @@ describe('SearchView', () => {
     expect(container.textContent).not.toContain('unrelated');
   });
 
-  it('shows a plain error string, and stays interactive, when the generator rejects', async () => {
+  it('reports a totally unreachable host as "could not be checked", not a thrown error - and stays interactive (fix round 3, I2)', async () => {
+    // Fix round 3, I2 changed the screen stage's failure handling: a
+    // failed screen batch is now caught and counted (like a band
+    // failure), not thrown - so a totally unreachable host surfaces via
+    // uncheckedCount rather than a destructive error paragraph. See
+    // smartSearch.test.ts's own test of this at the function level.
     await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0 });
     const gen = createFakeTextGenerator();
     gen.failWith = new Error('Could not reach Ollama at http://x: fetch failed');
@@ -154,19 +159,50 @@ describe('SearchView', () => {
     await settle();
     await type('something');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('Could not reach Ollama');
+    expect(container.textContent).toContain('1 note could not be checked');
+    expect(container.textContent).not.toContain('Could not reach Ollama');
     await type('still works');
     expect(queryInput().value).toBe('still works');
   });
 
-  it('shows the unsummarizedCount line after a run over an all-null-summary library', async () => {
+  it('shows the "screened by title and page text or recording" line for a note with no summary but some page text', async () => {
+    const note = await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0 });
+    const page = await createPage({
+      noteId: note.id,
+      pageIndex: 0,
+      devicePageNum: 1,
+      source: 'live',
+      strokes: [],
+    });
+    await setPageTranscript(page.id, {
+      markdown: 'some page text',
+      model: 'gemma4',
+      promptVersion: 'gemma-v1',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
+    const gen = createFakeTextGenerator(['[]']);
+    render({ smartSearchDeps: { generator: gen, model: 'm' } });
+    await settle();
+    await type('x');
+    await click(buttonByText('Smart search'));
+    expect(container.textContent).toContain('1 note has no');
+    expect(container.textContent).toContain('page text or recording content instead');
+    expect(container.textContent).not.toContain('screened by title alone');
+  });
+
+  it('shows the "screened by title alone" line for a note with no summary, no page text and no recording (fix round 3, I1)', async () => {
     await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0 });
     const gen = createFakeTextGenerator(['[]']);
     render({ smartSearchDeps: { generator: gen, model: 'm' } });
     await settle();
     await type('x');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toMatch(/1 note.*no summary/);
+    expect(container.textContent).toContain('1 note has neither page text nor a recording');
+    expect(container.textContent).toContain('screened by title alone');
+    // Must not also claim it was screened by page text - it was not.
+    expect(container.textContent).not.toContain('page text or recording content instead');
   });
 
   it('reports both the hits it got and the count it could not check when some band calls fail', async () => {
@@ -288,5 +324,69 @@ describe('SearchView', () => {
     // The matching segment's own startMs (5000), not the recording's first.
     expect(onOpenRecordings).toHaveBeenCalledExactlyOnceWith(recording.id, 5000);
     expect(onOpenNotes).not.toHaveBeenCalled();
+  });
+
+  it("a smart-search hit's Open button opens the recording, not the note, when the note has no page text (fix round 3, C1)", async () => {
+    const note = await createNote({ title: 'Lecture with no writing', deviceId: 'd', pageBaseline: 0 });
+    const recording = await createRecording(
+      { title: 'Audio only', noteId: note.id, durationMs: 1000 },
+      new Blob(['a']),
+    );
+    await finalizeRecording(recording.id, new Blob(['a']), { endedAt: 2, durationMs: 1000 });
+    await setRecordingTranscript(recording.id, {
+      text: 'mentions entropy at length',
+      segments: [],
+      model: 'whisper',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
+    const gen = createFakeTextGenerator(['[1]', '{"band":"strong","reason":"mentions entropy at length"}']);
+    const onOpenNotes = vi.fn();
+    const onOpenRecordings = vi.fn();
+    render({ smartSearchDeps: { generator: gen, model: 'm' }, onOpenNotes, onOpenRecordings });
+    await settle();
+    await type('entropy');
+    await click(buttonByText('Smart search'));
+    expect(container.textContent).toContain('Lecture with no writing');
+
+    const strongSection = [...container.querySelectorAll('div')].find((d) =>
+      d.textContent?.startsWith('Strong'),
+    )!;
+    const openButton = [...strongSection.querySelectorAll('button')].find(
+      (b) => b.textContent?.trim() === 'Open',
+    )!;
+    await click(openButton);
+    expect(onOpenRecordings).toHaveBeenCalledExactlyOnceWith(recording.id);
+    expect(onOpenNotes).not.toHaveBeenCalled();
+  });
+
+  it('clears a stale smart-search result when the query changes (fix round 3, I6)', async () => {
+    await createNote({ title: 'Entropy Lecture', deviceId: 'd', pageBaseline: 0 });
+    const gen = createFakeTextGenerator(['[1]', '{"band":"strong","reason":"about entropy"}']);
+    render({ smartSearchDeps: { generator: gen, model: 'm' } });
+    await settle();
+    await type('entropy');
+    await click(buttonByText('Smart search'));
+    expect(container.textContent).toContain('about entropy');
+
+    await type('osmosis');
+    expect(container.textContent).not.toContain('about entropy');
+    expect(container.textContent).not.toContain('Strong');
+  });
+
+  it('clears a smart-search error when the query changes', async () => {
+    await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0 });
+    const gen = createFakeTextGenerator();
+    gen.failWith = new Error('boom');
+    render({ smartSearchDeps: { generator: gen, model: 'm' } });
+    await settle();
+    await type('entropy');
+    await click(buttonByText('Smart search'));
+    expect(container.textContent).toContain('could not be checked');
+
+    await type('osmosis');
+    expect(container.textContent).not.toContain('could not be checked');
   });
 });

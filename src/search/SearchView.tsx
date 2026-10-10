@@ -5,7 +5,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { loadSearchCorpus, type SearchCorpus } from '@/search/corpus';
 import { findInCorpus, type FindHit } from '@/search/find';
-import { runSmartSearch, type SmartSearchDeps, type SmartSearchResult } from '@/search/smartSearch';
+import { SMART_SEARCH_BANDS } from '@/search/prompts';
+import { runSmartSearch, type SmartSearchDeps, type SmartSearchHit, type SmartSearchResult } from '@/search/smartSearch';
 import { getSmartSearchDeps } from '@/search/startSearch';
 
 export interface SearchViewProps {
@@ -14,8 +15,8 @@ export interface SearchViewProps {
   /**
    * From `AppShell` (Fix round 1, Finding 1): switches to the Notes tab and
    * selects this note + page there. `pageIndex` is `0` for a hit with no
-   * specific page (a note-title/summary Find hit, or any smart-search hit -
-   * neither identifies a single page).
+   * specific page (a note-title/summary Find hit, or any smart-search hit
+   * whose note has page text - neither identifies a single page).
    */
   onOpenNotes?: (noteId: string, pageIndex: number) => void;
   /** Switches to the Recordings tab and selects this recording. `startMs` names the segment to look for, when known. */
@@ -29,12 +30,29 @@ const SOURCE_LABEL: Record<FindHit['source'], string> = {
   'audio-segment': 'Recording',
 };
 
-const BANDS = ['strong', 'moderate', 'weak'] as const;
-const BAND_LABEL: Record<(typeof BANDS)[number], string> = {
+/**
+ * Fix round 3, I3: imported from the one list `prompts.ts`'s wording and
+ * `validate.ts`'s accepted values are also built from, rather than a
+ * fourth hand-copy of "strong"/"moderate"/"weak" living here too.
+ */
+const BAND_LABEL: Record<(typeof SMART_SEARCH_BANDS)[number], string> = {
   strong: 'Strong',
   moderate: 'Moderate',
   weak: 'Weak',
 };
+
+/** Fix round 3, C1: a smart-search hit opens its recording when its note has no page text to point at; otherwise it opens the note. */
+function openSmartHit(
+  hit: SmartSearchHit,
+  onOpenNotes: SearchViewProps['onOpenNotes'],
+  onOpenRecordings: SearchViewProps['onOpenRecordings'],
+): void {
+  if (hit.recordingId !== undefined) {
+    onOpenRecordings?.(hit.recordingId);
+    return;
+  }
+  onOpenNotes?.(hit.noteId, 0);
+}
 
 /**
  * K39-K44, K46: one query box, two modes. Find recomputes from the already
@@ -63,6 +81,17 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
   const hits = useMemo(() => (corpus ? findInCorpus(corpus, query) : []), [corpus, query]);
 
   const isEmptyLibrary = corpus !== null && corpus.notes.length === 0 && corpus.recordings.length === 0;
+
+  // Fix round 3, I6: a query change clears the previous smart-search
+  // result and error. Without this, running "entropy", getting a Strong
+  // hit, then typing "osmosis" leaves that hit's bands sitting under the
+  // now-current Find results, reading as an answer to a query they were
+  // never computed for.
+  function handleQueryChange(value: string): void {
+    setQuery(value);
+    setSmart(null);
+    setError(null);
+  }
 
   async function handleSmartSearch() {
     if (runningRef.current || !corpus) return;
@@ -97,6 +126,12 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
 
   if (corpus === null) return null;
 
+  // Fix round 3, I1: `unsummarizedCount` notes have no summary, but K46's
+  // fallback also now draws on page text *and* recording text (C1) - only
+  // `titleOnlyCount` of them have neither, and only that subset was really
+  // screened on nothing but a (possibly generic) title.
+  const screenedByFallback = smart ? smart.unsummarizedCount - smart.titleOnlyCount : 0;
+
   return (
     <section aria-label="Search" className="flex h-full flex-col gap-4 overflow-auto p-4">
       {isEmptyLibrary ? (
@@ -110,7 +145,7 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
               aria-label="Search query"
               placeholder="Search your notes and recordings…"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => handleQueryChange(e.target.value)}
             />
             <Button
               variant="outline"
@@ -154,10 +189,21 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
 
           {smart && (
             <div className="space-y-3 border-t border-border pt-3">
-              {smart.unsummarizedCount > 0 && (
+              {screenedByFallback > 0 && (
                 <p className="text-xs text-muted-foreground">
-                  {smart.unsummarizedCount} {smart.unsummarizedCount === 1 ? 'note' : 'notes'} have no
-                  summary yet and were screened by title and page text instead.
+                  {screenedByFallback} {screenedByFallback === 1 ? 'note has' : 'notes have'} no
+                  summary yet and {screenedByFallback === 1 ? 'was' : 'were'} screened by title and
+                  page text or recording content instead.
+                </p>
+              )}
+              {smart.titleOnlyCount > 0 && (
+                // Fix round 3, I1: honest about the notes the fallback
+                // above could not actually help - no page text and no
+                // recording either, so only the title was ever screened.
+                <p className="text-xs text-muted-foreground">
+                  {smart.titleOnlyCount} {smart.titleOnlyCount === 1 ? 'note has' : 'notes have'}{' '}
+                  neither page text nor a recording, and{' '}
+                  {smart.titleOnlyCount === 1 ? 'was' : 'were'} screened by title alone.
                 </p>
               )}
               {smart.uncheckedCount > 0 && (
@@ -171,7 +217,7 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
                   {smart.uncheckedCount === 1 ? 'it' : 'them'}.
                 </p>
               )}
-              {BANDS.map((band) => (
+              {SMART_SEARCH_BANDS.map((band) => (
                 <div key={band}>
                   <h3 className="text-sm font-medium">{BAND_LABEL[band]}</h3>
                   {smart[band].length === 0 ? (
@@ -182,7 +228,11 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
                         <li key={hit.noteId} className="text-sm">
                           <span className="font-medium">{hit.noteTitle}</span>
                           <p className="text-muted-foreground">{hit.reason}</p>
-                          <Button size="sm" variant="ghost" onClick={() => onOpenNotes?.(hit.noteId, 0)}>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => openSmartHit(hit, onOpenNotes, onOpenRecordings)}
+                          >
                             Open
                           </Button>
                         </li>
