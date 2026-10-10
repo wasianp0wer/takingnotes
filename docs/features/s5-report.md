@@ -2,6 +2,127 @@
 
 ## Status: DONE
 
+## Fix round 1 (post-review)
+
+The coordinator's review came back with two findings. Both are fixed,
+tested, and mutation-checked below. Carried forward per the coordinator's
+instruction, not fixed: `visibleNotes`/`hiddenCount`/`activeNote`/
+`activeNoteExempted` in `useNotesData` recompute per render without
+`useMemo` (fine at this scale, noted for later); OR as the default mode and
+non-persisted filter state are recorded as open product questions for the
+owner, not defects, and are left as they are.
+
+### Finding 1 (Important) — a failed tag write silently ate the owner's input
+
+`src/notes/TagEditor.tsx`: `write()` caught a failed `setNoteTags` and only
+`console.error`'d it; `addTag` then unconditionally called `setDraft('')`
+after `await write(...)` regardless of outcome. A transient IndexedDB
+failure (quota, blocked upgrade, anything) would silently discard the typed
+tag with nothing saved and nothing shown.
+
+**What changed:** `write()` now returns `Promise<boolean>` (mirrors
+`useTriageData`'s `rethrow`-shaped contracts the coordinator pointed at,
+adapted to a return value since `TagEditor` has only one caller-site shape to
+satisfy rather than several with different needs) and tracks an `error`
+state, cleared on success. `addTag` only calls `setDraft('')` when `write`
+returned `true`. Both `addTag` and `removeTag` go through the same `write`,
+so a failed remove gets the same treatment. A failure now renders an inline
+`<span role="alert">` with `TAG_SAVE_FAILED` ("Couldn't save your tags — try
+again."), not only a console log.
+
+**Tests added** (`src/notes/TagEditor.test.tsx`), using the `vi.hoisted` +
+`vi.mock('@/storage/notes', …)` countdown pattern from
+`src/capture/engine.test.ts` (`hooks.failSetNoteTags`, reset to `0` in
+`beforeEach`):
+
+- `a failing write on add leaves the draft intact, saves nothing, and shows a message`
+- `a failing write on remove leaves the chip and shows a message`
+
+**Verified against the pre-fix code.** Re-running both new tests against the
+original (pre-review) `TagEditor.tsx` (saved copy, restored after):
+
+```
+× TagEditor > a failing write on add leaves the draft intact, saves nothing, and shows a message
+  → expected '' to be 'thesis' // Object.is equality
+× TagEditor > a failing write on remove leaves the chip and shows a message
+  → the given combination of arguments (undefined and string) is invalid for this assertion
+    (container.querySelector('[role="alert"]') was null - the alert didn't exist yet)
+Tests  2 failed | 5 passed (7)
+```
+
+Both fail exactly on the reported bug (the draft clears / no alert exists),
+confirming the tests exercise the real defect rather than something
+incidental.
+
+**Mutation-checked**, each broken then confirmed red then reverted:
+
+- Reverted `addTag` to unconditionally `setDraft('')` (the original bug,
+  reconstructed by hand): `a failing write on add leaves the draft intact...`
+  → `expected '' to be 'thesis'`. 1 test red, as expected (this mutation
+  doesn't touch remove or the alert).
+- Commented out `setError(TAG_SAVE_FAILED)` in the catch branch: both new
+  tests went red —
+  `the given combination of arguments (undefined and string) is invalid for this assertion`
+  (no `[role="alert"]` node). 2/2 red.
+- (From the original implementation round, still valid: `aria-label`
+  template, the remove-filter argument, the blank-guard, and the
+  `onChanged()` call were each independently mutated and caught — see the
+  "Mutation-check notes" section above.)
+
+No mutation went undetected for this finding.
+
+### Finding 2 (Minor, included per coordinator) — no way to clear a filter that hides nothing
+
+`src/notes/TagFilterBar.tsx`: "Clear filter" rendered only inside
+`{showStatus && (...)}`, i.e. only when `hiddenCount > 0 ||
+activeNoteExempted`. Selecting a tag every note happens to carry left no
+Clear button at all.
+
+**What changed:** added `showClear = selected.length > 0`, independent of
+`showStatus`. The status `<div>` now renders when `showStatus || showClear`,
+and the "Clear filter" button renders whenever `showClear` is true,
+regardless of whether anything is actually hidden or exempted.
+
+**Test added** (`src/notes/TagFilterBar.test.tsx`):
+`offers Clear filter even when the selection hides nothing` — selects one
+tag with `hiddenCount={0}`, `activeNoteExempted={false}`, asserts the status
+text is absent but `Clear filter` is present and calls `onClear` on click.
+
+**Verified against the pre-fix code.** Re-running the new test with the
+render condition reverted to `{showStatus && (...)}`:
+
+```
+× TagFilterBar > offers Clear filter even when the selection hides nothing
+  → no button Clear filter; have ["seminar"]
+Tests  1 failed | 7 passed (8)
+```
+
+**Mutation-checked:**
+
+- Reverted the OR to `{showStatus && (...)}` (above): 1 test red (the new
+  one), as expected.
+- Changed `showClear = selected.length > 0` to `selected.length > 1`: both
+  "offers Clear filter even when the selection hides nothing" (1 tag
+  selected) and "states the hidden count and offers Clear filter" (1 tag
+  selected, but with `hiddenCount=3` so `showStatus` alone still renders the
+  block - the regression is specifically that the *button* disappears
+  because `showClear` itself is false) went red:
+  `no button Clear filter; have [...]`. 2/2 red.
+
+No mutation went undetected for this finding.
+
+## Gates, this round (`npm install` now complete in this worktree —
+the coordinator's fix, confirmed)
+
+- `npm test`: **1171 passed**, 97/97 files passed. True baseline per the
+  coordinator is 1168 across 97 files; this round added 3 tests
+  (1 in `TagFilterBar.test.tsx`, 2 in `TagEditor.test.tsx`) → 1171, exactly.
+- `npx tsc -b`: clean.
+- `npm run lint`: 0 errors, 5 pre-existing warnings, none in S5 files
+  (`src/triage/useTriageData.ts`, `src/utils/huionTransport.ts` — untouched
+  by S5).
+- `npm run build`: succeeds (1892 modules, no errors).
+
 ## Environment note (fixed, not a code issue)
 
 This worktree's branch (`worktree-agent-ace9c91069105757b`) was checked out
@@ -24,6 +145,11 @@ resolving through `PATH`/`npx`. `npx eslint .`, `npx tsc -b`, and
 `node_modules` the usual Node way) and are what I used as the equivalent
 gates throughout. This predates my work — I did not touch `scripts/run.mjs`,
 `package.json`, or `node_modules`.
+
+**Resolved as of Fix round 1**: the coordinator ran a real `npm install` in
+this worktree. `npm run lint` and `npm run build` now both run their literal
+commands successfully (see the "Gates, this round" section above) — this
+paragraph is kept as a record of the original gap, not a current issue.
 
 ## Files touched
 
