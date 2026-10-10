@@ -629,7 +629,11 @@ describe('SessionPanel', () => {
     expect(panel().textContent).toContain('0:00');
   });
 
-  it('says a session was interrupted and its recording lost', async () => {
+  it('says only that the note was interrupted, whether or not its session had a recording (K9)', async () => {
+    // K9: since audio persists incrementally (K4-K7), an interruption no
+    // longer loses a recording outright, so the old "its audio recording was
+    // lost" wording would be false. The sentence is gone regardless of
+    // whether the interrupted session actually had a recording.
     const session = await createSession({ title: 'Interrupted seminar', startedAt: 5_000 });
     await createNote({
       title: 'Interrupted seminar',
@@ -639,7 +643,6 @@ describe('SessionPanel', () => {
       startedAt: 5_000,
       sessionId: session.id,
     });
-    // Only claim the audio is lost when the session actually has a recording.
     await createRecording(
       { title: 'Interrupted seminar', durationMs: 1000, sessionId: session.id, startedAt: 5_000 },
       new Blob(['audio'], { type: 'audio/webm' }),
@@ -647,17 +650,16 @@ describe('SessionPanel', () => {
     render();
     await settle();
 
-    expect(panel().textContent).toContain('interrupted');
-    expect(panel().textContent).toContain('recording was lost');
+    expect(panel().textContent).toContain('"Interrupted seminar" was interrupted.');
+    expect(panel().textContent).not.toContain('recording was lost');
 
     await click(button('Dismiss'));
-    expect(panel().textContent).not.toContain('recording was lost');
+    expect(panel().textContent).not.toContain('was interrupted');
   });
 
-  it('says only that the note was interrupted when its session has no recording', async () => {
+  it('says the note was interrupted even with no recording at all', async () => {
     // A bare note the pen auto-started still gets its own session (A10), but
-    // never had a recording at all - claiming its audio was lost would be
-    // exactly the dishonesty A11's wording is meant to avoid.
+    // never had a recording at all. Same wording either way after K9.
     const session = await createSession({ title: 'Bare note', startedAt: 5_000 });
     await createNote({
       title: 'Bare note',
@@ -670,7 +672,7 @@ describe('SessionPanel', () => {
     render();
     await settle();
 
-    expect(panel().textContent).toContain('interrupted');
+    expect(panel().textContent).toContain('"Bare note" was interrupted.');
     expect(panel().textContent).not.toContain('recording was lost');
   });
 
@@ -704,7 +706,7 @@ describe('SessionPanel', () => {
     );
     render();
     await settle();
-    expect(panel().textContent).toContain('recording was lost');
+    expect(panel().textContent).toContain('was interrupted');
 
     // Starting a session changes `activeNoteId`: the effect must re-read the
     // notes list off that change, not just on mount. The new session's note
@@ -714,7 +716,7 @@ describe('SessionPanel', () => {
     await click(button('Start session'));
     await settle();
 
-    expect(panel().textContent).not.toContain('recording was lost');
+    expect(panel().textContent).not.toContain('was interrupted');
   });
 
   it('reads an interrupted session from the newest note only', () => {

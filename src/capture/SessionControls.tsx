@@ -11,7 +11,6 @@ import { Button } from '@/components/ui/button';
 import type { DeviceController } from '@/device/controller';
 import { useHuionDevice } from '@/device/TabletProvider';
 import { listNotes } from '@/storage/notes';
-import { listRecordingsBySession } from '@/storage/recordings';
 import type { NoteRecord } from '@/storage/types';
 
 function messageOf(error: unknown): string {
@@ -84,9 +83,7 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
   const [deviceError, setDeviceError] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [, setTick] = useState(0);
-  const [interrupted, setInterrupted] = useState<{ note: NoteRecord; hadAudio: boolean } | null>(
-    null,
-  );
+  const [interrupted, setInterrupted] = useState<{ note: NoteRecord } | null>(null);
   const [dismissedNoteId, setDismissedNoteId] = useState<string | null>(null);
 
   const startedAt = sessionStartedAtOf(capture);
@@ -117,20 +114,9 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
   useEffect(() => {
     let alive = true;
     void listNotes()
-      .then(async (notes) => {
+      .then((notes) => {
         const note = interruptedNoteOf(notes, capture.activeNoteId);
-        if (!note) {
-          if (alive) setInterrupted(null);
-          return;
-        }
-        // A bare note the pen auto-started never had a recording at all -
-        // telling someone they lost audio that never existed is exactly the
-        // dishonesty A11's wording is meant to avoid. Only claim it when this
-        // note's session actually has a recording on record.
-        const hadAudio = note.sessionId
-          ? (await listRecordingsBySession(note.sessionId)).length > 0
-          : false;
-        if (alive) setInterrupted({ note, hadAudio });
+        if (alive) setInterrupted(note ? { note } : null);
       })
       .catch((error: unknown) => {
         // Degrades the same way the `listNotes()` failure does: log and show
@@ -303,9 +289,7 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
 
       {interrupted && interrupted.note.id !== dismissedNoteId && (
         <span role="status" className="flex items-center gap-1 text-xs text-amber-600">
-          {interrupted.hadAudio
-            ? `"${interrupted.note.title}" was interrupted; its audio recording was lost.`
-            : `"${interrupted.note.title}" was interrupted.`}
+          {`"${interrupted.note.title}" was interrupted.`}
           <button
             type="button"
             className="underline"
