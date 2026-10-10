@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { useCaptureState } from '@/capture/CaptureContext';
 import { listNotes } from '@/storage/notes';
@@ -82,9 +82,14 @@ export function useNotesData(
     };
   }, [selectedNoteId, activeNoteId, activePageId, pageIndex, revision]);
 
+  // Stable identity (fix round 1, Important 5): NotesView subscribes to the
+  // naming queue with this as its callback, and a new function every render
+  // would mean resubscribing every render.
+  const reloadNotes = useCallback(() => setNotesRevision((n) => n + 1), []);
+
   return {
     notes,
     pages: loadedPages && loadedPages.noteId === selectedNoteId ? loadedPages.rows : [],
-    reloadNotes: () => setNotesRevision((n) => n + 1),
+    reloadNotes,
   };
 }

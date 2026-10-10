@@ -1,4 +1,4 @@
-import { useState, useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 
 import { useCaptureEngine, useCaptureState } from '@/capture/CaptureContext';
 import { sessionStartedAtOf } from '@/capture/engine';
@@ -39,9 +39,10 @@ export function NotesView(props?: NotesViewProps) {
     () => props?.queue ?? ensureTranscriptionQueue(engine),
   );
   // Also a module singleton, built once here alongside the transcription
-  // queue it subscribes to (K17's second trigger). Its return value is never
-  // read - starting it is a side effect, not a value this component uses.
-  useState(() => props?.namingQueue ?? ensureNamingQueue(engine, queue));
+  // queue it subscribes to (K17's second trigger).
+  const [namingQueue] = useState<NamingQueue>(
+    () => props?.namingQueue ?? ensureNamingQueue(engine, queue),
+  );
 
   // `null` means "no explicit choice yet" - resolved below to the active
   // note, and failing that the newest one, as soon as we know what those
@@ -53,6 +54,15 @@ export function NotesView(props?: NotesViewProps) {
   const [pageIndex, setPageIndex] = useState(0);
 
   const { notes, pages, reloadNotes } = useNotesData(selectedNoteId, queue);
+
+  // Fix round 1, Important 5: a generated title/summary (K17-K18) touches
+  // neither capture state nor the transcription queue - useNotesData's own
+  // two reload triggers - so without this the sidebar and toolbar kept
+  // showing the timestamp title until something unrelated (a page turn, a
+  // later transcript change) happened to re-trigger a read. This is the
+  // naming queue's `subscribe` declared for exactly this; nothing consumed
+  // it before.
+  useEffect(() => namingQueue.subscribe(() => reloadNotes()), [namingQueue, reloadNotes]);
 
   // Resolves the default selection and follows the active note. Both are
   // done here, during render (comparing against state, not a ref - refs

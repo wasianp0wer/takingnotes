@@ -9,7 +9,7 @@ import type { NamingQueue } from '@/notes/naming/queue';
 import { resetNamingQueueForTests } from '@/notes/naming/startNaming';
 import { NotesView } from '@/notes/NotesView';
 import { resetResumeLockForTests } from '@/notes/resumeLock';
-import { createNote, getNote } from '@/storage/notes';
+import { createNote, getNote, setNoteSummary } from '@/storage/notes';
 import { createPage, setPageTranscript } from '@/storage/pages';
 import type { NoteRecord, PageRecord, TranscriptStatus } from '@/storage/types';
 import { createFakeDeviceController } from '@/test/fakeDeviceController';
@@ -73,12 +73,24 @@ function createFakeQueue(): FakeQueue {
  * eligible - the same reasoning the existing `queue` prop already follows
  * for the transcription queue.
  */
-function createFakeNamingQueue(): NamingQueue {
+interface FakeNamingQueue extends NamingQueue {
+  /** Lets a test fire the same event a real queue's `subscribe` would, after writing to storage itself. */
+  emit: (noteId: string) => void;
+}
+
+function createFakeNamingQueue(): FakeNamingQueue {
+  const listeners = new Set<(noteId: string) => void>();
   return {
     start: vi.fn(async () => {}),
-    subscribe: () => () => {},
+    subscribe: (fn) => {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
     idle: vi.fn(async () => {}),
     stop: vi.fn(),
+    emit: (noteId) => {
+      for (const fn of listeners) fn(noteId);
+    },
   };
 }
 
@@ -531,6 +543,41 @@ describe('NotesView', () => {
         li.textContent?.includes('The French Revolution'),
       ),
     ).toBe(true);
+  });
+
+  it('refreshes the sidebar and toolbar when the naming queue announces a change (fix round 1, Important 5)', async () => {
+    // Before the fix, nothing subscribed to NamingQueue.subscribe, so the
+    // owner's third complaint (the timestamp title never changes) stayed
+    // true even once naming worked - the sidebar only refreshed on capture
+    // state or a transcript-status change, and naming finishes seconds
+    // after whichever of those triggered it.
+    const note = await seedNote({ title: 'Note 1', status: 'complete' });
+    const namingQueue = createFakeNamingQueue();
+    await act(async () => {
+      root.render(
+        <CaptureProvider engine={engine}>
+          <NotesView queue={queue} namingQueue={namingQueue} />
+        </CaptureProvider>,
+      );
+    });
+    await settle();
+    expect(container.textContent).toContain('Note 1');
+
+    // What the real naming queue does to storage, then the one signal it
+    // gives the rest of the app that something changed.
+    await setNoteSummary(note.id, {
+      summary: 'Covers the three laws of motion.',
+      model: 'gemma4:12b',
+      promptVersion: 'naming-v1',
+      title: 'Newton on motion',
+    });
+    await act(async () => {
+      namingQueue.emit(note.id);
+    });
+    await settle();
+
+    expect(container.textContent).toContain('Newton on motion');
+    expect(container.textContent).not.toContain('Note 1');
   });
 
   it('does not show the banner for a bare, pen-started note (an active note with no locked session)', async () => {
