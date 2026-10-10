@@ -163,3 +163,137 @@ preserved and the previously-active horizon left unchanged); and
   in case they haven't self-corrected the same way.
 - No functional concerns of my own. The one deliberately-reported mutation
   gap (#7 above) was closed before this report, not left open.
+
+---
+
+## Fix round 1 (coordinator review)
+
+Three findings, addressed in order.
+
+### Finding 1 (Important) — `Custom…` claimed a change it hadn't made, and could scold the user for merely opening it
+
+**Root cause**, confirmed by reading `src/triage/CalendarPanel.tsx` as shipped:
+every preset's `aria-pressed` was `!showCustom && agendaDays === d`, and
+`Custom…`'s was plain `showCustom`. So clicking `Custom…` immediately
+reported it as pressed (claiming a change that hadn't happened) and
+unpressed every preset (hiding which horizon was actually still active);
+and because `customDraft` started `''`, a blur with nothing typed ran
+`parseAgendaDays('')` → `null` → the error message, for having done nothing
+but open the control.
+
+**Fix:**
+- `isNamedAgendaPreset(days)` is now a module-level helper (one of the five
+  presets, or the `All` sentinel).
+- Each preset's and `All`'s `aria-pressed`/`variant` is now just
+  `agendaDays === d` / `agendaDays === AGENDA_ALL` — describes what's
+  *applied*, independent of whether the Custom… panel happens to be open.
+- `Custom…`'s `aria-pressed`/`variant` is now `!isNamedAgendaPreset(agendaDays)`
+  — "a custom value is applied," not "the panel is open."
+- `toggleCustom` now prefills `customDraft` from the current `agendaDays`
+  when it's finite, so a blur with nothing typed commits the same value
+  back as a no-op. (When the applied horizon is `All`, which is not finite,
+  there's no day count to prefill; the field opens empty in that one case,
+  documented as such in the code.)
+
+**Tests added** (`src/triage/CalendarPanel.test.tsx`, inside the existing
+`'agenda horizon control (K23, K25)'` block), written before the fix and
+confirmed red against the original code:
+
+1. `'opening Custom… with a preset applied leaves that preset pressed, Custom… unpressed, and shows no error'`
+   — red before the fix (`expected 'false' to be 'true'` on the `7 days`
+   button's `aria-pressed`), green after.
+2. `'opening Custom… and blurring without typing shows no error and leaves the applied horizon unchanged'`
+   — red before the fix (container text contained `'Enter a whole number of
+   days from 1 to 365.'` from merely opening and blurring), green after.
+3. `'after applying a custom value, Custom… is pressed and no preset is'`
+   — **passed even against the unfixed code.** Under the old logic this
+   exact sequence (open Custom…, type a value, blur) leaves `showCustom`
+   true the whole time, which happened to equal the correct answer by
+   coincidence, not because the old logic was right. Keeping this test is
+   still correct per the coordinator's requested list, but it is reported
+   here plainly as a test that does not, on its own, distinguish the bug
+   from the fix — see mutation C below.
+
+**Mutation-check**, each applied one at a time, verified red, then reverted:
+
+- **Mutation A** — reverted the preset `aria-pressed` back to
+  `!showCustom && agendaDays === d`.
+  `npx vitest run src/triage/CalendarPanel.test.tsx` →
+  `1 failed | 37 passed (38)`, the failure being test 1 above. Reverted,
+  confirmed `38 passed`.
+- **Mutation B** — removed the `toggleCustom` prefill.
+  `npx vitest run src/triage/CalendarPanel.test.tsx` →
+  `1 failed | 37 passed (38)`, the failure being test 2 above. Reverted,
+  confirmed `38 passed`.
+- **Mutation C** — reverted `Custom…`'s `aria-pressed` back to plain
+  `showCustom`.
+  `npx vitest run src/triage/CalendarPanel.test.tsx` →
+  `1 failed | 37 passed (38)`. **The failure was test 1, not test 3** —
+  confirming test 3 does not independently catch this mutation, exactly as
+  flagged above. The suite as a whole still catches it (via test 1), so the
+  fix is still proven correct, but test 3's own discriminating power for
+  this specific regression is nil; it is kept as a positive-state
+  regression test; test 1 is the one actually carrying the "pressed means
+  applied, not open" invariant. Reverted, confirmed `38 passed`.
+
+### Finding 2 (Important) — the K24 test couldn't fail and didn't exercise S2's own write path
+
+**Root cause:** `src/storage/settingKeys.test.ts`'s
+`'does not let a change to triage.agendaDays affect triage.lookaheadDays (K24)'`
+called `setSettingValue`/`getSettingValue` directly — it proved two keys in
+a key-value store don't collide (true of any two keys, and already implied
+by every other round-trip test in that file) and never invoked
+`CalendarPanel` at all. It would have passed unchanged even if
+`CalendarPanel` had been wired to write `'triage.lookaheadDays'` throughout.
+
+**Fix:** deleted that test from `settingKeys.test.ts` outright (per the
+coordinator's instruction: delete rather than leave a test whose name
+overstates what it checks). Added a replacement in
+`src/triage/CalendarPanel.test.tsx` that drives the real component:
+
+```ts
+it('driving the horizon control writes only triage.agendaDays, never triage.lookaheadDays (K24)', async () => {
+  const m = mount(<CalendarPanel events={EVENTS} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
+  await click(m.container.querySelector('[aria-label="14 days"]')!);
+  await flush();
+  expect(await getSettingValue('triage.agendaDays')).toBe(14);
+  expect(await getSettingValue('triage.lookaheadDays')).toBe(SETTING_DEFAULTS['triage.lookaheadDays']);
+  m.unmount();
+});
+```
+
+This clicks the real `14 days` button and asserts both keys through the
+component's actual write path, not a direct `setSettingValue` call.
+
+**Mutation-check:** changed `applyAgendaDays`'s
+`setSettingValue('triage.agendaDays', days)` to
+`setSettingValue('triage.lookaheadDays', days)` — i.e. simulated exactly
+the bug K24 exists to prevent (S2 writing the wrong key).
+`npx vitest run src/triage/CalendarPanel.test.tsx -t "writes only triage.agendaDays"`
+→ `1 failed | 38 skipped (39)`:
+`expected 7 to be 14` on the `triage.agendaDays` assertion (the click no
+longer wrote there at all). Reverted, confirmed the full file passes
+(39 tests).
+
+### Finding 3 (Minor) — inaccurate assumption wording in the spec
+
+`docs/features/s2-spec.md`'s S2-A5 claimed "no file under `src/` uses a
+`dark:` variant," which is false — `src/components/ui/button.tsx`,
+`input.tsx`, `select.tsx` and `tabs.tsx` all carry `dark:` classes (shadcn
+primitives). Verified with
+`grep -rl "dark:" src/components/ui/*.tsx` and confirmed the practical
+conclusion still holds by checking there is no `.dark` CSS block
+(`grep -n "\.dark" src/index.css` — no match) and no theme-toggle mechanism
+anywhere under `src/` (`grep -rln "data-theme\|ThemeProvider\|toggleDark\|classList.add('dark')\|classList.toggle('dark')" src` —
+no match), so none of those `dark:` variants is ever actually active.
+Reworded S2-A5 to state this accurately rather than claim the variants
+don't exist.
+
+### Gates after this round
+
+`npm test`: **93 files / 1186 tests passed** (1183 before this round + 3
+new `CalendarPanel` tests from Finding 1 + 1 new `CalendarPanel` test from
+Finding 2 − 1 deleted `settingKeys` test from Finding 2 = net +3).
+`npx tsc -b`: clean. `npm run lint`: 0 errors, the same 5 pre-existing
+warnings in files this unit never touches (`useTriageData.ts`,
+`huionTransport.ts`). `npm run build`: succeeds.

@@ -148,6 +148,8 @@ each file's own test file.
   clickable at once rather than hidden in a dropdown.
 - **S2-A5** Colour bands use Tailwind's stock palette (`text-red-600`,
   `text-orange-600`, `text-amber-600`, `text-lime-600`, `text-green-600`) —
-  no `dark:` variant is added because no file under `src/` uses one today
-  (grepped before writing this), so introducing the first one is out of
-  scope for this unit.
+  no `dark:` variant is added. Some `src/components/ui/*.tsx` shadcn
+  primitives do carry `dark:` classes, but the app defines no `.dark` block
+  and mounts no theme toggle anywhere under `src/`, so none of those
+  variants is ever active; adding the first *live* dark-mode styling is out
+  of scope for this unit.

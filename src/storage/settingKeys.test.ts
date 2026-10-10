@@ -47,13 +47,6 @@ describe('setting keys', () => {
     expect(await getSettingValue('triage.agendaDays')).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it('does not let a change to triage.agendaDays affect triage.lookaheadDays (K24)', async () => {
-    // The two keys must stay fully independent: S2 must never read or write
-    // triage.lookaheadDays.
-    await setSettingValue('triage.agendaDays', 30);
-    expect(await getSettingValue('triage.lookaheadDays')).toBe(7);
-  });
-
   it('round-trips a stored value', async () => {
     await setSettingValue('ollama.baseUrl', 'http://127.0.0.1:11434');
     expect(await getSettingValue('ollama.baseUrl')).toBe('http://127.0.0.1:11434');

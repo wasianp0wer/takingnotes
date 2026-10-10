@@ -25,6 +25,11 @@ const AGENDA_PRESETS = [3, 7, 14, 30] as const;
 /** K23: the sentinel stored for the "All" preset - see `settingKeys.ts`. */
 const AGENDA_ALL = Number.POSITIVE_INFINITY;
 
+/** Whether `days` is one of the five named choices (a preset, or "All"). */
+function isNamedAgendaPreset(days: number): boolean {
+  return (AGENDA_PRESETS as readonly number[]).includes(days) || days === AGENDA_ALL;
+}
+
 /** The upper bound the K23 custom horizon field accepts. */
 export const MAX_CUSTOM_AGENDA_DAYS = 365;
 
@@ -101,8 +106,7 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
     void getSettingValue('triage.agendaDays').then((stored) => {
       if (!active || interactedRef.current) return;
       setAgendaDaysState(stored);
-      const isNamedPreset = (AGENDA_PRESETS as readonly number[]).includes(stored) || stored === AGENDA_ALL;
-      if (!isNamedPreset) {
+      if (!isNamedAgendaPreset(stored)) {
         setShowCustom(true);
         setCustomDraft(Number.isFinite(stored) ? String(stored) : '');
       }
@@ -127,6 +131,12 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
   const toggleCustom = () => {
     setShowCustom(true);
     setCustomError(null);
+    // Prefill from whatever is actually applied, so a blur without typing
+    // commits the same value right back - a no-op, not an error. "All" has
+    // no finite day count to prefill with, so the field opens empty there.
+    if (Number.isFinite(agendaDays)) {
+      setCustomDraft(String(agendaDays));
+    }
   };
 
   const commitCustom = () => {
@@ -262,8 +272,8 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
             key={d}
             type="button"
             size="sm"
-            variant={!showCustom && agendaDays === d ? 'default' : 'outline'}
-            aria-pressed={!showCustom && agendaDays === d}
+            variant={agendaDays === d ? 'default' : 'outline'}
+            aria-pressed={agendaDays === d}
             aria-label={`${d} days`}
             onClick={() => selectPreset(d)}
           >
@@ -273,8 +283,8 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
         <Button
           type="button"
           size="sm"
-          variant={!showCustom && agendaDays === AGENDA_ALL ? 'default' : 'outline'}
-          aria-pressed={!showCustom && agendaDays === AGENDA_ALL}
+          variant={agendaDays === AGENDA_ALL ? 'default' : 'outline'}
+          aria-pressed={agendaDays === AGENDA_ALL}
           aria-label="All"
           onClick={() => selectPreset(AGENDA_ALL)}
         >
@@ -283,8 +293,10 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
         <Button
           type="button"
           size="sm"
-          variant={showCustom ? 'default' : 'outline'}
-          aria-pressed={showCustom}
+          // Pressed means "a custom value is applied" (K23), not "the panel
+          // is open" - opening the control must never itself claim a change.
+          variant={!isNamedAgendaPreset(agendaDays) ? 'default' : 'outline'}
+          aria-pressed={!isNamedAgendaPreset(agendaDays)}
           aria-label="Custom…"
           onClick={toggleCustom}
         >

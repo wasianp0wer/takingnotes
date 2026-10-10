@@ -1,7 +1,7 @@
 import { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getSettingValue } from '@/storage/settingKeys';
+import { getSettingValue, SETTING_DEFAULTS } from '@/storage/settingKeys';
 import type { CalendarEventRecord } from '@/storage/types';
 import { CalendarPanel, candidateDaysForAgenda, parseAgendaDays } from '@/triage/CalendarPanel';
 import { addLocalDays, startOfLocalDay } from '@/triage/dates';
@@ -372,6 +372,54 @@ describe('CalendarPanel', () => {
 
       blur(input);
       expect(m.container.textContent).toContain('Enter a whole number of days from 1 to 365.');
+      m.unmount();
+    });
+
+    it('opening Custom… with a preset applied leaves that preset pressed, Custom… unpressed, and shows no error', async () => {
+      const m = mount(<CalendarPanel events={EVENTS} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
+      await click(m.container.querySelector('[aria-label="Custom…"]')!);
+
+      expect(m.container.querySelector('[aria-label="7 days"]')!.getAttribute('aria-pressed')).toBe('true');
+      expect(m.container.querySelector('[aria-label="Custom…"]')!.getAttribute('aria-pressed')).toBe('false');
+      expect(m.container.textContent).not.toContain('Enter a whole number');
+      m.unmount();
+    });
+
+    it('opening Custom… and blurring without typing shows no error and leaves the applied horizon unchanged', async () => {
+      const m = mount(
+        <CalendarPanel events={[...EVENTS, DAY10_EVENT]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />,
+      );
+      await click(m.container.querySelector('[aria-label="Custom…"]')!);
+      blur(m.container.querySelector('[aria-label="Custom agenda days"]')!);
+
+      expect(m.container.textContent).not.toContain('Enter a whole number');
+      // The default (7) is still the applied horizon: the day-10 event stays hidden.
+      expect(m.container.querySelector('section[aria-label="Agenda"]')!.textContent).not.toContain('Day ten workshop');
+      m.unmount();
+    });
+
+    it('after applying a custom value, Custom… is pressed and no preset is', async () => {
+      const m = mount(<CalendarPanel events={EVENTS} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
+      await click(m.container.querySelector('[aria-label="Custom…"]')!);
+      const input = m.container.querySelector('[aria-label="Custom agenda days"]') as HTMLInputElement;
+      typeInto(input, '45');
+      blur(input);
+
+      expect(m.container.querySelector('[aria-label="Custom…"]')!.getAttribute('aria-pressed')).toBe('true');
+      for (const label of PRESET_LABELS) {
+        expect(m.container.querySelector(`[aria-label="${label}"]`)!.getAttribute('aria-pressed')).toBe('false');
+      }
+      m.unmount();
+    });
+
+    it('driving the horizon control writes only triage.agendaDays, never triage.lookaheadDays (K24)', async () => {
+      const m = mount(<CalendarPanel events={EVENTS} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
+
+      await click(m.container.querySelector('[aria-label="14 days"]')!);
+      await flush();
+
+      expect(await getSettingValue('triage.agendaDays')).toBe(14);
+      expect(await getSettingValue('triage.lookaheadDays')).toBe(SETTING_DEFAULTS['triage.lookaheadDays']);
       m.unmount();
     });
 
