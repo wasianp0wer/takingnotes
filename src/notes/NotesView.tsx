@@ -8,8 +8,11 @@ import { GapPanel } from '@/notes/GapPanel';
 import { InkCanvas } from '@/notes/InkCanvas';
 import { NoteList } from '@/notes/NoteList';
 import { NoteToolbar } from '@/notes/NoteToolbar';
+import { TagEditor } from '@/notes/TagEditor';
+import { TagFilterBar } from '@/notes/TagFilterBar';
 import { TranscriptPanel } from '@/notes/TranscriptPanel';
 import { useNotesData } from '@/notes/useNotesData';
+import { tagsOf } from '@/storage/notes';
 
 export interface NotesViewProps {
   /** Tests only - a real mount builds its own via `ensureTranscriptionQueue`. */
@@ -39,7 +42,7 @@ export function NotesView(props?: NotesViewProps) {
   // independently otherwise.
   const [pageIndex, setPageIndex] = useState(0);
 
-  const { notes, pages } = useNotesData(selectedNoteId, queue);
+  const { notes, visibleNotes, pages, tagFilter, refresh } = useNotesData(selectedNoteId, queue);
 
   // Resolves the default selection and follows the active note. Both are
   // done here, during render (comparing against state, not a ref - refs
@@ -101,15 +104,32 @@ export function NotesView(props?: NotesViewProps) {
   return (
     <div className="flex h-full">
       <NoteList
-        notes={notes}
+        notes={visibleNotes}
         selectedNoteId={selectedNoteId}
         activeNoteId={state.activeNoteId}
         onSelect={selectNote}
+        filter={
+          <TagFilterBar
+            vocabulary={tagFilter.vocabulary}
+            selected={tagFilter.selected}
+            mode={tagFilter.mode}
+            hiddenCount={tagFilter.hiddenCount}
+            activeNoteExempted={tagFilter.activeNoteExempted}
+            onToggleTag={tagFilter.toggleTag}
+            onModeChange={tagFilter.setMode}
+            onClear={tagFilter.clear}
+          />
+        }
       />
 
       <div className="flex flex-1 flex-col">
         <NoteToolbar
           noteTitle={selectedNote?.title ?? null}
+          meta={
+            selectedNote ? (
+              <TagEditor noteId={selectedNote.id} tags={tagsOf(selectedNote)} onChanged={refresh} />
+            ) : undefined
+          }
           sessionLocked={sessionLocked}
           hasActiveNote={state.activeNoteId !== null}
           onNewNote={() => void engine.startNote()}
