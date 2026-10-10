@@ -427,3 +427,103 @@ One, found and fixed within this round rather than shipped: RecordingsView's
 was left undetected in the final, committed test suite — every mutation
 listed above was re-run against the final test files after any fix and
 confirmed caught.
+
+---
+
+## Fix round 2
+
+One finding. Baseline going in: 1447 tests across 114 files, all four
+gates green. Baseline coming out: **1451 tests across 114 files**, all
+four gates green (`npx tsc -b` clean; `npm run lint` 0 errors, same 5
+pre-existing warnings; `npm run build` succeeds; `npm test` 1451 passing).
+
+### Finding (Important) — nothing proved `AppShell` issues a new token per click
+
+The coordinator froze `AppShell`'s note-path token bump
+(`navigationTokenRef.current += 1;` → no-op) and all 7 `AppShell` tests at
+the time still passed: the contract was tested on `NotesView`'s side (it
+re-applies when the token changes) but never on `AppShell`'s side (that
+the token actually changes).
+
+**I tried the literal fix first, then confirmed empirically why it doesn't
+close the gap, before reaching for the fallback.** Added a round-trip test
+— click a Search hit, navigate away to a third tab, navigate back to
+Search, retype the query, click the identical hit a second time, assert
+the second click still lands on the right note+page. It passes. I then
+re-ran the coordinator's exact mutation (froze the note-path bump) against
+that new test:
+
+```
+$ npx vitest run src/app/AppShell.test.tsx
+✓ 8 tests passed
+```
+
+**Still green — the mutation is invisible to any test that goes through a
+real tab round-trip.** Both `NotesView` and `RecordingsView` are remounted
+fresh by Radix's `TabsContent` every time `AppShell` switches back to
+their tab (the same fact fix round 1's own `NotesView` comment relies on
+to show its two selection-resolution branches never fire on the same
+render). A fresh mount's `appliedExternalToken` starts at `null` regardless
+of what `external.token` is, so it re-applies *any* defined `external`
+prop on arrival — including a frozen, repeated token — and a second
+delivery of the identical note+page produces identical rendered output
+either way. The downstream view's own "already applied" bookkeeping is
+wiped by the remount before a second delivery, frozen or not, ever reaches
+it. This is exactly the "say so" case the coordinator's ask anticipated,
+so I did not keep the round-trip test as the safety net (it is kept anyway,
+as a real regression guard for the end-to-end feature - it just does not,
+and structurally cannot, prove this specific contract) and instead pulled
+the token bump itself out into a directly-testable seam.
+
+**The fix:** `src/app/AppShell.tsx` gained `createNavigationTargetFactory`
+(exported), a plain closure holding one `token` counter with two methods,
+`.note(noteId, pageIndex)` and `.recording(recordingId, startMs?)`, each
+bumping the shared counter and returning the tagged target object.
+`AppShell`'s `openNote`/`openRecording` were reduced to one line each,
+calling `navigationTargets.note(...)`/`navigationTargets.recording(...)` -
+the factory instance is built once via `useState(createNavigationTargetFactory)`.
+This is the literal code `openNote`/`openRecording` run; testing the
+factory directly tests whether `AppShell` would ever hand out a repeated
+token, independent of whether `NotesView`/`RecordingsView` happen to mask
+the consequence today.
+
+**Tests added**, `src/app/AppShell.test.tsx`:
+- *clicking the same Search hit a second time, after navigating away and
+  back, still lands on the right note and page* — the round-trip test
+  described above. Kept as a feature-level regression guard; does not by
+  itself prove token monotonicity (see above).
+- `describe('createNavigationTargetFactory (Fix round 2)')`, three tests:
+  - *bumps the token on every call on the note path, never repeating it -
+    even for the identical note+page.*
+  - *bumps the token on every call on the recording path, never repeating
+    it - even for the identical recording.*
+  - *shares one monotonic counter across both paths, so no two targets of
+    either kind ever collide* — four calls alternating `.note`/`.recording`,
+    asserting all four tokens are distinct.
+
+**Mutation 1 — froze the note-path bump** (removed `token += 1;` from
+`.note`):
+```
+$ npx vitest run src/app/AppShell.test.tsx
+× bumps the token on every call on the note path, never repeating it - even for the identical note+page
+  (expected +0 not to be +0)
+× shares one monotonic counter across both paths, so no two targets of either kind ever collide
+  (expected 3 to be 4)
+2 failed | 9 passed
+```
+Reverted; re-ran green (11/11).
+
+**Mutation 2 — froze the recording-path bump** (removed `token += 1;`
+from `.recording`):
+```
+$ npx vitest run src/app/AppShell.test.tsx
+× bumps the token on every call on the recording path, never repeating it - even for the identical recording
+  (expected +0 not to be +0)
+× shares one monotonic counter across both paths, so no two targets of either kind ever collide
+  (expected 2 to be 4)
+2 failed | 9 passed
+```
+Reverted; re-ran green (11/11).
+
+Both bumps are now caught independently and together. No mutation went
+undetected this round.

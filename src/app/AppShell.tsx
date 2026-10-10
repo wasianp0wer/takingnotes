@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { DeviceStatus } from '@/app/DeviceStatus';
 import { SettingsDialog } from '@/app/SettingsDialog';
@@ -44,6 +44,42 @@ interface RecordingNavigationTarget {
 }
 type NavigationTarget = NoteNavigationTarget | RecordingNavigationTarget;
 
+/**
+ * Fix round 2: the token bump itself, pulled out of `AppShell`'s render
+ * body into a plain, directly-testable function. The coordinator's review
+ * found that nothing proved `AppShell` actually issues a fresh token per
+ * click — the contract was tested on `NotesView`'s side (it re-applies
+ * when the token changes) but not on this side (that the token really
+ * does change). A click-through test cannot close that gap here: both
+ * `NotesView` and `RecordingsView` are remounted fresh by Radix's
+ * `TabsContent` every time `AppShell` switches back to their tab (the same
+ * fact fix round 1 relied on to show the two render branches there never
+ * fight each other), so a *fresh* mount re-applies an `external` prop
+ * regardless of its token - a frozen token is invisible to any test that
+ * goes through a real tab round-trip, since the downstream view's own
+ * "already applied" bookkeeping is wiped by the remount before the second
+ * delivery ever reaches it. Confirmed empirically, not just reasoned:
+ * freezing the bump left a full click-away-and-back `AppShell` test green.
+ * This factory is the seam that makes the bump itself assertable: `.note`/
+ * `.recording` are literally the two bodies `openNote`/`openRecording`
+ * below call, so testing this directly tests whether `AppShell` would
+ * ever hand out a repeated token, independent of whether anything
+ * downstream happens to mask the consequence today.
+ */
+export function createNavigationTargetFactory() {
+  let token = 0;
+  return {
+    note(noteId: string, pageIndex: number): NoteNavigationTarget {
+      token += 1;
+      return { kind: 'note', token, noteId, pageIndex };
+    },
+    recording(recordingId: string, startMs?: number): RecordingNavigationTarget {
+      token += 1;
+      return { kind: 'recording', token, recordingId, startMs };
+    },
+  };
+}
+
 function useLegacyMigration(): void {
   useEffect(() => {
     if (migrationStarted) return;
@@ -64,7 +100,9 @@ export function AppShell() {
   // applied, so a later, unrelated switch to that tab (e.g. clicking "Notes"
   // directly) never re-triggers a stale request.
   const [navigationTarget, setNavigationTarget] = useState<NavigationTarget | null>(null);
-  const navigationTokenRef = useRef(0);
+  // Built once; see `createNavigationTargetFactory`'s own comment for why
+  // the bump lives there rather than inline here.
+  const [navigationTargets] = useState(createNavigationTargetFactory);
 
   // Mounted exactly once, here: it owns the controller's capture lifecycle
   // (page-turn polling, liveness, reconnect), and a second copy would fight it.
@@ -72,14 +110,12 @@ export function AppShell() {
   useLegacyMigration();
 
   function openNote(noteId: string, pageIndex: number): void {
-    navigationTokenRef.current += 1;
-    setNavigationTarget({ kind: 'note', token: navigationTokenRef.current, noteId, pageIndex });
+    setNavigationTarget(navigationTargets.note(noteId, pageIndex));
     setTab('notes');
   }
 
   function openRecording(recordingId: string, startMs?: number): void {
-    navigationTokenRef.current += 1;
-    setNavigationTarget({ kind: 'recording', token: navigationTokenRef.current, recordingId, startMs });
+    setNavigationTarget(navigationTargets.recording(recordingId, startMs));
     setTab('recordings');
   }
 

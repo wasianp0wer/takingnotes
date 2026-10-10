@@ -2,7 +2,7 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { AppShell } from '@/app/AppShell';
+import { AppShell, createNavigationTargetFactory } from '@/app/AppShell';
 import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine } from '@/capture/engine';
 import { TabletProvider } from '@/device/TabletProvider';
@@ -205,6 +205,44 @@ describe('AppShell', () => {
     expect(container.textContent).toContain('Page 2 of 2');
   });
 
+  it('clicking the same Search hit a second time, after navigating away and back, still lands on the right note and page', async () => {
+    await createNote({ title: 'Other Note', deviceId: 'd', pageBaseline: 0 });
+    const target = await createNote({ title: 'Target Note', deviceId: 'd', pageBaseline: 0 });
+    await createPage({ noteId: target.id, pageIndex: 0, devicePageNum: 1, source: 'live', strokes: [] });
+    const page1 = await createPage({
+      noteId: target.id,
+      pageIndex: 1,
+      devicePageNum: 2,
+      source: 'live',
+      strokes: [],
+    });
+    await setPageTranscript(page1.id, {
+      markdown: 'a very distinctive search phrase',
+      model: 'gemma4',
+      promptVersion: 'gemma-v1',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
+    renderShell();
+
+    await clickTab('Search');
+    await typeQuery('distinctive search phrase');
+    await click(buttonByText('Open'));
+    expect(selectedSidebarTitle()).toBe('Target Note');
+
+    // Navigate away from Notes entirely (not just back to Search), then
+    // back to Search, and click the identical hit a second time.
+    await clickTab('Triage');
+    await clickTab('Search');
+    await typeQuery('distinctive search phrase');
+    await click(buttonByText('Open'));
+
+    expect(tab('Notes').getAttribute('data-state')).toBe('active');
+    expect(selectedSidebarTitle()).toBe('Target Note');
+    expect(container.textContent).toContain('Page 2 of 2');
+  });
+
   it("a Search hit's Open button for a recording switches to Recordings with that recording selected (Fix round 1, Finding 1)", async () => {
     await createRecording({ title: 'Other Recording', durationMs: 1000 }, new Blob(['a']));
     const target = await createRecording(
@@ -244,5 +282,41 @@ describe('AppShell', () => {
     // two overlapping runs would both find the "migrated" setting unset and
     // import the library twice.
     expect(migrate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createNavigationTargetFactory (Fix round 2)', () => {
+  // Why this, rather than a click-through `AppShell` test: both `NotesView`
+  // and `RecordingsView` are remounted fresh by Radix every time `AppShell`
+  // switches back to their tab (see `createNavigationTargetFactory`'s own
+  // comment in AppShell.tsx), so a round-trip test cannot tell a frozen
+  // token from a working one - confirmed empirically while building this
+  // fix: freezing the bump left a full "navigate away, come back, click the
+  // same hit again" AppShell test green. This factory is the literal body
+  // `openNote`/`openRecording` call, so testing it directly tests whether
+  // AppShell would ever hand out a repeated token.
+  it('bumps the token on every call on the note path, never repeating it - even for the identical note+page', () => {
+    const factory = createNavigationTargetFactory();
+    const first = factory.note('note-1', 0);
+    const second = factory.note('note-1', 0);
+    expect(second.token).not.toBe(first.token);
+  });
+
+  it('bumps the token on every call on the recording path, never repeating it - even for the identical recording', () => {
+    const factory = createNavigationTargetFactory();
+    const first = factory.recording('rec-1');
+    const second = factory.recording('rec-1');
+    expect(second.token).not.toBe(first.token);
+  });
+
+  it('shares one monotonic counter across both paths, so no two targets of either kind ever collide', () => {
+    const factory = createNavigationTargetFactory();
+    const tokens = [
+      factory.note('a', 0).token,
+      factory.recording('b').token,
+      factory.note('a', 0).token,
+      factory.recording('b').token,
+    ];
+    expect(new Set(tokens).size).toBe(tokens.length);
   });
 });
