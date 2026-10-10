@@ -6,7 +6,7 @@ import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine } from '@/capture/engine';
 import type { LiveCaptureEngine } from '@/capture/engine';
 import { NotesView } from '@/notes/NotesView';
-import { createNote } from '@/storage/notes';
+import { createNote, setNoteTags } from '@/storage/notes';
 import { createPage, setPageTranscript } from '@/storage/pages';
 import type { NoteRecord, PageRecord, TranscriptStatus } from '@/storage/types';
 import { createFakeDeviceController } from '@/test/fakeDeviceController';
@@ -133,6 +133,23 @@ function buttonByLabel(label: string): HTMLButtonElement {
 async function click(el: HTMLElement): Promise<void> {
   await act(async () => {
     el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await settle();
+}
+
+// React patches `HTMLInputElement.prototype.value` to track the value it last
+// rendered; setting `el.value` directly goes through that patched setter, so
+// React sees no change and never fires `onChange`. The native setter (grabbed
+// before any patching) is what's needed to simulate real typing.
+const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+  window.HTMLInputElement.prototype,
+  'value',
+)!.set!;
+
+async function type(el: HTMLInputElement, value: string): Promise<void> {
+  await act(async () => {
+    nativeInputValueSetter.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
   });
   await settle();
 }
@@ -323,5 +340,38 @@ describe('NotesView', () => {
     await settle();
 
     expect(buttonByText('New note').disabled).toBe(true);
+  });
+
+  it('filters the sidebar by tag and keeps the active note visible (⚑)', async () => {
+    const tagged = await seedNote({ title: 'Tagged seminar' });
+    await setNoteTags(tagged.id, ['seminar']);
+    await seedNote({ title: 'Untagged note' });
+
+    await render();
+    await click(buttonByText('New note')); // starts and activates a fresh, untagged note
+
+    await click(buttonByText('seminar')); // the filter chip
+
+    expect(container.textContent).toContain('Tagged seminar');
+    expect(container.textContent).not.toContain('Untagged note');
+    // The just-started note is untagged and would not match "seminar", but
+    // it is the active note, so its row must still be present (⚑).
+    expect(container.textContent).toContain('Note '); // engine default title prefix
+    expect(container.textContent).toContain("doesn't match this filter");
+  });
+
+  it('tagging a note through the toolbar updates the sidebar vocabulary', async () => {
+    await seedNote({ title: 'Needs a tag' });
+    await render();
+    await click(buttonByText('Needs a tag'));
+
+    const tagInput = container.querySelector<HTMLInputElement>('input[aria-label="Add a tag"]');
+    if (!tagInput) throw new Error('no tag input');
+    await type(tagInput, 'thesis');
+    await click(buttonByText('Add tag'));
+
+    expect(container.textContent).toContain('thesis');
+    // The filter bar's chip for the new tag.
+    expect(buttonByText('thesis')).toBeTruthy();
   });
 });
