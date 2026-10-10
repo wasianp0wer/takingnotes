@@ -11,9 +11,15 @@ import { getSmartSearchDeps } from '@/search/startSearch';
 export interface SearchViewProps {
   /** Tests only - a real mount builds its own via `getSmartSearchDeps`. */
   smartSearchDeps?: SmartSearchDeps;
-  /** From `AppShell` - best-effort cross-tab navigation (S6-A6). */
-  onOpenNotes?: () => void;
-  onOpenRecordings?: () => void;
+  /**
+   * From `AppShell` (Fix round 1, Finding 1): switches to the Notes tab and
+   * selects this note + page there. `pageIndex` is `0` for a hit with no
+   * specific page (a note-title/summary Find hit, or any smart-search hit -
+   * neither identifies a single page).
+   */
+  onOpenNotes?: (noteId: string, pageIndex: number) => void;
+  /** Switches to the Recordings tab and selects this recording. `startMs` names the segment to look for, when known. */
+  onOpenRecordings?: (recordingId: string, startMs?: number) => void;
 }
 
 const SOURCE_LABEL: Record<FindHit['source'], string> = {
@@ -78,8 +84,15 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
   }
 
   function openFor(hit: FindHit) {
-    if (hit.source === 'audio-segment') onOpenRecordings?.();
-    else onOpenNotes?.();
+    if (hit.source === 'audio-segment') {
+      // Only ever `null` when the recording has no owning note (A10) -
+      // `recordingId` itself is always set on an 'audio-segment' hit.
+      if (hit.recordingId) onOpenRecordings?.(hit.recordingId, hit.startMs);
+      return;
+    }
+    // Always set for 'note-title'/'note-summary'/'page-text' hits - they
+    // are built from `corpus.notes` directly (see `find.ts`).
+    if (hit.noteId) onOpenNotes?.(hit.noteId, hit.pageIndex ?? 0);
   }
 
   if (corpus === null) return null;
@@ -169,7 +182,7 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
                         <li key={hit.noteId} className="text-sm">
                           <span className="font-medium">{hit.noteTitle}</span>
                           <p className="text-muted-foreground">{hit.reason}</p>
-                          <Button size="sm" variant="ghost" onClick={() => onOpenNotes?.()}>
+                          <Button size="sm" variant="ghost" onClick={() => onOpenNotes?.(hit.noteId, 0)}>
                             Open
                           </Button>
                         </li>

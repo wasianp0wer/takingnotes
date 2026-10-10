@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFakeTextGenerator } from '@/search/fakeTextGenerator';
 import { SearchView } from '@/search/SearchView';
 import { createNote } from '@/storage/notes';
+import { createPage, setPageTranscript } from '@/storage/pages';
 import { createRecording, finalizeRecording, setRecordingTranscript } from '@/storage/recordings';
 import { resetDatabase } from '@/test/resetDb';
 
@@ -200,16 +201,43 @@ describe('SearchView', () => {
     expect(container.textContent).toContain('1 note could not be checked');
   });
 
-  it("a Find hit's Open button calls onOpenNotes for a note hit", async () => {
-    await createNote({ title: 'Unique Title', deviceId: 'd', pageBaseline: 0 });
+  it("a Find hit's Open button calls onOpenNotes with the note id and page for a note hit", async () => {
+    const note = await createNote({ title: 'Unique Title', deviceId: 'd', pageBaseline: 0 });
+    await createPage({ noteId: note.id, pageIndex: 0, devicePageNum: 1, source: 'live', strokes: [] });
+    const page1 = await createPage({
+      noteId: note.id,
+      pageIndex: 1,
+      devicePageNum: 2,
+      source: 'live',
+      strokes: [],
+    });
+    await setPageTranscript(page1.id, {
+      markdown: 'a distinctive phrase',
+      model: 'gemma4',
+      promptVersion: 'gemma-v1',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
     const onOpenNotes = vi.fn();
     const onOpenRecordings = vi.fn();
     render({ onOpenNotes, onOpenRecordings });
     await settle();
+    await type('distinctive phrase');
+    await click(buttonByText('Open'));
+    // Page 1 (pageIndex 1), not page 0 - the hit names the actual matching page.
+    expect(onOpenNotes).toHaveBeenCalledExactlyOnceWith(note.id, 1);
+    expect(onOpenRecordings).not.toHaveBeenCalled();
+  });
+
+  it("a Find hit's Open button defaults to page 0 for a note-title hit, which names no specific page", async () => {
+    const note = await createNote({ title: 'Unique Title', deviceId: 'd', pageBaseline: 0 });
+    const onOpenNotes = vi.fn();
+    render({ onOpenNotes });
+    await settle();
     await type('unique');
     await click(buttonByText('Open'));
-    expect(onOpenNotes).toHaveBeenCalledTimes(1);
-    expect(onOpenRecordings).not.toHaveBeenCalled();
+    expect(onOpenNotes).toHaveBeenCalledExactlyOnceWith(note.id, 0);
   });
 
   it('a second press while a smart search run is in flight does not start a second run', async () => {
@@ -239,8 +267,11 @@ describe('SearchView', () => {
     );
     await finalizeRecording(recording.id, new Blob(['a']), { endedAt: 2, durationMs: 1000 });
     await setRecordingTranscript(recording.id, {
-      text: 'mentions a very distinctive keyword here',
-      segments: [{ startMs: 0, endMs: 1000, text: 'mentions a very distinctive keyword here' }],
+      text: 'no match here. mentions a very distinctive keyword here',
+      segments: [
+        { startMs: 0, endMs: 1000, text: 'no match here' },
+        { startMs: 5000, endMs: 6000, text: 'mentions a very distinctive keyword here' },
+      ],
       model: 'whisper',
       language: 'en',
       status: 'done',
@@ -254,7 +285,8 @@ describe('SearchView', () => {
     await type('distinctive');
     expect(container.textContent).toContain('Lecture audio');
     await click(buttonByText('Open'));
-    expect(onOpenRecordings).toHaveBeenCalledTimes(1);
+    // The matching segment's own startMs (5000), not the recording's first.
+    expect(onOpenRecordings).toHaveBeenCalledExactlyOnceWith(recording.id, 5000);
     expect(onOpenNotes).not.toHaveBeenCalled();
   });
 });

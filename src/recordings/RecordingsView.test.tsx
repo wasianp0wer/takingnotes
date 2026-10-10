@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { TranscriptionQueue, TranscriptionQueueState } from '@/audio/transcriptionQueue';
 import { RecordingsView } from '@/recordings/RecordingsView';
+import type { RecordingsExternalSelection } from '@/recordings/RecordingsView';
 import { createRecording, listFinishedRecordings, setRecordingTranscript } from '@/storage/recordings';
 import type { RecordingRecord } from '@/storage/types';
 import { resetDatabase } from '@/test/resetDb';
@@ -90,10 +91,20 @@ function createFakeQueue(initial: Partial<TranscriptionQueueState> = {}): FakeQu
   };
 }
 
-function render(queue: TranscriptionQueue) {
+function render(
+  queue: TranscriptionQueue,
+  extra: {
+    external?: RecordingsExternalSelection;
+    onExternalSelectionApplied?: () => void;
+  } = {},
+) {
   act(() => {
-    root.render(<RecordingsView queue={queue} />);
+    root.render(<RecordingsView queue={queue} {...extra} />);
   });
+}
+
+function selectedRecordingButton(): HTMLButtonElement | undefined {
+  return listButtons().find((b) => b.getAttribute('aria-current') === 'true');
 }
 
 const flush = () =>
@@ -418,5 +429,102 @@ describe('RecordingsView', () => {
     await flushAll();
 
     expect(container.textContent).toContain('No recordings yet');
+  });
+});
+
+describe('RecordingsView - external selection (Fix round 1, Finding 1)', () => {
+  it('selects the recording an external request names, over the newest-first default', async () => {
+    await seed({ title: 'Newest', startedAt: 2000 });
+    const target = await seed({ title: 'Target', startedAt: 1000 });
+    const queue = createFakeQueue();
+
+    render(queue, { external: { token: 1, recordingId: target.id } });
+    await flushAll();
+
+    expect(selectedRecordingButton()?.textContent).toContain('Target');
+  });
+
+  it('shows the "look for the segment at" hint when the request names a timestamp, and clears it on a manual pick', async () => {
+    const target = await seed({ title: 'Target' });
+    await seed({ title: 'Other' });
+    const queue = createFakeQueue();
+
+    render(queue, { external: { token: 1, recordingId: target.id, startMs: 65_000 } });
+    await flushAll();
+
+    expect(container.textContent).toContain('1:05');
+    expect(container.textContent).toContain('look for the segment');
+
+    const other = listButtons().find((b) => b.textContent?.includes('Other'))!;
+    await click(other);
+    await flushAll();
+
+    expect(container.textContent).not.toContain('look for the segment');
+  });
+
+  it('calls onExternalSelectionApplied once the request has been applied', async () => {
+    const target = await seed({ title: 'Target' });
+    const applied = vi.fn();
+    const queue = createFakeQueue();
+
+    render(queue, { external: { token: 1, recordingId: target.id }, onExternalSelectionApplied: applied });
+    await flushAll();
+
+    expect(applied).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-applies the same recording on a second request (a new token)', async () => {
+    const target = await seed({ title: 'Target', startedAt: 1000 });
+    await seed({ title: 'Other', startedAt: 2000 });
+    const queue = createFakeQueue();
+
+    render(queue, { external: { token: 1, recordingId: target.id } });
+    await flushAll();
+    expect(selectedRecordingButton()?.textContent).toContain('Target');
+
+    await click(listButtons().find((b) => b.textContent?.includes('Other'))!);
+    await flushAll();
+    expect(selectedRecordingButton()?.textContent).toContain('Other');
+
+    // Same recording, fresh token - must re-select it, not silently do
+    // nothing because this view has already "seen" that id once before.
+    render(queue, { external: { token: 2, recordingId: target.id } });
+    await flushAll();
+    expect(selectedRecordingButton()?.textContent).toContain('Target');
+  });
+
+  it('an unrelated reload (the queue reporting a change) does not re-snap to an already-applied request after a manual pick', async () => {
+    const target = await seed({ title: 'Target', startedAt: 1000 });
+    const other = await seed({ title: 'Other', startedAt: 2000 });
+    const queue = createFakeQueue();
+    // The *same* external value for the whole test - this is what makes the
+    // scenario meaningful: nothing about the request itself ever changes,
+    // so only the "already applied" token guard can be what keeps a later
+    // reload from reverting the user's own, subsequent manual pick.
+    const external: RecordingsExternalSelection = { token: 1, recordingId: target.id };
+
+    render(queue, { external });
+    await flushAll();
+    expect(selectedRecordingButton()?.textContent).toContain('Target');
+
+    await click(listButtons().find((b) => b.textContent?.includes('Other'))!);
+    await flushAll();
+    expect(selectedRecordingButton()?.textContent).toContain('Other');
+
+    // A reload with no new request at all (e.g. a transcript status
+    // change) must not snap back to `target`.
+    act(() => queue.fireChange(other.id));
+    await flushAll();
+    expect(selectedRecordingButton()?.textContent).toContain('Other');
+  });
+
+  it('a request naming an unknown recording id is ignored, falling back to the normal default', async () => {
+    await seed({ title: 'Only One', startedAt: 1000 });
+    const queue = createFakeQueue();
+
+    render(queue, { external: { token: 1, recordingId: 'does-not-exist' } });
+    await flushAll();
+
+    expect(selectedRecordingButton()?.textContent).toContain('Only One');
   });
 });

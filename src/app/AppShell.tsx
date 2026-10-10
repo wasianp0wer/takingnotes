@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { DeviceStatus } from '@/app/DeviceStatus';
 import { SettingsDialog } from '@/app/SettingsDialog';
@@ -21,6 +21,29 @@ import { TriageView } from '@/triage/TriageView';
  */
 let migrationStarted = false;
 
+/**
+ * Fix round 1, Finding 1: the one target a Search hit can be navigating to
+ * right now, tagged with the tab it belongs to so `AppShell` only ever
+ * passes `external` to the view it names. `token` is bumped on every
+ * request, including a repeat of the exact same note+page or recording -
+ * `NotesView`/`RecordingsView` apply a request once per token, so without
+ * a fresh token a second click on the same hit would silently do nothing
+ * (the view has already "seen" that noteId+pageIndex before).
+ */
+interface NoteNavigationTarget {
+  kind: 'note';
+  token: number;
+  noteId: string;
+  pageIndex: number;
+}
+interface RecordingNavigationTarget {
+  kind: 'recording';
+  token: number;
+  recordingId: string;
+  startMs?: number;
+}
+type NavigationTarget = NoteNavigationTarget | RecordingNavigationTarget;
+
 function useLegacyMigration(): void {
   useEffect(() => {
     if (migrationStarted) return;
@@ -36,11 +59,38 @@ function useLegacyMigration(): void {
 export function AppShell() {
   const { controller, state } = useHuionDevice();
   const [tab, setTab] = useState('notes');
+  // Fix round 1, Finding 1: the pending cross-tab navigation request from a
+  // Search hit's "Open", if any. Cleared once the target view reports it
+  // applied, so a later, unrelated switch to that tab (e.g. clicking "Notes"
+  // directly) never re-triggers a stale request.
+  const [navigationTarget, setNavigationTarget] = useState<NavigationTarget | null>(null);
+  const navigationTokenRef = useRef(0);
 
   // Mounted exactly once, here: it owns the controller's capture lifecycle
   // (page-turn polling, liveness, reconnect), and a second copy would fight it.
   usePageTurnCapture();
   useLegacyMigration();
+
+  function openNote(noteId: string, pageIndex: number): void {
+    navigationTokenRef.current += 1;
+    setNavigationTarget({ kind: 'note', token: navigationTokenRef.current, noteId, pageIndex });
+    setTab('notes');
+  }
+
+  function openRecording(recordingId: string, startMs?: number): void {
+    navigationTokenRef.current += 1;
+    setNavigationTarget({ kind: 'recording', token: navigationTokenRef.current, recordingId, startMs });
+    setTab('recordings');
+  }
+
+  // Stable identity (`[]` deps): `RecordingsView`'s `load` depends on this
+  // callback to know when a *new* request has arrived versus an unrelated
+  // re-render, so a fresh function every render here would make it
+  // resubscribe (and reload) far more than necessary.
+  const clearNavigationTarget = useCallback(() => setNavigationTarget(null), []);
+
+  const noteTarget = navigationTarget?.kind === 'note' ? navigationTarget : undefined;
+  const recordingTarget = navigationTarget?.kind === 'recording' ? navigationTarget : undefined;
 
   return (
     <Tabs
@@ -67,23 +117,23 @@ export function AppShell() {
       </header>
 
       <TabsContent value="notes" className="min-h-0 overflow-auto">
-        <NotesView />
+        <NotesView external={noteTarget} onExternalSelectionApplied={clearNavigationTarget} />
       </TabsContent>
       <TabsContent value="recordings" className="min-h-0 overflow-auto">
-        <RecordingsView />
+        <RecordingsView external={recordingTarget} onExternalSelectionApplied={clearNavigationTarget} />
       </TabsContent>
       <TabsContent value="triage" className="min-h-0 overflow-auto">
         <TriageView />
       </TabsContent>
       <TabsContent value="search" className="min-h-0 overflow-auto">
         {/*
-         * S6-A6: these are cross-tab switches only. NotesView/RecordingsView
-         * are off-limits (owned by other units) and expose no prop through
-         * which an external caller can select a specific note, page or
-         * recording - see docs/features/s6-spec.md's S6-A6 for the full
-         * reasoning.
+         * Fix round 1, Finding 1: a Search hit's "Open" now selects the
+         * actual note+page or recording it names, not just the tab -
+         * `openNote`/`openRecording` above hand the target to the view
+         * that owns it, with a fresh token per request (see
+         * `NavigationTarget`'s own comment for why the token matters).
          */}
-        <SearchView onOpenNotes={() => setTab('notes')} onOpenRecordings={() => setTab('recordings')} />
+        <SearchView onOpenNotes={openNote} onOpenRecordings={openRecording} />
       </TabsContent>
     </Tabs>
   );

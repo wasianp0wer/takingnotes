@@ -8,6 +8,7 @@ import type { LiveCaptureEngine } from '@/capture/engine';
 import type { NamingQueue } from '@/notes/naming/queue';
 import { resetNamingQueueForTests } from '@/notes/naming/startNaming';
 import { NotesView } from '@/notes/NotesView';
+import type { NotesExternalSelection } from '@/notes/NotesView';
 import { resetResumeLockForTests } from '@/notes/resumeLock';
 import { PAGE_TRANSCRIBING_MESSAGE } from '@/notes/TranscriptPanel';
 import { createNote, getNote, setNoteSummary, setNoteTags } from '@/storage/notes';
@@ -119,11 +120,31 @@ afterEach(() => {
 });
 
 /** Renders and lets the storage reads settle (fake-indexeddb resolves on timers). */
-async function render(): Promise<void> {
+async function render(
+  extra: {
+    external?: NotesExternalSelection;
+    onExternalSelectionApplied?: () => void;
+  } = {},
+): Promise<void> {
   await act(async () => {
     root.render(
       <CaptureProvider engine={engine}>
-        <NotesView queue={queue} namingQueue={createFakeNamingQueue()} />
+        <NotesView queue={queue} namingQueue={createFakeNamingQueue()} {...extra} />
+      </CaptureProvider>,
+    );
+  });
+  await settle();
+}
+
+/** Re-renders the already-mounted tree with new props, for a test driving a prop change without a remount. */
+async function rerender(extra: {
+  external?: NotesExternalSelection;
+  onExternalSelectionApplied?: () => void;
+}): Promise<void> {
+  await act(async () => {
+    root.render(
+      <CaptureProvider engine={engine}>
+        <NotesView queue={queue} namingQueue={createFakeNamingQueue()} {...extra} />
       </CaptureProvider>,
     );
   });
@@ -170,6 +191,16 @@ function buttonByLabel(label: string): HTMLButtonElement {
   const found = container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
   if (!found) throw new Error(`no button labelled ${label}`);
   return found;
+}
+
+/**
+ * The sidebar's own `aria-current` on the selected note's row
+ * (`NoteList.tsx`'s `NoteListItem`) - unambiguous, unlike searching
+ * `container.textContent` for a title, which also matches every other
+ * note's own sidebar row.
+ */
+function selectedSidebarTitle(): string | null {
+  return container.querySelector('button[aria-current="true"]')?.textContent?.trim() ?? null;
 }
 
 async function click(el: HTMLElement): Promise<void> {
@@ -751,5 +782,93 @@ describe('NotesView', () => {
 
     expect(container.textContent).not.toContain('Writing still goes to');
     bareEngine.dispose();
+  });
+});
+
+describe('NotesView - external selection (Fix round 1, Finding 1)', () => {
+  it('a fresh external selection wins over a different note already active at mount', async () => {
+    const active = await seedNote({ title: 'Already Active', startedAt: 1_000 });
+    const target = await seedNote({ title: 'Search Target', startedAt: 2_000 });
+    await seedPage(target.id, 0);
+    await seedPage(target.id, 1);
+
+    // The active note is set *before* this view ever mounts - matching a
+    // real session that was already running when the owner navigated here
+    // from a Search hit.
+    await act(async () => {
+      await engine.resumeNote(active.id);
+    });
+    await settle();
+    expect(engine.getState().activeNoteId).toBe(active.id);
+
+    await render({ external: { token: 1, noteId: target.id, pageIndex: 1 } });
+
+    // Not "Already Active" - the external request is not immediately
+    // overridden by the active-note follow, since it is only ever seen on
+    // the first render of a fresh mount, where `activeNoteIdChanged` is
+    // false by construction.
+    expect(selectedSidebarTitle()).toBe('Search Target');
+    expect(container.textContent).toContain('Page 2 of 2');
+  });
+
+  it('calls onExternalSelectionApplied once the request has been applied', async () => {
+    const target = await seedNote({ title: 'Search Target' });
+    const applied = vi.fn();
+
+    await render({ external: { token: 1, noteId: target.id, pageIndex: 0 }, onExternalSelectionApplied: applied });
+
+    expect(applied).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-applies the same note+page on a second request (a new token), proving the token - not the value - is what gates re-application', async () => {
+    await seedNote({ title: 'Manual Pick', startedAt: 1_000 });
+    const target = await seedNote({ title: 'Search Target', startedAt: 2_000 });
+
+    await render({ external: { token: 1, noteId: target.id, pageIndex: 0 } });
+    expect(selectedSidebarTitle()).toBe('Search Target');
+
+    // The user picks a different note by hand.
+    await click(buttonByText('Manual Pick'));
+    expect(selectedSidebarTitle()).toBe('Manual Pick');
+
+    // The identical hit, clicked again - same noteId/pageIndex as before,
+    // but a fresh token (as `AppShell` always issues on every "Open"
+    // click). Must re-select Search Target, not silently do nothing.
+    await rerender({ external: { token: 2, noteId: target.id, pageIndex: 0 } });
+    expect(selectedSidebarTitle()).toBe('Search Target');
+
+    // The user picks the other note again.
+    await click(buttonByText('Manual Pick'));
+    expect(selectedSidebarTitle()).toBe('Manual Pick');
+
+    // The *same* token repeated (not bumped) must not re-fire - this is
+    // the control proving the guard is actually doing something, not just
+    // always re-selecting the external note on every render.
+    await rerender({ external: { token: 2, noteId: target.id, pageIndex: 0 } });
+    expect(selectedSidebarTitle()).toBe('Manual Pick');
+  });
+
+  it('a live session starting after an external selection was already consumed still takes over (K16 keeps working)', async () => {
+    const target = await seedNote({ title: 'Search Target' });
+    await render({ external: { token: 1, noteId: target.id, pageIndex: 0 } });
+    expect(selectedSidebarTitle()).toBe('Search Target');
+
+    await act(async () => {
+      await engine.startSession();
+    });
+    await settle();
+    const activeId = engine.getState().activeNoteId;
+    expect(activeId).not.toBeNull();
+    expect(activeId).not.toBe(target.id);
+
+    // The newly active note is shown, not the already-consumed external
+    // target - the stale token does not fight the live follow.
+    expect(selectedSidebarTitle()).not.toBe('Search Target');
+  });
+
+  it('with no external prop at all, resolves exactly as before (no regression for every other test in this file)', async () => {
+    await seedNote({ title: 'Only Note' });
+    await render();
+    expect(container.textContent).toContain('Only Note');
   });
 });

@@ -6,7 +6,11 @@ import { AppShell } from '@/app/AppShell';
 import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine } from '@/capture/engine';
 import { TabletProvider } from '@/device/TabletProvider';
+import { createNote } from '@/storage/notes';
+import { createPage, setPageTranscript } from '@/storage/pages';
+import { createRecording, finalizeRecording, setRecordingTranscript } from '@/storage/recordings';
 import { createFakeDeviceController } from '@/test/fakeDeviceController';
+import { resetDatabase } from '@/test/resetDb';
 
 const migrate = vi.hoisted(() => vi.fn(async () => ({
   imported: 0,
@@ -24,8 +28,9 @@ declare global {
 let container: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
 
-beforeEach(() => {
+beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  await resetDatabase();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -55,6 +60,62 @@ function tab(label: string): HTMLElement {
   );
   if (!found) throw new Error(`no tab labelled ${label}`);
   return found as HTMLElement;
+}
+
+async function settle(rounds = 4): Promise<void> {
+  for (let i = 0; i < rounds; i++) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+}
+
+async function clickTab(label: string): Promise<void> {
+  await act(async () => {
+    tab(label).dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    tab(label).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await settle();
+}
+
+function buttonByText(text: string): HTMLButtonElement {
+  const found = [...container.querySelectorAll('button')].find((b) => b.textContent?.trim() === text);
+  if (!found) throw new Error(`no button with text ${JSON.stringify(text)}`);
+  return found;
+}
+
+const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+  window.HTMLInputElement.prototype,
+  'value',
+)!.set!;
+
+async function typeQuery(value: string): Promise<void> {
+  const input = container.querySelector('input')!;
+  await act(async () => {
+    nativeInputValueSetter.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await settle();
+}
+
+async function click(el: HTMLElement): Promise<void> {
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await settle();
+}
+
+/** The sidebar's own `aria-current` on the selected note's row (`NoteList.tsx`). */
+function selectedSidebarTitle(): string | null {
+  return container.querySelector('button[aria-current="true"]')?.textContent?.trim() ?? null;
+}
+
+/** The Recordings sidebar's own `aria-current` on the selected recording's row. */
+function selectedRecordingTitle(): string | null {
+  const found = [...container.querySelectorAll('[data-recording-id]')].find(
+    (b) => b.getAttribute('aria-current') === 'true',
+  );
+  return found?.textContent ?? null;
 }
 
 describe('AppShell', () => {
@@ -113,6 +174,64 @@ describe('AppShell', () => {
     expect(container.querySelector('section[aria-label="Tasks"]')).not.toBeNull();
     expect(container.querySelector('section[aria-label="Calendar"]')).not.toBeNull();
     expect(container.querySelector('section[aria-label="Scratchpad"]')).not.toBeNull();
+  });
+
+  it("a Search hit's Open button for a note navigates to the exact note and page it names (Fix round 1, Finding 1)", async () => {
+    await createNote({ title: 'Other Note', deviceId: 'd', pageBaseline: 0 });
+    const target = await createNote({ title: 'Target Note', deviceId: 'd', pageBaseline: 0 });
+    await createPage({ noteId: target.id, pageIndex: 0, devicePageNum: 1, source: 'live', strokes: [] });
+    const page1 = await createPage({
+      noteId: target.id,
+      pageIndex: 1,
+      devicePageNum: 2,
+      source: 'live',
+      strokes: [],
+    });
+    await setPageTranscript(page1.id, {
+      markdown: 'a very distinctive search phrase',
+      model: 'gemma4',
+      promptVersion: 'gemma-v1',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
+    renderShell();
+    await clickTab('Search');
+    await typeQuery('distinctive search phrase');
+    await click(buttonByText('Open'));
+
+    expect(tab('Notes').getAttribute('data-state')).toBe('active');
+    expect(selectedSidebarTitle()).toBe('Target Note');
+    expect(container.textContent).toContain('Page 2 of 2');
+  });
+
+  it("a Search hit's Open button for a recording switches to Recordings with that recording selected (Fix round 1, Finding 1)", async () => {
+    await createRecording({ title: 'Other Recording', durationMs: 1000 }, new Blob(['a']));
+    const target = await createRecording(
+      { title: 'Target Recording', durationMs: 1000 },
+      new Blob(['b']),
+    );
+    await finalizeRecording(target.id, new Blob(['b']), { endedAt: 2, durationMs: 1000 });
+    await setRecordingTranscript(target.id, {
+      text: 'mentions a very distinctive audio phrase',
+      segments: [{ startMs: 5000, endMs: 6000, text: 'mentions a very distinctive audio phrase' }],
+      model: 'whisper',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
+    // `other` is deliberately never finalized, so it is excluded from the
+    // corpus (K5) and cannot be confused with the target either way.
+
+    renderShell();
+    await clickTab('Search');
+    await typeQuery('distinctive audio phrase');
+    await click(buttonByText('Open'));
+
+    expect(tab('Recordings').getAttribute('data-state')).toBe('active');
+    expect(selectedRecordingTitle()).toContain('Target Recording');
+    expect(container.textContent).toContain('look for the segment at 0:05');
   });
 
   it('runs the legacy notebook migration once for the whole app', () => {
