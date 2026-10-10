@@ -170,3 +170,219 @@ shared one — confirmed by mutating `getResumeLock()` to
   Wave 1/Phase 2, which this unit did not touch and did not need to.
 
 No blockers. Ready for integration.
+
+---
+
+## Fix round 1
+
+One Critical and five Important findings from the first review, addressed
+in six commits (`489732d`..`9e4ce4e`). All four gates re-run clean after
+every fix and again at the end of the round: `npm test` 1223 tests / 100
+files pass, `npx tsc -b` clean, `npm run lint` 0 errors / 5 warnings
+(identical pre-existing baseline), `npm run build` succeeds.
+
+### Critical — naming queue fired while pages were still transcribing (`489732d`)
+
+**What changed.** `pageFinishedTranscribing` in `src/notes/naming/queue.ts`
+read `page.transcript !== null` as "finished," but
+`transcription/queue.ts`'s `markPending` writes a non-null `pending`
+transcript record (and `running` is written before the model call too),
+both followed by an emit on exactly the events this queue subscribes to. A
+note whose last page had just been marked `pending` therefore looked fully
+transcribed and got named from whatever earlier pages were already `done`,
+before K19's own failed-page guard ever got a chance to run. Fixed by
+keying on `transcript.status`: only `'done'` or `'failed'` (still caught by
+the separate K19 check) count as finished; `'pending'`/`'running'` do not. A
+typed page's null transcript is unaffected.
+
+**Tests added.** Two unit cases on `noteReadyForNaming` (`pending`,
+`running`) in `src/notes/naming/queue.test.ts`, plus the exact scenario the
+review described end-to-end: two `done` pages, a third page finalized and
+marked `pending`, firing the `subscribePageFinalized` event for it and
+asserting the generator is never called and the note keeps its timestamp
+title - then finishing that page's transcript and firing the
+transcription-queue event, asserting the note *is* named correctly
+afterward (proving this is a timing fix, not a permanent block).
+
+**Mutation.** Reverted `pageFinishedTranscribing` to the original
+`page.transcript !== null || page.source === 'typed'`.
+Command: `npx vitest run src/notes/naming/queue.test.ts`.
+Output: `Tests  3 failed | 16 passed (19)` - both new unit cases and the new
+integration case went red. Reverted back to the fix.
+
+### Important 1 — the in-flight gate missed "New note", and the mirror direction was open (`53fbf5f`)
+
+**What changed.** `NoteToolbar`'s `sessionLocked` (which disables New note)
+was driven only by `sessionStartedAtOf(state) !== null` in `NotesView.tsx`,
+never by the shared resume lock, so a pending `resumeNote()` left New note
+clickable during exactly the §8.3 window. Fixed:
+`sessionLocked={sessionLocked || resumeLockState.pending}`. The mirror was
+also open: neither `NotesView`'s New note nor `SessionControls`'s Start
+session held the lock around their own `startNote()`/`startSession()`
+calls, so every Resume button stayed live during that same window with the
+clicks swapped. Both now run through `resumeLock.run(...)` -
+`SessionControls`'s wrap is narrow (only the `startSession()` call itself,
+not the pad/audio sequence after it, which is outside the hazard window).
+
+**Tests added.** `NotesView.test.tsx`: "disables New note while a resume
+elsewhere is pending" (holds a wrapped `resumeNote` open, asserts New note
+is disabled, releases, asserts it re-enables) and "holds the shared resume
+lock around New note's own startNote() call, disabling Resume elsewhere
+meanwhile" (the reverse). `SessionControls.test.tsx`: "disables every
+Resume button while Start session itself is in flight" (holds a wrapped
+`startSession` open, asserts the interrupted banner's Resume button is
+disabled).
+
+**Mutations.**
+- Reverted `sessionLocked={sessionLocked || resumeLockState.pending}` to
+  `sessionLocked={sessionLocked}`.
+  Command: `npx vitest run src/notes/NotesView.test.tsx`.
+  Output: `Tests  1 failed | 18 passed (19)` - "disables New note while a
+  resume elsewhere is pending" failed. Reverted back.
+- Removed the `resumeLock.run(...)` wrap around `engine.startNote()` in
+  `NotesView.tsx`.
+  Command: `npx vitest run src/notes/NotesView.test.tsx`.
+  Output: `Tests  1 failed | 18 passed (19)` - the mirror test failed.
+  Reverted back.
+- Removed the `resumeLock.run(...)` wrap around `engine.startSession()` in
+  `SessionControls.tsx`.
+  Command: `npx vitest run src/capture/SessionControls.test.tsx`.
+  Output: `Tests  1 failed | 28 passed (29)` - the new mirror test failed.
+  Reverted back.
+
+### Important 2 — model output was length-unbounded (`9f11b6c`)
+
+**What changed.** `validateNamingResult` capped neither `title` nor
+`summary`. Added `NAMING_TITLE_MAX` (200) and `NAMING_SUMMARY_MAX` (1000),
+following `gaps/validate.ts`'s `cap()`-with-a-documented-maximum
+convention; both fields are capped rather than rejected, since a rambling
+answer is still usable once trimmed.
+
+**Tests added.** `validate.test.ts`: a title over `NAMING_TITLE_MAX` is
+truncated to exactly that length; a summary over `NAMING_SUMMARY_MAX`
+likewise; a title/summary within the limit is untouched.
+
+**Mutation.** Reverted the return statement to the uncapped
+`{ title: title.trim(), summary: summary.trim() }`.
+Command: `npx vitest run src/notes/naming/validate.test.ts`.
+Output: `Tests  2 failed | 6 passed (8)` - both new capping tests failed.
+Reverted back.
+
+### Important 3 — `GapPanel` and the analyzer could pick different recordings (`c81a261`)
+
+**What changed.** `GapPanel` computed a page's speech window with
+`speechWindowForPage`'s bare defaults, while `createConfiguredGapAnalyzer`
+reads the configured `gaps.leadMs`/`gaps.trailMs`. With a non-default
+margin set and more than one recording, the panel could judge eligibility
+(and, via `recordingForPage`, pick a recording) against a different window
+than a real run would use - "Find gaps" could read available when the
+analyzer would skip, which P1-A4 forbids. `GapPanel` now reads both
+settings once per load and uses them for the recording-selection window
+*and* the render-time eligibility/source-window display (`margins` state,
+default equal to `speechWindowForPage`'s own fallback).
+
+**Tests added.** `GapPanel.test.tsx`: a page placed just out of the
+default-margin's reach of its recording is ineligible under the defaults
+and eligible once `gaps.leadMs` is set wide enough (exercises the effect's
+window, used for `recordingForPage`); a second test asserts the displayed
+source-window times match the *configured*-margin window, not the default
+one (exercises the render-time `speechWindow`).
+
+**Mutations.**
+- Reverted the render-time `speechWindowForPage(page, margins)` to
+  `speechWindowForPage(page)`.
+  Command: `npx vitest run src/notes/GapPanel.test.tsx`.
+  First attempt: `Tests  24 passed (24)` - **not detected** by the
+  eligibility test alone (see below). Second attempt, after adding the
+  source-window display test: `Tests  1 failed | 24 passed (25)` - that
+  test failed. Reverted back.
+- Reverted the effect's `speechWindowForPage(loadedPage, { leadMs, trailMs
+  })` to `speechWindowForPage(loadedPage)`.
+  Command: `npx vitest run src/notes/GapPanel.test.tsx`.
+  Output: `Tests  1 failed | 24 passed (25)` - the eligibility test failed.
+  Reverted back.
+
+**Mutation not detected on the first attempt, and why.** My first mutation
+check on the render-time `speechWindow` line found nothing: `gapEligibility`
+only checks `window === null` and `recording === null`, never the window's
+actual bounds, and `recording` was already correctly computed by the
+*effect's* fix regardless of what the render-time line did. So the
+eligibility test alone could not distinguish the two call sites. I added a
+second, more direct test (asserting the *displayed times* match the
+configured-margin window) specifically to close this, and confirmed it does
+catch the mutation (above). Flagging this plainly rather than letting a
+"24 passed" first run stand as proof.
+
+### Important 4 — two tests did not check what they were named for (`01c536f`)
+
+**What changed.** `analyzer.test.ts`'s "ignores an unfinished recording
+even when its time span would overlap" seeded the recording with no
+transcript at all, so `analyzePage` skipped it on the unrelated
+`recording-transcript` eligibility check regardless of K45's own selection
+logic - the assertions passed for a reason unconnected to the test's name.
+Gave it a `done` transcript with a segment inside the page's window.
+`prompts.test.ts`'s "the system prompt asks for the exact JSON shape
+validateNamingResult expects" used `toContain('title')`/
+`toContain('summary')`, which passes against `title_text`, a nested shape,
+or YAML. Replaced with a regex anchored on the literal
+`{ "title": string, "summary": string }` fragment, plus an actual
+round-trip of a worked example through `validateNamingResult`.
+
+**Tests changed.** The two above, in place (no new test files).
+
+**Mutations.**
+- `analyzer.test.ts`'s fixed test: reverted `candidateRecordings`'s
+  `listFinishedRecordings()` to `listRecordings()`.
+  Command: `npx vitest run src/gaps/analyzer.test.ts`.
+  Output: `Tests  1 failed | 26 passed (27)` - **only the sibling
+  `noteHasRecording is false for a note whose only recording is still
+  unfinished` test failed; the fixed "ignores an unfinished recording..."
+  test itself did not.** This is expected and stated plainly: that test's
+  own `recordingForPage` call site is still protected by the in-loop
+  `if (recording.endedAt === null) continue` guard (needed for TypeScript's
+  non-null narrowing into `overlapMs` regardless), which filters the
+  unfinished recording out whichever list function supplied it. The fix
+  only removed the *unrelated* no-transcript masking the review flagged;
+  it does not and cannot make this specific test independently prove the
+  `listFinishedRecordings()` call - that proof is `noteHasRecording`'s
+  alone, exactly as the review said. Reverted back.
+- `prompts.test.ts`'s fixed test: changed the prompt's JSON key from
+  `"title"` to `"title_text"`.
+  Command: `npx vitest run src/notes/naming/prompts.test.ts`.
+  Output: `Tests  1 failed | 2 passed (3)` - the new test failed. Reverted
+  back.
+
+### Important 5 — the generated title never reached the screen (`9e4ce4e`)
+
+**What changed.** `NotesView` built and started the naming queue but never
+called `NamingQueue.subscribe`. `useNotesData`'s two reload triggers
+(capture state, the transcription queue's status changes) have nothing to
+do with naming, which finishes seconds after whichever of those fired it -
+so the sidebar and toolbar kept the timestamp title until something
+unrelated re-triggered a read. `NotesView` now captures the naming queue
+instance and subscribes to it, calling the existing `reloadNotes()` (from
+K20) on every change. `useNotesData`'s `reloadNotes` is now
+`useCallback`-memoized so the subscription does not resubscribe every
+render.
+
+**Tests added.** `NotesView.test.tsx`: "refreshes the sidebar and toolbar
+when the naming queue announces a change" - writes a new title/summary
+directly to storage (what the real queue's job does), fires the fake naming
+queue's own `subscribe` emission (what the real queue's job does next), and
+asserts the new title is now on screen and the old one is gone.
+`createFakeNamingQueue` gained a real listener set plus an `emit` method so
+the test can fire that event, rather than the no-op stub used elsewhere.
+
+**Mutation.** Removed the `useEffect(() => namingQueue.subscribe(() =>
+reloadNotes()), ...)` line from `NotesView.tsx`.
+Command: `npx vitest run src/notes/NotesView.test.tsx`.
+Output: `Tests  1 failed | 19 passed (20)` - the new test failed. Reverted
+back.
+
+### Carry forward (not fixed, per the coordinator's instruction)
+
+Per-page recordings scan hoisting, the bare pen-started note's banner
+behaviour, `NoteTitle` not committing on blur, the unannounced first-launch
+backfill, and the missing `system`/`model` assertion on the fake's recorded
+call - left as-is; the coordinator is recording the backfill and banner
+questions for the owner.
