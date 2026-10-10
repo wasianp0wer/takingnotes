@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { getSettingValue, SETTING_DEFAULTS, setSettingValue } from '@/storage/settingKeys';
 import type { CalendarEventRecord } from '@/storage/types';
 import { cn } from '@/lib/utils';
 import { addLocalDays, isSameLocalDay, monthGrid, startOfLocalDay, toDateInputValue } from '@/triage/dates';
@@ -17,8 +19,11 @@ export interface CalendarPanelProps {
   onDeleteEvent(id: string): Promise<void>;
 }
 
-/** Today plus the next 7 days. */
-export const AGENDA_DAYS = 8;
+/** K23: the fixed preset choices for the agenda horizon, in days ahead of today. */
+const AGENDA_PRESETS = [3, 7, 14, 30] as const;
+
+/** K23: the sentinel stored for the "All" preset - see `settingKeys.ts`. */
+const AGENDA_ALL = Number.POSITIVE_INFINITY;
 
 /** The upper bound the K23 custom horizon field accepts. */
 export const MAX_CUSTOM_AGENDA_DAYS = 365;
@@ -76,6 +81,63 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
   });
   const [dialogState, setDialogState] = useState<DialogState>(null);
   const [dialogKey, setDialogKey] = useState(0);
+
+  // K23: the agenda horizon. `agendaDays` is the currently *applied* value
+  // (always one of the five presets, or whatever custom number was last
+  // committed); `showCustom` only controls whether the Custom… field is
+  // revealed - it does not itself change `agendaDays`.
+  const [agendaDays, setAgendaDaysState] = useState<number>(SETTING_DEFAULTS['triage.agendaDays']);
+  const [showCustom, setShowCustom] = useState(false);
+  const [customDraft, setCustomDraft] = useState('');
+  const [customError, setCustomError] = useState<string | null>(null);
+  // True once the user has applied a value (by preset click or a custom
+  // commit). Guards against the async initial load landing *after* that and
+  // clobbering it with the stale stored value - the same race `AudioSettings`
+  // guards against with its own `dirtyRef`.
+  const interactedRef = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    void getSettingValue('triage.agendaDays').then((stored) => {
+      if (!active || interactedRef.current) return;
+      setAgendaDaysState(stored);
+      const isNamedPreset = (AGENDA_PRESETS as readonly number[]).includes(stored) || stored === AGENDA_ALL;
+      if (!isNamedPreset) {
+        setShowCustom(true);
+        setCustomDraft(Number.isFinite(stored) ? String(stored) : '');
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const applyAgendaDays = (days: number) => {
+    interactedRef.current = true;
+    setAgendaDaysState(days);
+    void setSettingValue('triage.agendaDays', days);
+  };
+
+  const selectPreset = (days: number) => {
+    setShowCustom(false);
+    setCustomError(null);
+    applyAgendaDays(days);
+  };
+
+  const toggleCustom = () => {
+    setShowCustom(true);
+    setCustomError(null);
+  };
+
+  const commitCustom = () => {
+    const parsed = parseAgendaDays(customDraft);
+    if (parsed === null) {
+      setCustomError('Enter a whole number of days from 1 to 365.');
+      return;
+    }
+    setCustomError(null);
+    applyAgendaDays(parsed);
+  };
 
   const shiftMonth = (delta: number) => {
     setVisible(({ year, month }) => {
@@ -193,7 +255,69 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
         )}
       </div>
 
-      <Agenda events={events} now={now} onOpen={openEdit} />
+      <div aria-label="Agenda horizon" className="flex flex-wrap items-center gap-1">
+        <span className="text-xs text-muted-foreground">Agenda horizon:</span>
+        {AGENDA_PRESETS.map((d) => (
+          <Button
+            key={d}
+            type="button"
+            size="sm"
+            variant={!showCustom && agendaDays === d ? 'default' : 'outline'}
+            aria-pressed={!showCustom && agendaDays === d}
+            aria-label={`${d} days`}
+            onClick={() => selectPreset(d)}
+          >
+            {d}
+          </Button>
+        ))}
+        <Button
+          type="button"
+          size="sm"
+          variant={!showCustom && agendaDays === AGENDA_ALL ? 'default' : 'outline'}
+          aria-pressed={!showCustom && agendaDays === AGENDA_ALL}
+          aria-label="All"
+          onClick={() => selectPreset(AGENDA_ALL)}
+        >
+          All
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={showCustom ? 'default' : 'outline'}
+          aria-pressed={showCustom}
+          aria-label="Custom…"
+          onClick={toggleCustom}
+        >
+          Custom…
+        </Button>
+        {showCustom ? (
+          <span className="flex items-center gap-1">
+            <Input
+              type="number"
+              min={1}
+              max={MAX_CUSTOM_AGENDA_DAYS}
+              aria-label="Custom agenda days"
+              value={customDraft}
+              onChange={(e) => {
+                setCustomDraft(e.target.value);
+                setCustomError(null);
+              }}
+              onBlur={commitCustom}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  commitCustom();
+                }
+              }}
+              className="w-16"
+            />
+            <span className="text-xs text-muted-foreground">days</span>
+          </span>
+        ) : null}
+        {customError ? <p className="w-full text-xs text-destructive">{customError}</p> : null}
+      </div>
+
+      <Agenda events={events} now={now} agendaDays={agendaDays} onOpen={openEdit} />
 
       {dialogState && dialogInitial ? (
         <EventDialog
@@ -215,14 +339,16 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
 function Agenda({
   events,
   now,
+  agendaDays,
   onOpen,
 }: {
   events: CalendarEventRecord[];
   now: number;
+  agendaDays: number;
   onOpen(event: CalendarEventRecord): void;
 }) {
   const today = startOfLocalDay(now);
-  const groups = Array.from({ length: AGENDA_DAYS }, (_, i) => addLocalDays(today, i))
+  const groups = candidateDaysForAgenda(events, today, agendaDays)
     .map((day) => ({
       day,
       items: events
@@ -234,10 +360,14 @@ function Agenda({
     }))
     .filter((g) => g.items.length > 0);
 
+  // K23/K25: horizon-aware empty state. Default (7) reproduces the exact old
+  // copy; "All" has no day count to report.
+  const emptyLabel = Number.isFinite(agendaDays) ? `Nothing in the next ${agendaDays} days.` : 'Nothing coming up.';
+
   return (
     <section aria-label="Agenda" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
       {groups.length === 0 ? (
-        <p className="text-sm text-muted-foreground">Nothing in the next 7 days.</p>
+        <p className="text-sm text-muted-foreground">{emptyLabel}</p>
       ) : (
         groups.map(({ day, items }) => (
           <div key={day}>

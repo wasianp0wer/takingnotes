@@ -1,9 +1,12 @@
-import { describe, expect, it, vi } from 'vitest';
+import { act } from 'react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { getSettingValue } from '@/storage/settingKeys';
 import type { CalendarEventRecord } from '@/storage/types';
-import { AGENDA_DAYS, CalendarPanel, candidateDaysForAgenda, parseAgendaDays } from '@/triage/CalendarPanel';
+import { CalendarPanel, candidateDaysForAgenda, parseAgendaDays } from '@/triage/CalendarPanel';
 import { addLocalDays, startOfLocalDay } from '@/triage/dates';
-import { click, mount, typeInto } from '@/triage/testing';
+import { click, flush, mount, typeInto, waitFor } from '@/triage/testing';
+import { resetDatabase } from '@/test/resetDb';
 
 const at = (y: number, m: number, d: number, h = 0, min = 0) => new Date(y, m, d, h, min).getTime();
 
@@ -24,6 +27,12 @@ function event(overrides: Partial<CalendarEventRecord> & Pick<CalendarEventRecor
     updatedAt: NOW,
     ...overrides,
   };
+}
+
+function blur(el: Element): void {
+  act(() => {
+    el.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+  });
 }
 
 const DEADLINE_SEP29 = event({ id: 'e1', title: 'Essay due', kind: 'deadline', startsAt: at(2026, 8, 29, 10) });
@@ -76,9 +85,7 @@ describe('candidateDaysForAgenda (K23, K25)', () => {
 });
 
 describe('CalendarPanel', () => {
-  it('AGENDA_DAYS is 8 (today plus the next 7 days)', () => {
-    expect(AGENDA_DAYS).toBe(8);
-  });
+  beforeEach(resetDatabase);
 
   it('shows the month title, weekday headers, dots per day and today ring', () => {
     const m = mount(<CalendarPanel events={EVENTS} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
@@ -230,5 +237,162 @@ describe('CalendarPanel', () => {
     expect(onDeleteEvent).toHaveBeenCalledWith('e1');
 
     m.unmount();
+  });
+
+  describe('agenda horizon control (K23, K25)', () => {
+    const today = startOfLocalDay(NOW);
+    const DAY10_EVENT = event({ id: 'h10', title: 'Day ten workshop', startsAt: addLocalDays(today, 10) + 9 * HOUR });
+    const DAY40_EVENT = event({ id: 'h40', title: 'Far future thing', startsAt: addLocalDays(today, 40) + 9 * HOUR });
+
+    const PRESET_LABELS = ['3 days', '7 days', '14 days', '30 days', 'All'];
+
+    it('shows all five presets and Custom…, with 7 days pressed by default on a fresh mount', () => {
+      const m = mount(<CalendarPanel events={EVENTS} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
+      for (const label of [...PRESET_LABELS, 'Custom…']) {
+        expect(m.container.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
+      }
+      expect(m.container.querySelector('[aria-label="7 days"]')!.getAttribute('aria-pressed')).toBe('true');
+      for (const label of ['3 days', '14 days', '30 days', 'All', 'Custom…']) {
+        expect(m.container.querySelector(`[aria-label="${label}"]`)!.getAttribute('aria-pressed')).toBe('false');
+      }
+      m.unmount();
+    });
+
+    it('clicking 14 days reveals a previously-excluded day-10 event and updates pressed state', async () => {
+      const m = mount(
+        <CalendarPanel events={[...EVENTS, DAY10_EVENT]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />,
+      );
+      const agenda = () => m.container.querySelector('section[aria-label="Agenda"]')!;
+      expect(agenda().textContent).not.toContain('Day ten workshop');
+
+      await click(m.container.querySelector('[aria-label="14 days"]')!);
+
+      expect(agenda().textContent).toContain('Day ten workshop');
+      expect(m.container.querySelector('[aria-label="14 days"]')!.getAttribute('aria-pressed')).toBe('true');
+      expect(m.container.querySelector('[aria-label="7 days"]')!.getAttribute('aria-pressed')).toBe('false');
+      m.unmount();
+    });
+
+    it('a chosen preset persists across a fresh mount (survives a reload)', async () => {
+      const m1 = mount(
+        <CalendarPanel events={[...EVENTS, DAY10_EVENT]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />,
+      );
+      await click(m1.container.querySelector('[aria-label="14 days"]')!);
+      await flush();
+      expect(await getSettingValue('triage.agendaDays')).toBe(14);
+      m1.unmount();
+
+      const m2 = mount(
+        <CalendarPanel events={[...EVENTS, DAY10_EVENT]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />,
+      );
+      await waitFor(() => {
+        expect(m2.container.querySelector('[aria-label="14 days"]')!.getAttribute('aria-pressed')).toBe('true');
+      });
+      expect(m2.container.querySelector('section[aria-label="Agenda"]')!.textContent).toContain('Day ten workshop');
+      m2.unmount();
+    });
+
+    it('clicking All shows a day-40 event with no upper bound and persists', async () => {
+      const m = mount(
+        <CalendarPanel events={[...EVENTS, DAY40_EVENT]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />,
+      );
+      await click(m.container.querySelector('[aria-label="All"]')!);
+
+      expect(m.container.querySelector('section[aria-label="Agenda"]')!.textContent).toContain('Far future thing');
+      expect(m.container.querySelector('[aria-label="All"]')!.getAttribute('aria-pressed')).toBe('true');
+      await flush();
+      expect(await getSettingValue('triage.agendaDays')).toBe(Number.POSITIVE_INFINITY);
+      m.unmount();
+    });
+
+    it('the empty state for "All" reads "Nothing coming up."', async () => {
+      const m = mount(<CalendarPanel events={[]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
+      await click(m.container.querySelector('[aria-label="All"]')!);
+      expect(m.container.querySelector('section[aria-label="Agenda"]')!.textContent).toContain('Nothing coming up.');
+      m.unmount();
+    });
+
+    it('empty-state copy is horizon-aware: "Nothing in the next 3 days." after selecting 3', async () => {
+      const m = mount(<CalendarPanel events={[]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
+      await click(m.container.querySelector('[aria-label="3 days"]')!);
+      expect(m.container.querySelector('section[aria-label="Agenda"]')!.textContent).toContain('Nothing in the next 3 days.');
+      m.unmount();
+    });
+
+    it('Custom… reveals a number input; committing a valid value applies, persists it, and unpresses every preset', async () => {
+      const m = mount(
+        <CalendarPanel events={[...EVENTS, DAY40_EVENT]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />,
+      );
+      await click(m.container.querySelector('[aria-label="Custom…"]')!);
+      const input = m.container.querySelector('[aria-label="Custom agenda days"]') as HTMLInputElement;
+      expect(input).not.toBeNull();
+      typeInto(input, '45');
+      blur(input);
+
+      expect(m.container.querySelector('section[aria-label="Agenda"]')!.textContent).toContain('Far future thing');
+      expect(m.container.querySelector('[aria-label="Custom…"]')!.getAttribute('aria-pressed')).toBe('true');
+      for (const label of PRESET_LABELS) {
+        expect(m.container.querySelector(`[aria-label="${label}"]`)!.getAttribute('aria-pressed')).toBe('false');
+      }
+      await flush();
+      expect(await getSettingValue('triage.agendaDays')).toBe(45);
+      m.unmount();
+    });
+
+    it('an invalid custom value shows an inline error, keeps the typed text, and leaves the active horizon unchanged', async () => {
+      const m = mount(
+        <CalendarPanel events={[...EVENTS, DAY10_EVENT]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />,
+      );
+      await click(m.container.querySelector('[aria-label="Custom…"]')!);
+      const input = m.container.querySelector('[aria-label="Custom agenda days"]') as HTMLInputElement;
+      typeInto(input, '-5');
+      blur(input);
+
+      expect(m.container.textContent).toContain('Enter a whole number of days from 1 to 365.');
+      expect(input.value).toBe('-5');
+      // The previously-applied default (7) is still the active horizon.
+      expect(m.container.querySelector('section[aria-label="Agenda"]')!.textContent).not.toContain('Day ten workshop');
+      m.unmount();
+    });
+
+    it('typing into the custom field shows no error mid-typing, only once the field is committed', async () => {
+      const m = mount(
+        <CalendarPanel events={[...EVENTS, DAY10_EVENT]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />,
+      );
+      await click(m.container.querySelector('[aria-label="Custom…"]')!);
+      const input = m.container.querySelector('[aria-label="Custom agenda days"]') as HTMLInputElement;
+
+      // "-5" typed one keystroke at a time: an intermediate "-" alone must
+      // never commit (and so must never show an error) before the field is
+      // actually committed via blur/Enter.
+      typeInto(input, '-');
+      expect(m.container.textContent).not.toContain('Enter a whole number');
+      typeInto(input, '-5');
+      expect(m.container.textContent).not.toContain('Enter a whole number');
+
+      blur(input);
+      expect(m.container.textContent).toContain('Enter a whole number of days from 1 to 365.');
+      m.unmount();
+    });
+
+    it('a stored custom value is restored as Custom… (pressed, prefilled) on a fresh mount', async () => {
+      const m1 = mount(
+        <CalendarPanel events={[...EVENTS, DAY40_EVENT]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />,
+      );
+      await click(m1.container.querySelector('[aria-label="Custom…"]')!);
+      typeInto(m1.container.querySelector('[aria-label="Custom agenda days"]') as HTMLInputElement, '45');
+      blur(m1.container.querySelector('[aria-label="Custom agenda days"]')!);
+      await flush();
+      m1.unmount();
+
+      const m2 = mount(
+        <CalendarPanel events={[...EVENTS, DAY40_EVENT]} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />,
+      );
+      await waitFor(() => {
+        expect(m2.container.querySelector('[aria-label="Custom…"]')!.getAttribute('aria-pressed')).toBe('true');
+      });
+      expect((m2.container.querySelector('[aria-label="Custom agenda days"]') as HTMLInputElement).value).toBe('45');
+      m2.unmount();
+    });
   });
 });
