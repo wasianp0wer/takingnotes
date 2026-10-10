@@ -294,7 +294,7 @@ git commit -m "feat(storage): schema v4 - tags, title provenance, typed pages, a
   - `tagsOf(note: NoteRecord): string[]`
   - `titleSourceOf(note: NoteRecord): TitleSource`
   - `setNoteTags(id: string, tags: readonly string[]): Promise<NoteRecord>`
-  - `renameNote(id: string, title: string): Promise<NoteRecord>`
+  - `renameNote(id: string, title: string): Promise<NoteRecord>` — `async`, so a blank title rejects rather than throwing at the call site
   - `NoteSummaryInput { summary: string; model: string; promptVersion: string; title?: string }`
   - `setNoteSummary(id: string, input: NoteSummaryInput): Promise<NoteRecord>`
   - `listTagVocabulary(): Promise<string[]>`
@@ -461,7 +461,12 @@ export function setNoteTags(id: string, tags: readonly string[]): Promise<NoteRe
  * note out of auto-titling (K20, A34) - the sticky flag is the whole point, so
  * this is the only path that writes a title by hand.
  */
-export function renameNote(id: string, title: string): Promise<NoteRecord> {
+// `async` deliberately, though nothing here awaits: a plain function that
+// throws synchronously while declaring `Promise<NoteRecord>` rejects its
+// *caller* rather than its promise, so `await expect(...).rejects` never
+// sees it and every caller needs a try/catch around the call itself as
+// well as around the await. `async` makes the throw a rejection.
+export async function renameNote(id: string, title: string): Promise<NoteRecord> {
   const trimmed = title.trim();
   // A blank title would leave the note unidentifiable in the list, with no way
   // back except editing it again from a row that no longer names anything.
