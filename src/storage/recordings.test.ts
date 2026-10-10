@@ -12,6 +12,7 @@ import {
   listRecordings,
   listRecordingsBySession,
   listUnfinishedRecordings,
+  recordingOwnersByNote,
   recordingsForNote,
   setRecordingTranscript,
   updateRecording,
@@ -20,7 +21,7 @@ import {
   appendRecordingChunk,
   listRecordingChunks,
 } from '@/storage/recordingChunks';
-import type { AudioTranscriptRecord } from '@/storage/types';
+import type { AudioTranscriptRecord, RecordingRecord } from '@/storage/types';
 import { resetDatabase } from '@/test/resetDb';
 
 const audio = (bytes = [1, 2, 3, 4], type = 'audio/webm') =>
@@ -369,5 +370,77 @@ describe('recordingsForNote (fix round 2, Fix 3a)', () => {
     const note = await createNote({ title: 'Lonely', deviceId: 'huion', pageBaseline: 0 });
 
     expect(await recordingsForNote(note.id)).toEqual([]);
+  });
+});
+
+describe('recordingOwnersByNote (fix round 3, I5)', () => {
+  function rec(overrides: Partial<RecordingRecord> & { id: string }): RecordingRecord {
+    return {
+      sessionId: null,
+      noteId: null,
+      title: 'R',
+      startedAt: 0,
+      endedAt: 1,
+      durationMs: 1000,
+      mimeType: 'audio/webm',
+      byteLength: 10,
+      transcript: null,
+      ...overrides,
+    };
+  }
+
+  it('maps a directly-linked recording to its note', () => {
+    const notes = [{ id: 'n1' }];
+    const recordings = [rec({ id: 'r1', noteId: 'n1' })];
+    expect(recordingOwnersByNote(notes, recordings)).toEqual(new Map([['r1', 'n1']]));
+  });
+
+  it("maps a session-linked recording to the note sharing that session", () => {
+    const notes = [{ id: 'n1', sessionId: 'sess-1' }];
+    const recordings = [rec({ id: 'r1', sessionId: 'sess-1' })];
+    expect(recordingOwnersByNote(notes, recordings)).toEqual(new Map([['r1', 'n1']]));
+  });
+
+  it('leaves a standalone recording (no noteId, no matching session) unmapped', () => {
+    const notes = [{ id: 'n1', sessionId: 'sess-1' }];
+    const recordings = [rec({ id: 'r1', sessionId: 'sess-2' })];
+    expect(recordingOwnersByNote(notes, recordings).size).toBe(0);
+  });
+
+  it('a direct noteId link wins over a session link naming a different note', () => {
+    const notes = [
+      { id: 'direct-note' },
+      { id: 'session-note', sessionId: 'sess-1' },
+    ];
+    const recordings = [rec({ id: 'r1', noteId: 'direct-note', sessionId: 'sess-1' })];
+    expect(recordingOwnersByNote(notes, recordings).get('r1')).toBe('direct-note');
+  });
+
+  it('matches recordingsForNote looped per note, for a corpus with both link kinds', async () => {
+    const viaSession = await createNote({
+      title: 'Via session',
+      deviceId: 'd',
+      pageBaseline: 0,
+      sessionId: 'shared-session',
+    });
+    const direct = await createNote({ title: 'Direct', deviceId: 'd', pageBaseline: 0 });
+    await createRecording(
+      { title: 'A', sessionId: 'shared-session', startedAt: 1_000, durationMs: 1_000, endedAt: 2_000 },
+      audio(),
+    );
+    await createRecording(
+      { title: 'B', noteId: direct.id, startedAt: 1_000, durationMs: 1_000, endedAt: 2_000 },
+      audio(),
+    );
+
+    const finished = await listFinishedRecordings();
+    const looped = new Map<string, string>();
+    for (const note of [viaSession, direct]) {
+      for (const recording of await recordingsForNote(note.id)) {
+        looped.set(recording.id, note.id);
+      }
+    }
+    const batched = recordingOwnersByNote([viaSession, direct], finished);
+    expect(batched).toEqual(looped);
   });
 });
