@@ -188,6 +188,8 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
   onNextPage: (() => void) | null = null;
   /** Fires for every inbound frame. Used by the liveness watchdog. */
   onFrame: (() => void) | null = null;
+  /** K26: fires with the parsed percentage on every `CMD.BATTERY` reply. */
+  onBattery: ((percent: number) => void) | null = null;
 
   // Every consumer callback below is invoked defensively. `log()` and
   // `setStatus()` are called from all over `handleCommand`, which runs inside
@@ -644,6 +646,15 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
     await this.write(makeFrame(CMD.DELETE_PAGE, pageNum & 0xff, (pageNum >> 8) & 0xff));
   }
 
+  /**
+   * K27: re-requests the battery level. Safe to call any time after connect
+   * - the reply arrives through the same `CMD.BATTERY` handler (and
+   * `onBattery`) as the one `connect()`'s own handshake triggers.
+   */
+  async requestBattery(): Promise<void> {
+    await this.write(makeFrame(CMD.BATTERY));
+  }
+
   /** Clears ALL stored pages. DESTRUCTIVE and irreversible. See deletePage. */
   async clearCache(): Promise<void> {
     if (!this.authenticated) throw new Error('Not authenticated');
@@ -1022,7 +1033,7 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
           // Query battery and device name sequentially (GATT can only handle one at a time)
           try {
             await this.sleep(350);
-            await this.write(makeFrame(CMD.BATTERY));
+            await this.requestBattery();
             await this.sleep(350);
             await this.write(makeFrame(CMD.DEVICE_NAME));
           } catch { /* non-critical */ }
@@ -1034,6 +1045,15 @@ export class HuionNoteBLE implements TabletBackendCapabilities {
         if (data.length >= 4) {
           this.config.battery = data[3];
           this.log(`Battery: ${this.config.battery}%`);
+          // Defensive, matching every other consumer callback (onNextPage,
+          // onPen, onFrame): a throwing consumer must not take out
+          // handleNotification's blanket try, which would reach
+          // failInFlightDownload and settle an unrelated in-flight download.
+          try {
+            this.onBattery?.(this.config.battery);
+          } catch (err) {
+            this.log(`onBattery handler threw: ${err instanceof Error ? err.message : err}`);
+          }
         }
         break;
       }

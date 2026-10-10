@@ -25,6 +25,7 @@ const IDLE_RECORDER: RecorderState = {
   elapsedMs: 0,
   link: null,
   error: null,
+  warning: null,
 };
 
 interface FakeRecorder extends Recorder {
@@ -70,6 +71,7 @@ function createFakeRecorder(initial: Partial<RecorderState> = {}): FakeRecorder 
       return null;
     },
     clearError: () => set({ error: null }),
+    getActiveRecordingId: () => null,
     setState: set,
   };
   return fake;

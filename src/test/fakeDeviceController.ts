@@ -20,8 +20,10 @@ export interface FakeDeviceController extends DeviceController {
   /** Delivers one pen point and returns exactly what subscribers received. */
   emitPen(point: FakePenPoint): HuionPenPoint;
   /**
-   * Fires a page-turn event. Pass `storedPageCount` to also move the count, the
-   * way a real turn does - the controller derives turns *from* that count.
+   * Fires a page-turn event. Pass `storedPageCount` to also move the count,
+   * as a real ROM-committed page would, but the count itself no longer
+   * drives the turn (K28/K29): the two are independent here, matching the
+   * real controller.
    */
   emitPageTurn(opts?: { storedPageCount?: number }): void;
   emitLog(line: string): void;
@@ -38,6 +40,7 @@ const idleState: DeviceState = {
   deviceName: '',
   status: 'Disconnected',
   storedPageCount: 0,
+  batteryPercent: null,
 };
 
 /**

@@ -94,14 +94,17 @@ describe('attachPageTurnCapture against the real device controller', () => {
     detach();
   });
 
-  it('forwards a real count-derived page turn to the engine', async () => {
-    // Guards the wiring end to end: the turn comes from the controller's own
-    // detector reading the ROM count, not from a test-only emit seam.
-    let count = 0;
-    const transport = pageCountFake(() => count);
+  it('forwards a real 0x8A-triggered page turn to the engine', async () => {
+    // Guards the wiring end to end: the turn comes from a real CMD.NEXT_PAGE
+    // (0x8A) frame through the controller's own direct-emit path (K28), not
+    // from a test-only emit seam. Phase 1/2's count-rise mechanism this test
+    // used to drive is gone (K29): the pad does not commit pages to ROM
+    // while streaming, so a bare count change - as below, left at 0 - no
+    // longer matters here at all.
+    const transport = pageCountFake(() => 0);
     const controller = createDeviceController(
       () => new HuionNoteBLE(transport),
-      { pageTurn: { pollIntervalMs: 10 } },
+      { pageTurn: { pollIntervalMs: 60_000 } },
     );
     await controller.connect();
     await controller.startStreaming();
@@ -110,8 +113,8 @@ describe('attachPageTurnCapture against the real device controller', () => {
     await flush();
     await engine.startNote();
 
-    count = 1;
-    await tick(80);
+    transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
+    await flush();
     detach();
 
     expect(engine.newPageCalls).toEqual(['device-turn']);

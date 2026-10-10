@@ -104,6 +104,34 @@ describe('DeviceStatus', () => {
     expect(container.textContent).toContain('Reconnect attempt 1');
   });
 
+  it('shows the battery percentage beside the connection status when known', async () => {
+    const fake = createFakeDeviceController({ isConnected: true, deviceName: 'Huion Note' });
+    renderStatus(fake);
+
+    act(() => fake.setDeviceState({ batteryPercent: 82 }));
+
+    expect(container.textContent).toContain('82%');
+  });
+
+  it('shows nothing extra when the battery percentage is unknown', () => {
+    renderStatus(createFakeDeviceController({ isConnected: true, deviceName: 'Huion Note' }));
+
+    // Not just "no digit-percent" (which "null% battery" would also satisfy
+    // were the null check dropped) - no mention of battery at all.
+    expect(container.textContent).not.toContain('battery');
+  });
+
+  it('hides the percentage again once it goes back to null (K27: never a stale number while disconnected)', async () => {
+    const fake = createFakeDeviceController({ isConnected: true, deviceName: 'Huion Note' });
+    renderStatus(fake);
+    act(() => fake.setDeviceState({ batteryPercent: 55 }));
+    expect(container.textContent).toContain('55% battery');
+
+    act(() => fake.setDeviceState({ batteryPercent: null, isConnected: false, status: 'Disconnected' }));
+
+    expect(container.textContent).not.toContain('battery');
+  });
+
   it('surfaces a failed connect instead of doing nothing', async () => {
     const fake = createFakeDeviceController();
     // The common case: the user dismisses the browser's Bluetooth chooser.

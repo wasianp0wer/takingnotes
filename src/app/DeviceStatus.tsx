@@ -67,6 +67,8 @@ export function DeviceStatus({
         <div className="truncate text-[11px] text-muted-foreground">
           {error ?? state.status}
           {state.isConnected && ` · ${state.storedPageCount} pages on device`}
+          {/* K26/K27: hidden entirely when unknown - before the first reply, or while disconnected. */}
+          {state.batteryPercent !== null && ` · ${state.batteryPercent}% battery`}
         </div>
       </div>
       <Button

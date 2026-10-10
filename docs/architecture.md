@@ -915,6 +915,61 @@ chunks and unfinished-recording lookup:
   that recording (a recording deleted while still open would otherwise leave
   orphaned chunk rows, since nothing else scans for them).
 
+**Known limitation, with a named next step: K8's decode proof covers the
+bytes, not the browser - and its fixture's provenance is not the real
+thing either.** S3's mandatory test
+(`src/audio/incrementalRecovery.decode.test.ts`) has two layers. A
+structural check (no external tool) proves that a stitched, truncated
+recording (crashed before `stop()` ever ran, so the container was never
+finalised) parses as well-formed Matroska up to the truncation point - a
+valid header, every chunk boundary landing on a real Cluster, each
+Cluster's own declared size ending exactly on the next boundary. A
+second, conditional check additionally proves the bytes are really
+decodable: when the system's `ffmpeg` is on `PATH`, it is substituted at
+`decodeToPcm16k`'s injectable `decode` seam (`src/audio/pcm.ts:66`) -
+because `happy-dom` provides no real `AudioContext` for this test suite to
+call the genuine article - and decodes the recovered bytes to real,
+non-silent PCM.
+
+Two things this does **not** prove. First, that the browser's own
+`AudioContext.decodeAudioData` accepts the same bytes: `ffmpeg` is known to
+be tolerant of damaged/streamed containers, and a browser's decoder may be
+stricter. Second, and more specifically: the committed fixture this test
+truncates is **`ffmpeg`-authored, not `MediaRecorder`-authored** - it has a
+known-size Segment and a SeekHead pointing at the Cues element the test
+withholds, neither of which a real `MediaRecorder` ever writes (its Segment
+size is unknown from the first byte, since it is streaming output from the
+start, and it never writes Cues regardless of whether `stop()` runs). So
+the artifact under test is a container claiming more data than is present
+and advertising an index that was never going to exist either way, which is
+a different - and not obviously equivalent - strictness question from what
+a real crash-truncated `MediaRecorder` stream actually looks like.
+
+If a browser turns out to reject a truncated recording that this test's
+`ffmpeg` check accepts, the contingency is a remux step before decode
+(anticipated by K8 and deliberately not built, since no failing test has
+asked for it) - and either way the raw bytes are preserved and recoverable
+in `recordingAudio`, so the owner is strictly better off than before S3
+(where an interruption lost the whole recording outright). The one manual
+check that would close both halves of this residual risk at once: capture
+a real `MediaRecorder` crash-truncation (interrupt a real recording on real
+hardware mid-lecture, reload without a graceful stop), reopen the app, and
+confirm the recovered recording both plays and transcribes.
+
+**K28/K29 side effect: `PageRecord.devicePageNum` no longer distinguishes
+pages within a streaming session.** `engine.devicePageNum()`
+(`src/capture/engine.ts`) stamps `storedPageCount + 1` on each new page, and
+`storedPageCount` does not rise while the pad is streaming (the pad does not
+commit pages to ROM live) - true before S3 as well, but S3 is what makes a
+page turn fire reliably on every `0x8A` press rather than only on the rare
+press that happened to coincide with a ROM-count rise. The practical
+consequence: a note written across many physical page turns in one sitting
+now gets many pages, all carrying the identical, frozen `devicePageNum` for
+that session - the field answers "what did the pad's ROM counter read when
+streaming started", not "which physical page is this". Nothing in S3 reads
+or relies on `devicePageNum` being distinct per page; this is recorded here
+because a future feature that does would be reading stale information.
+
 ### 8.3 `resumeNote`'s contract
 
 Declared on `CaptureEngine` in `src/capture/types.ts`:

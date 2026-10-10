@@ -12,6 +12,7 @@ describe('fake device controller', () => {
       deviceName: '',
       status: 'Disconnected',
       storedPageCount: 0,
+      batteryPercent: null,
     });
   });
 

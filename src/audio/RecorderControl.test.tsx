@@ -32,6 +32,7 @@ const IDLE_STATE: RecorderState = {
   elapsedMs: 0,
   link: null,
   error: null,
+  warning: null,
 };
 
 interface FakeRecorder extends Recorder {
@@ -61,6 +62,7 @@ function createFakeRecorder(initial: Partial<RecorderState> = {}): FakeRecorder 
       return null;
     }),
     clearError: vi.fn(() => set({ error: null })),
+    getActiveRecordingId: vi.fn(() => null),
     setState: set,
   };
 }
