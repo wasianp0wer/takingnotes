@@ -163,6 +163,30 @@ describe('TagFilterBar', () => {
     expect(onClear).toHaveBeenCalled();
   });
 
+  it('offers Clear filter even when the selection hides nothing', async () => {
+    // A filter every note happens to carry: hiddenCount is 0 and the active
+    // note is not exempted, but a selection still exists - the owner must be
+    // able to drop it in one action rather than untoggling each chip by hand.
+    const onClear = vi.fn();
+    await act(async () => {
+      root.render(
+        <TagFilterBar
+          vocabulary={['seminar']}
+          selected={['seminar']}
+          mode="or"
+          hiddenCount={0}
+          activeNoteExempted={false}
+          onToggleTag={vi.fn()}
+          onModeChange={vi.fn()}
+          onClear={onClear}
+        />,
+      );
+    });
+    expect(container.textContent).not.toContain('hidden by this filter');
+    await click(buttonByText('Clear filter'));
+    expect(onClear).toHaveBeenCalled();
+  });
+
   it('uses the singular for exactly one hidden note', async () => {
     await act(async () => {
       root.render(

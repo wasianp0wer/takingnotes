@@ -11,6 +11,10 @@ export interface TagEditorProps {
   onChanged: () => void;
 }
 
+/** Shown on a failed add or remove - the console message alone would leave a
+ * silently cleared input indistinguishable from a successful save. */
+const TAG_SAVE_FAILED = "Couldn't save your tags — try again.";
+
 /**
  * Inline tag editing (K38), mounted at `NoteToolbar.meta` under the
  * title/title-slot. The only writer is `setNoteTags` (K36) - normalization
@@ -19,14 +23,26 @@ export interface TagEditorProps {
 export function TagEditor({ noteId, tags, onChanged }: TagEditorProps) {
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  async function write(nextTags: readonly string[]): Promise<void> {
+  /**
+   * Reports success back to the caller (mirrors `useTriageData`'s
+   * `rethrow`-shaped contracts) so a caller that holds the only copy of what
+   * the user typed - `addTag` below - can decide for itself whether it is
+   * safe to clear that input, rather than this function clearing it on the
+   * caller's behalf regardless of outcome.
+   */
+  async function write(nextTags: readonly string[]): Promise<boolean> {
     setSaving(true);
     try {
       await setNoteTags(noteId, nextTags);
+      setError(null);
       onChanged();
-    } catch (error) {
-      console.error('[notes] could not update tags', error);
+      return true;
+    } catch (err) {
+      console.error('[notes] could not update tags', err);
+      setError(TAG_SAVE_FAILED);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -39,8 +55,11 @@ export function TagEditor({ noteId, tags, onChanged }: TagEditorProps) {
   async function addTag(): Promise<void> {
     const raw = draft.trim();
     if (raw === '') return;
-    await write([...tags, raw]);
-    setDraft('');
+    const ok = await write([...tags, raw]);
+    // Only on success: the spec's own wording ("clears the input ... on
+    // submit") describes the success path - clearing on a failed write would
+    // throw away the only copy of what the owner typed with no way back.
+    if (ok) setDraft('');
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLInputElement>): void {
@@ -81,6 +100,11 @@ export function TagEditor({ noteId, tags, onChanged }: TagEditorProps) {
       <Button type="button" variant="outline" size="sm" disabled={saving} onClick={() => void addTag()}>
         Add tag
       </Button>
+      {error && (
+        <span role="alert" className="text-xs text-destructive">
+          {error}
+        </span>
+      )}
     </div>
   );
 }

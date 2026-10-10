@@ -10,12 +10,35 @@ declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
 }
 
+/**
+ * How many of the next `setNoteTags` calls fail, so a test can fail one
+ * specific write without disarming the countdown by hand and racing it.
+ * Same shape and same reason as `src/capture/engine.test.ts`'s
+ * `failNoteWrites`.
+ */
+const hooks = vi.hoisted(() => ({ failSetNoteTags: 0 }));
+
+vi.mock('@/storage/notes', async () => {
+  const actual = await vi.importActual<typeof import('@/storage/notes')>('@/storage/notes');
+  return {
+    ...actual,
+    setNoteTags: (id: Parameters<typeof actual.setNoteTags>[0], tags: readonly string[]) => {
+      if (hooks.failSetNoteTags > 0) {
+        hooks.failSetNoteTags -= 1;
+        return Promise.reject(new Error('tag write failed'));
+      }
+      return actual.setNoteTags(id, tags);
+    },
+  };
+});
+
 let container: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
 
 beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   await resetDatabase();
+  hooks.failSetNoteTags = 0;
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -151,5 +174,47 @@ describe('TagEditor', () => {
 
     expect(onChanged).not.toHaveBeenCalled();
     expect((await getNote(note.id))?.tags ?? []).toEqual([]);
+  });
+
+  it('a failing write on add leaves the draft intact, saves nothing, and shows a message', async () => {
+    const note = await createNote({ title: 'N', deviceId: 'huion', pageBaseline: 0 });
+    const onChanged = vi.fn();
+    await act(async () => {
+      root.render(<TagEditor noteId={note.id} tags={[]} onChanged={onChanged} />);
+    });
+
+    hooks.failSetNoteTags = 1;
+    await type(input(), 'thesis');
+    await click(buttonByText('Add tag'));
+    await settle();
+
+    expect(onChanged).not.toHaveBeenCalled();
+    expect((await getNote(note.id))?.tags ?? []).toEqual([]);
+    // The typed text must survive a failed write - it is the owner's only copy.
+    expect(input().value).toBe('thesis');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Couldn't save");
+  });
+
+  it('a failing write on remove leaves the chip and shows a message', async () => {
+    const note = await createNote({ title: 'N', deviceId: 'huion', pageBaseline: 0 });
+    await setNoteTags(note.id, ['seminar']);
+    const onChanged = vi.fn();
+    await act(async () => {
+      root.render(<TagEditor noteId={note.id} tags={['seminar']} onChanged={onChanged} />);
+    });
+
+    hooks.failSetNoteTags = 1;
+    const removeButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Remove tag seminar"]',
+    );
+    if (!removeButton) throw new Error('no remove button');
+    await click(removeButton);
+    await settle();
+
+    expect(onChanged).not.toHaveBeenCalled();
+    expect((await getNote(note.id))?.tags).toEqual(['seminar']);
+    // The chip must still be backed by a tag that is actually still on the note.
+    expect(container.querySelector('button[aria-label="Remove tag seminar"]')).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Couldn't save");
   });
 });

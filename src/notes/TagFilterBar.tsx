@@ -36,6 +36,11 @@ export function TagFilterBar({
   if (vocabulary.length === 0 && selected.length === 0) return null;
 
   const showStatus = hiddenCount > 0 || activeNoteExempted;
+  // Clear must be reachable whenever a selection exists, not only when the
+  // selection happens to be hiding or exempting something - a filter that
+  // currently matches every note is still a filter the owner may want to
+  // drop in one action rather than untoggling each chip by hand.
+  const showClear = selected.length > 0;
 
   return (
     <div className="border-b border-border px-4 py-2">
@@ -84,7 +89,7 @@ export function TagFilterBar({
         </div>
       )}
 
-      {showStatus && (
+      {(showStatus || showClear) && (
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           {hiddenCount > 0 && (
             <span>
@@ -94,7 +99,7 @@ export function TagFilterBar({
           {activeNoteExempted && (
             <span>{"The note you're writing doesn't match this filter — shown anyway."}</span>
           )}
-          {selected.length > 0 && (
+          {showClear && (
             <Button type="button" variant="ghost" size="sm" onClick={onClear}>
               Clear filter
             </Button>
