@@ -96,7 +96,15 @@ Each orchestrator is dispatched with the brief below as its entire context, plus
 
 **Off limits:** `src/capture/SessionControls.tsx` — S1 owns it, including deleting the "audio was lost" sentence your work makes false (K9). `src/capture/engine.ts` and `types.ts` (S4). `src/storage/*` (Wave 1 shipped `appendRecordingChunk`, `stitchRecordingChunks`, `deleteRecordingChunks`, `listUnfinishedRecordings`).
 
-**Consumes from Wave 1:** the chunk repository and `listUnfinishedRecordings` from `@/storage/recordingChunks` and `@/storage/recordings`.
+**Consumes from Wave 1:** the chunk repository, `listUnfinishedRecordings`, `listFinishedRecordings` and `finalizeRecording` from `@/storage/recordingChunks` and `@/storage/recordings`.
+
+⚑ **Two things the whole-branch review of Wave 1 found, which you cannot fix yourself because `src/storage/*` is off limits to you. Both end in the owner losing a lecture. Read them before you write any recorder code.**
+
+**Use `finalizeRecording()` for stop — never a stitch-then-patch sequence.** K6's written order (stitch → write audio → delete chunks → patch `endedAt`) spans two transactions, and a crash between them leaves `endedAt === null`, zero chunks, and a complete correct recording in `recordingAudio` — which K7's "a recording with no chunks is deleted" rule then throws away. Wave 1 added `finalizeRecording(id, audio, patch)` to do all three writes in one transaction, which closes the window. Your recovery path must also patch `endedAt` after stitching, or the next launch finds zero chunks and deletes the row.
+
+**`listRecordings()` now returns in-progress recordings, and three existing consumers will misbehave until you fix them.** Since K5 a `RecordingRecord` exists from the moment recording starts, with `transcript: null` and a zero-byte `recordingAudio` row. Left alone, this destroys a transcript on the very reload K4 exists to survive: `startAudioRuntime()` calls `queue.resume()`, which enqueues anything with `transcript === null`; `getRecordingAudio()` returns a 0-byte Blob rather than `null` because the row exists; the decode throws and the queue writes `status: 'failed'`; and `resume()` never re-enqueues a failed transcript, so it is sticky across every future reload. The audio survives and its text is gone, silently.
+
+So, in your own files: filter through `listFinishedRecordings()` in `transcriptionQueue.resume()`, in `RecordingsView`, and in `recordingForNote` (`src/gaps/analyzer.ts` — an exception to the off-limits list, granted for this one predicate). And **startup ordering is load-bearing**: your K7 recovery must complete before `queue.resume()` runs, not alongside it.
 
 **Done when:** ⚑ **K8's decode test exists, failed first, and passes** — a recording truncated mid-stream, stitched by recovery, both plays and survives the decode path `whisperWorkerCore` uses. Plus: a reload mid-recording leaves the recording present and transcribed; the battery percentage shows and refreshes; the poll stops firing at a disconnected pad and the percentage goes `null`; and pressing the pad's page button creates a page in the app, once per press.
 
@@ -113,6 +121,8 @@ Each orchestrator is dispatched with the brief below as its entire context, plus
 
 **Off limits:** `src/storage/pages.ts` (Wave 1 shipped `createTypedPage`, `setPageText`, `isTypedPage`). `src/capture/SessionControls.tsx` (S1). `src/audio/*` and `src/device/*` (S3). `src/notes/NoteToolbar.tsx` and `src/notes/NoteList.tsx` — use their slots; do not edit them.
 
+**You also own `src/capture/pageTurnTestEngine.ts`.** Adding `newTypedPage` to the `CaptureEngine` interface breaks `tsc -b` on every object literal implementing it; that stub is one, and Wave 1 removed the `as unknown as CaptureEngine` casts from the other two so the compiler now catches them all. Add a rejecting stub to each, in the style already there.
+
 **Consumes from Wave 1:** `createTypedPage`, `setPageText`, `isTypedPage`, `TYPED_MODEL`, `TYPED_PROMPT_VERSION` from `@/storage/pages`; the `NoteToolbar.actions` slot.
 
 **Done when:** a typed page can be created and typed into mid-session; its text appears in its transcript as `status: 'done'` (so transcription skips it); a blank typed page has no transcript; handwritten and typed pages mix in one note in any order; and writing on the pad while a typed page is open starts a new live page instead of mixing ink into the typed one.
@@ -128,6 +138,8 @@ Each orchestrator is dispatched with the brief below as its entire context, plus
 - `src/notes/NotesView.tsx` — **shared, see the merge note.** Pass your components into `NoteList.filter` and `NoteToolbar.meta`.
 
 **Off limits:** `src/storage/notes.ts` (Wave 1 shipped `normalizeTags`, `setNoteTags`, `tagsOf`, `listTagVocabulary`). `src/notes/NoteList.tsx` and `NoteToolbar.tsx` — use their slots. `src/capture/*`, `src/audio/*`, `src/triage/*`.
+
+**`NoteList`'s empty state is not yours to reword.** It reads "No notes yet — write on the pad to start one", which becomes a lie when your filter matches nothing out of two hundred notes. You cannot edit that component, and you do not need to: put the explanation in your own filter slot instead — "3 notes hidden by this filter", with a way to clear it. That also satisfies your ⚑ done-when about never silently hiding the note being written.
 
 **Consumes from Wave 1:** `normalizeTags`, `setNoteTags`, `tagsOf`, `listTagVocabulary` from `@/storage/notes`; the `NoteList.filter` and `NoteToolbar.meta` slots.
 
