@@ -28,14 +28,22 @@ export interface NamingQueue {
 
 /**
  * Whether a page has finished transcribing, for K17's "pages have finished
- * transcribing" test. A `transcript !== null` page is done one way or
- * another (done or failed - see the caller's separate failed-page check);
- * a `typed` page with `transcript === null` is also finished - K33's "blank
- * typed page" is a deliberate terminal state, not a page still waiting on a
- * transcription queue that will never pick it up.
+ * transcribing" test. Keyed on `transcript.status`, not on nullness (fix
+ * round 1, Critical): `transcription/queue.ts`'s `markPending` writes a
+ * non-null `pending` transcript record before the model has even run, and
+ * the `running` write happens before it finishes either - both would read
+ * as "finished" under a bare `transcript !== null` check, which is exactly
+ * what let a note get named from whatever pages happened to be `done`
+ * while its last page was still queued. Only `done` and `failed` are
+ * terminal; `failed` is caught by the caller's separate K19 check. A
+ * `typed` page with `transcript === null` is finished regardless - K33's
+ * "blank typed page" is a deliberate terminal state, not a page waiting on
+ * a transcription queue that will never pick it up.
  */
 function pageFinishedTranscribing(page: PageRecord): boolean {
-  return page.transcript !== null || page.source === 'typed';
+  if (page.source === 'typed') return true;
+  const status = page.transcript?.status;
+  return status === 'done' || status === 'failed';
 }
 
 /**

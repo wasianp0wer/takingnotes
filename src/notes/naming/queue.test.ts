@@ -79,6 +79,39 @@ describe('noteReadyForNaming', () => {
     expect(noteReadyForNaming(note(), [donePage(), notDone])).toBe(false);
   });
 
+  it('is false while any page transcript is pending (fix round 1, Critical)', () => {
+    // The transcription queue's own `markPending` writes a non-null
+    // `pending` transcript record and emits - a naive `transcript !== null`
+    // check would misread that as finished, exactly the bug this guards.
+    const pending = donePage({
+      id: 'page-2',
+      transcript: {
+        markdown: '',
+        model: MODEL,
+        promptVersion: 'gemma-v1',
+        status: 'pending',
+        error: null,
+        updatedAt: 0,
+      },
+    });
+    expect(noteReadyForNaming(note(), [donePage(), pending])).toBe(false);
+  });
+
+  it('is false while any page transcript is running (fix round 1, Critical)', () => {
+    const running = donePage({
+      id: 'page-2',
+      transcript: {
+        markdown: '',
+        model: MODEL,
+        promptVersion: 'gemma-v1',
+        status: 'running',
+        error: null,
+        updatedAt: 0,
+      },
+    });
+    expect(noteReadyForNaming(note(), [donePage(), running])).toBe(false);
+  });
+
   it('is true for a typed page whose transcript is null (deliberately blank, K33)', () => {
     const typed = donePage({ id: 'page-2', source: 'typed', transcript: null, text: '' });
     expect(noteReadyForNaming(note(), [donePage(), typed])).toBe(true);
@@ -249,6 +282,75 @@ describe('createNamingQueue', () => {
     const updated = await getNote(created.id);
     expect(updated?.summary).toBeNull();
     expect(updated?.title).toBe('Note A');
+  });
+
+  it('does not name a note whose last page has only just been marked pending (fix round 1, Critical)', async () => {
+    // The ordinary note-end race the review flagged: pages 1-2 are done,
+    // the note just went complete, and page 3 has been finalized and
+    // marked `pending` by the transcription queue (a non-null transcript
+    // record, exactly what `markPending` writes) - but has not actually
+    // transcribed yet. A naive `transcript !== null` check would read page
+    // 3 as finished and name the note from pages 1-2 alone.
+    const created = await createNote({ title: 'Note A', deviceId: 'huion', pageBaseline: 0, status: 'complete' });
+    for (let i = 0; i < 2; i++) {
+      const page = await createPage({
+        noteId: created.id,
+        pageIndex: i,
+        devicePageNum: i + 1,
+        source: 'live',
+        strokes: [],
+      });
+      await setPageTranscript(page.id, {
+        markdown: `Page ${i} notes.`,
+        model: MODEL,
+        promptVersion: 'gemma-v1',
+        status: 'done',
+        error: null,
+        updatedAt: 0,
+      });
+    }
+    const page3 = await createPage({
+      noteId: created.id,
+      pageIndex: 2,
+      devicePageNum: 3,
+      source: 'live',
+      strokes: [],
+    });
+    await setPageTranscript(page3.id, {
+      markdown: '',
+      model: MODEL,
+      promptVersion: 'gemma-v1',
+      status: 'pending',
+      error: null,
+      updatedAt: 0,
+    });
+
+    const d = setup();
+    await d.queue.start();
+    // The note-end event: page 3 was just finalized (and is now pending).
+    await d.firePageFinalized(page3.id);
+    await d.queue.idle();
+
+    expect(d.generator.calls).toEqual([]);
+    const updated = await getNote(created.id);
+    expect(updated?.summary).toBeNull();
+    expect(updated?.title).toBe('Note A');
+
+    // Once page 3 actually finishes, the note is named correctly - proving
+    // this is a timing fix, not a permanent block.
+    await setPageTranscript(page3.id, {
+      markdown: 'Page 2 notes.',
+      model: MODEL,
+      promptVersion: 'gemma-v1',
+      status: 'done',
+      error: null,
+      updatedAt: 0,
+    });
+    await d.fireTranscriptChange(page3.id);
+    await d.queue.idle();
+
+    expect(d.generator.calls).toHaveLength(1);
+    expect(d.generator.calls[0].prompt).toContain('Page 2 notes.');
   });
 
   it('never enqueues a note whose joined page text is entirely blank', async () => {
