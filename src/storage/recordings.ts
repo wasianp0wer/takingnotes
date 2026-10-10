@@ -166,6 +166,53 @@ export async function recordingsForNote(noteId: string): Promise<RecordingRecord
   return [...candidates.values()];
 }
 
+/**
+ * The batch form of `recordingsForNote`'s matching logic (fix round 3, I5):
+ * takes notes and finished recordings the caller has *already loaded* and
+ * returns the recordingId -> noteId map in one pass, with no further
+ * storage reads. Built for S6's corpus load, which previously called
+ * `recordingsForNote` once per note - each call doing its own full
+ * `listFinishedRecordings()` scan (whose rows carry entire
+ * `transcript.segments` arrays) - turning an O(1) scan into an O(notes)
+ * one. This is still the one place both link paths (direct `noteId`, or
+ * via the note's session, K12/A32) are checked; a caller with the data
+ * already in hand should call this rather than loop over
+ * `recordingsForNote`, the same way a caller without it calls
+ * `recordingsForNote` itself rather than re-deriving the two paths by hand.
+ *
+ * One difference from looping `recordingsForNote`, deliberately: a
+ * recording could in principle satisfy *two different* notes' link paths
+ * at once (its own `noteId` pointing at note A, its `sessionId` matching
+ * note B's session) - looping `recordingsForNote` per note would attribute
+ * it to whichever note the loop happened to visit last, an arbitrary,
+ * iteration-order-dependent choice. This function resolves that
+ * deterministically: a direct `noteId` link always wins over a
+ * session-only one, since a recording's own `noteId` is the more specific
+ * claim.
+ */
+export function recordingOwnersByNote(
+  notes: readonly { id: string; sessionId?: string | null }[],
+  finishedRecordings: readonly RecordingRecord[],
+): Map<string, string> {
+  const noteBySession = new Map<string, string>();
+  for (const note of notes) {
+    if (typeof note.sessionId === 'string') noteBySession.set(note.sessionId, note.id);
+  }
+
+  const owner = new Map<string, string>();
+  for (const recording of finishedRecordings) {
+    if (typeof recording.noteId === 'string') {
+      owner.set(recording.id, recording.noteId);
+      continue;
+    }
+    if (typeof recording.sessionId === 'string') {
+      const noteId = noteBySession.get(recording.sessionId);
+      if (noteId !== undefined) owner.set(recording.id, noteId);
+    }
+  }
+  return owner;
+}
+
 /** Reconstructs the audio as a `Blob`; `null` when there are no bytes for that id. */
 export async function getRecordingAudio(id: string): Promise<Blob | null> {
   const db = await openNotesDb();

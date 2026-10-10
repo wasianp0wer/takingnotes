@@ -25,6 +25,29 @@ function statusWord(recording: RecordingRecord): string {
 }
 
 /**
+ * Fix round 1, Finding 1: an external caller (Search, via `AppShell`)
+ * asking this view to select a specific recording. `token` is bumped on
+ * every request, including a repeat of the exact recording already
+ * selected - without it, a second identical request would silently do
+ * nothing (the view has already "seen" that id).
+ */
+export interface RecordingsExternalSelection {
+  token: number;
+  recordingId: string;
+  /** The segment to look for, when the request names one (K41). */
+  startMs?: number;
+}
+
+export interface RecordingsViewProps {
+  /** Tests only - a real mount defaults to the app-wide singleton. */
+  queue?: TranscriptionQueue;
+  /** See `RecordingsExternalSelection`. */
+  external?: RecordingsExternalSelection;
+  /** Called once the request above has been applied, so the caller (`AppShell`) can clear its own pending state. */
+  onExternalSelectionApplied?: () => void;
+}
+
+/**
  * F2's Recordings tab: the list of captured recordings on the left, the
  * selected one's player and transcript on the right.
  *
@@ -33,10 +56,16 @@ function statusWord(recording: RecordingRecord): string {
  * resolved once so it survives re-renders; a caller that passes one (tests)
  * owns starting the audio runtime itself.
  */
-export function RecordingsView(props?: { queue?: TranscriptionQueue }) {
+export function RecordingsView(props?: RecordingsViewProps) {
   const [queue] = useState<TranscriptionQueue>(() => props?.queue ?? getAudioRuntime().queue);
   const [recordings, setRecordings] = useState<RecordingRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The segment a Search hit named, shown as a hint beside the player since
+  // this view cannot seek `RecordingDetail`'s audio element itself (it owns
+  // its own ref; seeking it is `RecordingDetail`'s file to add, outside
+  // this fix's ownership - see docs/features/s6-report.md). Cleared when
+  // the user picks a different recording by hand.
+  const [segmentHintMs, setSegmentHintMs] = useState<number | null>(null);
   // Bumped at the start of every `load()` call; a resolution is only applied
   // if it is still the most recently *started* one. `subscribeChanges` fires
   // once per persisted status write (pending -> running -> done in quick
@@ -46,12 +75,28 @@ export function RecordingsView(props?: { queue?: TranscriptionQueue }) {
   // it again on unmount (in the effect's cleanup) also makes this subsume a
   // plain "still mounted" guard, so there is no separate mounted ref.
   const seqRef = useRef(0);
+  // The external token already applied, so a request is honoured at most
+  // once (same reasoning as `NotesView`'s `appliedExternalToken`). A ref,
+  // not state: it is read and written only from inside `load()` (an effect
+  // callback, never render), and doesn't itself need to trigger a re-render
+  // - `setSelectedId`/`setSegmentHintMs` already do.
+  const appliedExternalTokenRef = useRef<number | null>(null);
+  const external = props?.external;
+  const onExternalSelectionApplied = props?.onExternalSelectionApplied;
 
   // Subscribes the view to the queue's live state (active/queued ids,
   // progress) so it re-renders in step with `RecordingDetail`, not only when
   // a persisted write fires `subscribeChanges`.
   useSyncExternalStore(queue.subscribe, queue.getState);
 
+  // Depends on `external`/`onExternalSelectionApplied` (not `[]`) so a new
+  // request arriving while this view is already mounted still re-runs the
+  // effect below and applies it immediately, not only on the next
+  // unrelated reload. Harmless to recreate on every *unrelated* parent
+  // render too, as long as those props keep a stable identity when nothing
+  // has actually changed - `AppShell`'s `navigationTarget`-derived props do
+  // (a `useState` value and a `useCallback`), so this does not resubscribe
+  // on every render, only on an actual new request.
   const load = useCallback(async () => {
     const seq = ++seqRef.current;
     // listFinishedRecordings(), not listRecordings(): since K5 a
@@ -61,10 +106,23 @@ export function RecordingsView(props?: { queue?: TranscriptionQueue }) {
     const list = await listFinishedRecordings();
     if (seq !== seqRef.current) return;
     setRecordings(list);
+
+    if (
+      external !== undefined &&
+      external.token !== appliedExternalTokenRef.current &&
+      list.some((r) => r.id === external.recordingId)
+    ) {
+      appliedExternalTokenRef.current = external.token;
+      setSelectedId(external.recordingId);
+      setSegmentHintMs(external.startMs ?? null);
+      onExternalSelectionApplied?.();
+      return;
+    }
+
     setSelectedId((current) =>
       current && list.some((r) => r.id === current) ? current : (list[0]?.id ?? null),
     );
-  }, []);
+  }, [external, onExternalSelectionApplied]);
 
   useEffect(() => {
     void load();
@@ -104,7 +162,10 @@ export function RecordingsView(props?: { queue?: TranscriptionQueue }) {
               <button
                 type="button"
                 data-recording-id={recording.id}
-                onClick={() => setSelectedId(recording.id)}
+                onClick={() => {
+                  setSelectedId(recording.id);
+                  setSegmentHintMs(null);
+                }}
                 aria-current={recording.id === selectedId}
                 className="flex w-full flex-col gap-0.5 border-b border-border px-4 py-2 text-left text-sm hover:bg-accent aria-[current=true]:bg-accent"
               >
@@ -126,6 +187,11 @@ export function RecordingsView(props?: { queue?: TranscriptionQueue }) {
         </ul>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-4">
+        {selected && segmentHintMs !== null && (
+          <p className="mb-2 text-xs text-muted-foreground">
+            Jumped here from search — look for the segment at {formatClock(segmentHintMs)}.
+          </p>
+        )}
         {selected && (
           <RecordingDetail
             key={selected.id}

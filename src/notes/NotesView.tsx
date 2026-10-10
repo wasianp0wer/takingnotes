@@ -22,11 +22,29 @@ import { useNotesData } from '@/notes/useNotesData';
 import { tagsOf } from '@/storage/notes';
 import { isTypedPage } from '@/storage/pages';
 
+/**
+ * Fix round 1, Finding 1: an external caller (Search, via `AppShell`)
+ * asking this view to jump to a specific note + page. `token` is bumped on
+ * every request, including a repeat of the exact note+page already
+ * selected - a bare `{noteId, pageIndex}` with no change signal would
+ * silently do nothing on a second identical request, since the view has
+ * already "seen" that pair.
+ */
+export interface NotesExternalSelection {
+  token: number;
+  noteId: string;
+  pageIndex: number;
+}
+
 export interface NotesViewProps {
   /** Tests only - a real mount builds its own via `ensureTranscriptionQueue`. */
   queue?: TranscriptionQueue;
   /** Tests only - a real mount builds its own via `ensureNamingQueue`. */
   namingQueue?: NamingQueue;
+  /** See `NotesExternalSelection`. */
+  external?: NotesExternalSelection;
+  /** Called once the request above has been applied, so the caller (`AppShell`) can clear its own pending state. */
+  onExternalSelectionApplied?: () => void;
 }
 
 /**
@@ -58,6 +76,11 @@ export function NotesView(props?: NotesViewProps) {
   // being viewed is the one being recorded (see below); free to navigate
   // independently otherwise.
   const [pageIndex, setPageIndex] = useState(0);
+  // Fix round 1, Finding 1: the `external.token` already applied, so a
+  // request is honoured at most once and a later render doesn't keep
+  // re-asserting it over the user's own navigation.
+  const [appliedExternalToken, setAppliedExternalToken] = useState<number | null>(null);
+  const external = props?.external;
 
   const { notes, visibleNotes, pages, tagFilter, reloadNotes } = useNotesData(
     selectedNoteId,
@@ -90,11 +113,36 @@ export function NotesView(props?: NotesViewProps) {
   const activePageIndexChanged = prevActivePageIndex !== state.pageIndex;
   if (activePageIndexChanged) setPrevActivePageIndex(state.pageIndex);
 
+  // Fix round 1, Finding 1: a pending request this view hasn't applied yet
+  // (by token, not by value - see `NotesExternalSelection`'s own comment).
+  const hasPendingExternalSelection = external !== undefined && external.token !== appliedExternalToken;
+
   if (activeNoteIdChanged && state.activeNoteId !== null) {
     // A note just became (or stayed) active: follow it and its live page,
-    // overriding whatever the user had picked.
+    // overriding whatever the user had picked - including a pending
+    // external request, which is never checked in this branch. This branch
+    // can only fire on a render *after* mount (`prevActiveNoteId`
+    // initializes from `state.activeNoteId`, so `activeNoteIdChanged` is
+    // always false on the very first render of a fresh mount) - and this
+    // view is remounted fresh every time `AppShell` switches to this tab
+    // (Radix's `TabsContent` unmounts inactive panels), which is the only
+    // way a Search-driven `external` prop ever arrives. So a *fresh*
+    // external request is never seen on the same render as this branch
+    // firing; the only way they could coincide is a brand new note starting
+    // *after* an external request was already applied, later in the same
+    // mount - and letting that override a stale, already-consumed request
+    // is correct (K16), not a regression this feature should prevent.
     if (selectedNoteId !== state.activeNoteId) setSelectedNoteId(state.activeNoteId);
     if (pageIndex !== state.pageIndex) setPageIndex(state.pageIndex);
+  } else if (hasPendingExternalSelection) {
+    // A caller outside this view (Search, via `AppShell`) asked to jump to
+    // a specific note + page. Takes priority over both the "nothing chosen
+    // yet" default below and a stale page-turn follow, since it is a more
+    // specific, more recent instruction than either - but never over the
+    // active-note branch above, for the reason stated there.
+    setAppliedExternalToken(external.token);
+    if (selectedNoteId !== external.noteId) setSelectedNoteId(external.noteId);
+    if (pageIndex !== external.pageIndex) setPageIndex(external.pageIndex);
   } else if (selectedNoteId === null) {
     // Nothing chosen yet: the active note if there is one, else the newest
     // (`notes` is newest-first - see `listNotes`).
@@ -107,6 +155,24 @@ export function NotesView(props?: NotesViewProps) {
     // Viewing the active note while it turns pages: follow along.
     setPageIndex(state.pageIndex);
   }
+
+  // Tells the caller once the request above has been applied, so it can
+  // clear its own pending state (and a later, unrelated switch to this tab
+  // never re-triggers a stale one). Deferred to an effect rather than
+  // called inline above: that block already calls `setState` on *this*
+  // component during render (an established pattern in this file), but
+  // calling an ancestor's setState from here during render risks React's
+  // "Cannot update a component while rendering a different component"
+  // warning - an effect, which runs after commit, does not.
+  useEffect(() => {
+    if (appliedExternalToken !== null) props?.onExternalSelectionApplied?.();
+    // Deliberately keyed on the token alone, not on `props` (a new object
+    // every render) or on `onExternalSelectionApplied` itself (the caller's
+    // own job to keep stable, like every other callback prop in this file) -
+    // this must fire exactly once per newly-applied token, not once per
+    // unrelated re-render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appliedExternalToken]);
 
   const selectedNote = notes.find((n) => n.id === selectedNoteId) ?? null;
   const viewedIndex = pages.length > 0 ? Math.min(Math.max(pageIndex, 0), pages.length - 1) : 0;
