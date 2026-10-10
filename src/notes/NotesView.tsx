@@ -221,7 +221,17 @@ export function NotesView(props?: NotesViewProps) {
             <Button
               variant="outline"
               size="sm"
-              disabled={state.activeNoteId === null || creatingTypedPage}
+              // Fix round 2, Fix 4: the only mutating toolbar control that
+              // wasn't gated on the resume lock. §8.3's hazard window is
+              // this call's too - it reads `state.activeNoteId`/`pageIndex`
+              // (inside its own op) while a resume elsewhere may still be
+              // between `noteOpen = true` and publishing the resumed note's
+              // state - so disabling while `resumeLockState.pending` matches
+              // New note's own gating rather than leaning on the engine's
+              // op-chain FIFO to keep this correct by accident.
+              disabled={
+                state.activeNoteId === null || creatingTypedPage || resumeLockState.pending
+              }
               title={
                 state.activeNoteId === null
                   ? 'Start a note to begin typing'

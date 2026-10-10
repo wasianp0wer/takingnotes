@@ -9,6 +9,7 @@ import type { NamingQueue } from '@/notes/naming/queue';
 import { resetNamingQueueForTests } from '@/notes/naming/startNaming';
 import { NotesView } from '@/notes/NotesView';
 import { resetResumeLockForTests } from '@/notes/resumeLock';
+import { PAGE_TRANSCRIBING_MESSAGE } from '@/notes/TranscriptPanel';
 import { createNote, getNote, setNoteSummary, setNoteTags } from '@/storage/notes';
 import { createPage, getPage, setPageTranscript } from '@/storage/pages';
 import type { NoteRecord, PageRecord, TranscriptStatus } from '@/storage/types';
@@ -477,12 +478,24 @@ describe('NotesView', () => {
     expect(saved?.transcript?.markdown).toBe('Newton: F=ma');
   });
 
-  it('does not show the "not yet transcribed" message for the active typed page', async () => {
+  it('shows the transcribing message for the active, unfinalized live page (fix round 2, Fix 4)', async () => {
+    // The positive case the absence check below needs: without this, nothing
+    // in the suite ever proves `PAGE_TRANSCRIBING_MESSAGE` shows up for the
+    // live page it actually describes, so a change that silently stopped it
+    // from ever rendering (for any page) would leave the typed-page test
+    // below green regardless.
+    await render();
+    await click(buttonByText('New note'));
+
+    expect(container.textContent).toContain(PAGE_TRANSCRIBING_MESSAGE);
+  });
+
+  it('does not show the "will be transcribed" message for the active typed page', async () => {
     await render();
     await click(buttonByText('New note'));
     await click(buttonByText('Type page'));
 
-    expect(container.textContent).not.toContain('Transcribed when the page is finished');
+    expect(container.textContent).not.toContain(PAGE_TRANSCRIBING_MESSAGE);
   });
 
   it('offers Resume on a finished note and makes it active (K14)', async () => {
@@ -559,6 +572,45 @@ describe('NotesView', () => {
     await settle();
 
     expect(buttonByText('New note').disabled).toBe(false);
+  });
+
+  it('disables "Type page" while a resume elsewhere is pending (fix round 2, Fix 4)', async () => {
+    // Unlike the New note test above, there's an active note here already -
+    // otherwise `state.activeNoteId === null` alone would disable "Type
+    // page" for an unrelated reason, and the assertion below would prove
+    // nothing about the resume-lock gating this test exists to check.
+    await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    let release: (() => void) | null = null;
+    const held = new Promise<never>((_resolve, reject) => {
+      release = () => reject(new Error('boom'));
+    });
+    const wrapped = { ...engine, resumeNote: () => held } as unknown as LiveCaptureEngine;
+    await act(async () => {
+      root.render(
+        <CaptureProvider engine={wrapped}>
+          <NotesView queue={queue} namingQueue={createFakeNamingQueue()} />
+        </CaptureProvider>,
+      );
+    });
+    await settle();
+
+    await click(buttonByText('New note'));
+    expect(buttonByText('Type page').disabled).toBe(false);
+
+    const resumeButton = resumeButtonForNote('Last week');
+    expect(resumeButton).toBeDefined();
+    await click(resumeButton!);
+
+    // Same architecture.md §8.3 window the New note test above guards:
+    // `resumeNote` never resolved, so this resume of a *different* note is
+    // still in flight. "Type page" was previously the one mutating toolbar
+    // control left ungated here.
+    expect(buttonByText('Type page').disabled).toBe(true);
+
+    (release as (() => void) | null)?.();
+    await settle();
+
+    expect(buttonByText('Type page').disabled).toBe(false);
   });
 
   it('does not offer Resume on the active note itself', async () => {

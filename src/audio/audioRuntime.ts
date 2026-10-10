@@ -4,13 +4,13 @@
 // off startup recovery (K7) and then the transcription queue's backlog,
 // once per page load, in that order.
 import { decodeToPcm16k } from '@/audio/pcm';
-import { createRecorder } from '@/audio/recorder';
+import { createRecorder, DEFAULT_TIMESLICE_MS } from '@/audio/recorder';
 import type { Recorder } from '@/audio/recorder';
 import { createTranscriptionQueue } from '@/audio/transcriptionQueue';
 import type { TranscriptionQueue } from '@/audio/transcriptionQueue';
 import { createWhisperTranscriber } from '@/audio/whisperClient';
 import { createWhisperWorker } from '@/audio/whisperWorkerFactory';
-import { stitchRecordingChunks } from '@/storage/recordingChunks';
+import { listRecordingChunks, stitchRecordingChunks } from '@/storage/recordingChunks';
 import {
   deleteRecording,
   finalizeRecording,
@@ -54,8 +54,6 @@ export function getAudioRuntime(): AudioRuntime {
 export interface RecoveryDeps {
   /** Default: `getAudioRuntime().queue.enqueue`. */
   enqueue?: (recordingId: string) => Promise<void>;
-  /** Default: `Date.now`. Injectable so recovery's derived `endedAt` is deterministic in tests. */
-  now?: () => number;
   /**
    * ⚑ The id of the recording this process's own recorder currently owns
    * (if any) - default: `getAudioRuntime().recorder.getActiveRecordingId()`.
@@ -102,10 +100,23 @@ export interface RecoveryDeps {
  * One recording's recovery failing (a storage error) is logged and does not
  * stop the rest from being recovered - audio must never block on another
  * recording's trouble (A28's spirit extended to recovery).
+ *
+ * `endedAt`/`durationMs` are estimated from what was actually captured, not
+ * from the moment recovery happened to run (fix round 2, Fix 4): the previous
+ * version stamped `endedAt: now()` and derived `durationMs` from the gap to
+ * `startedAt`, so a lecture recovered the next morning showed a multi-hour
+ * duration - and claimed a span - it holds no audio for. Each persisted chunk
+ * is one `DEFAULT_TIMESLICE_MS` timeslice (K4), so `chunkCount *
+ * DEFAULT_TIMESLICE_MS` is the closest estimate available without decoding
+ * the stitched audio itself (off by at most one timeslice, for whatever
+ * fraction of a final chunk the crash caught). The review confirmed this
+ * cannot mis-select a recording for gap analysis - `recordingsForNote`/
+ * `recordingForPage` compare time spans, and this only makes a recovered
+ * span honest, not longer than reality - so this is purely about what the
+ * owner sees in the recordings list.
  */
 export async function recoverInterruptedRecordings(deps: RecoveryDeps = {}): Promise<void> {
   const enqueue = deps.enqueue ?? ((id: string) => getAudioRuntime().queue.enqueue(id));
-  const now = deps.now ?? Date.now;
   const activeRecordingId =
     deps.activeRecordingId ?? (() => getAudioRuntime().recorder.getActiveRecordingId());
   const stitch = deps.stitch ?? stitchRecordingChunks;
@@ -130,11 +141,12 @@ export async function recoverInterruptedRecordings(deps: RecoveryDeps = {}): Pro
         }
         continue;
       }
-      const endedAt = now();
-      await finalizeRecording(recording.id, stitched, {
-        endedAt,
-        durationMs: Math.max(0, endedAt - recording.startedAt),
-      });
+      // Read before `finalizeRecording` deletes the chunk rows in the same
+      // transaction that writes the stitched audio.
+      const chunkCount = (await listRecordingChunks(recording.id)).length;
+      const durationMs = chunkCount * DEFAULT_TIMESLICE_MS;
+      const endedAt = recording.startedAt + durationMs;
+      await finalizeRecording(recording.id, stitched, { endedAt, durationMs });
       await enqueue(recording.id);
     } catch (error) {
       console.error(`[audio] could not recover recording ${recording.id}`, error);

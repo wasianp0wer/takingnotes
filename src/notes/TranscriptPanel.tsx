@@ -4,6 +4,18 @@ import { Button } from '@/components/ui/button';
 import { isPageFinalized } from '@/storage/pages';
 import type { PageRecord, TranscriptRecord } from '@/storage/types';
 
+/**
+ * Shown only for the active *live* page before it is finalized - never for a
+ * typed page, whose transcript is written synchronously by `setPageText`
+ * (K33), not by the transcription queue this message describes. Exported
+ * (fix round 2, Fix 4) so the test asserting its absence for a typed page
+ * checks against this constant rather than a copy-pasted literal: a test
+ * that keeps a hardcoded copy of the string stays green even after a wording
+ * change silently stops it from ever matching anything, which is exactly how
+ * the regression it exists to guard would return unnoticed.
+ */
+export const PAGE_TRANSCRIBING_MESSAGE = "This page's handwriting will be transcribed once it's finished.";
+
 export interface TranscriptPanelProps {
   page: PageRecord;
   /** True when this is the page the engine is currently writing to. */
@@ -58,7 +70,7 @@ export function TranscriptPanel({ page, isActivePage, onRetry }: TranscriptPanel
   if (isActivePage && !isPageFinalized(page)) {
     return (
       <div className="p-4 text-sm text-muted-foreground">
-        Transcribed when the page is finished.
+        {PAGE_TRANSCRIBING_MESSAGE}
       </div>
     );
   }

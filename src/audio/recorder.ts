@@ -18,6 +18,14 @@ import { createRecording, deleteRecording, finalizeRecording } from '@/storage/r
 import type { RecordingRecord } from '@/storage/types';
 import { appendRecordingChunk, stitchRecordingChunks } from '@/storage/recordingChunks';
 
+/**
+ * The `MediaRecorder` timeslice default (K4): one persisted chunk per this
+ * many ms of audio. Exported so K7's startup recovery (`audioRuntime.ts`)
+ * can estimate a recovered recording's duration from its chunk count without
+ * duplicating the number.
+ */
+export const DEFAULT_TIMESLICE_MS = 1000;
+
 export const PREFERRED_MIME_TYPES = [
   'audio/webm;codecs=opus',
   'audio/webm',
@@ -451,7 +459,7 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
       if (nextRecorder.state === 'recording') nextRecorder.stop();
     };
 
-    const timesliceMs = deps.timesliceMs ?? 1000;
+    const timesliceMs = deps.timesliceMs ?? DEFAULT_TIMESLICE_MS;
     try {
       nextRecorder.start(timesliceMs);
     } catch (error) {

@@ -26,11 +26,14 @@ describe('recoverInterruptedRecordings (K7)', () => {
     await appendRecordingChunk(pending.id, 1, chunk([3, 4, 5]));
 
     const enqueue = vi.fn(async () => {});
-    await recoverInterruptedRecordings({ enqueue, now: () => 9_000 });
+    await recoverInterruptedRecordings({ enqueue });
 
     const recovered = await getRecording(pending.id);
-    expect(recovered?.endedAt).toBe(9_000);
-    expect(recovered?.durationMs).toBe(8_000);
+    // Estimated from the chunk count (2 chunks * the 1000 ms default
+    // timeslice), not from whenever recovery happened to run (fix round 2,
+    // Fix 4) - startedAt (1_000) + 2_000.
+    expect(recovered?.endedAt).toBe(3_000);
+    expect(recovered?.durationMs).toBe(2_000);
     expect(recovered?.byteLength).toBe(5);
 
     expect(await listRecordingChunks(pending.id)).toEqual([]);
@@ -44,7 +47,7 @@ describe('recoverInterruptedRecordings (K7)', () => {
     );
 
     const enqueue = vi.fn(async () => {});
-    await recoverInterruptedRecordings({ enqueue, now: () => 9_000 });
+    await recoverInterruptedRecordings({ enqueue });
 
     expect(await getRecording(pending.id)).toBeUndefined();
     expect(enqueue).not.toHaveBeenCalled();
@@ -57,7 +60,7 @@ describe('recoverInterruptedRecordings (K7)', () => {
     );
 
     const enqueue = vi.fn(async () => {});
-    await recoverInterruptedRecordings({ enqueue, now: () => 999_999 });
+    await recoverInterruptedRecordings({ enqueue });
 
     const after = await getRecording(finished.id);
     expect(after).toEqual(finished);
@@ -72,14 +75,15 @@ describe('recoverInterruptedRecordings (K7)', () => {
     await appendRecordingChunk(pending.id, 0, chunk([1, 2, 3]));
 
     const enqueue = vi.fn(async () => {});
-    await recoverInterruptedRecordings({ enqueue, now: () => 5_000 });
+    await recoverInterruptedRecordings({ enqueue });
     // If recovery failed to patch endedAt, this second pass would see zero
     // chunks and an unfinished row again, and delete a recording the first
     // pass just finished saving.
-    await recoverInterruptedRecordings({ enqueue, now: () => 6_000 });
+    await recoverInterruptedRecordings({ enqueue });
 
     const after = await getRecording(pending.id);
-    expect(after?.endedAt).toBe(5_000);
+    // startedAt (1_000) + 1 chunk * the 1000 ms default timeslice.
+    expect(after?.endedAt).toBe(2_000);
     expect(after?.byteLength).toBe(3);
     expect(enqueue).toHaveBeenCalledTimes(1);
   });
@@ -94,7 +98,6 @@ describe('recoverInterruptedRecordings (K7)', () => {
     const enqueue = vi.fn(async () => {});
     await recoverInterruptedRecordings({
       enqueue,
-      now: () => 5_000,
       // Models another actor (a second tab, or a second recovery pass)
       // finalizing this exact row first: its finalizeRecording call writes
       // the audio and purges the chunks atomically, so by the time THIS
@@ -125,7 +128,6 @@ describe('recoverInterruptedRecordings (K7)', () => {
     const enqueue = vi.fn(async () => {});
     await recoverInterruptedRecordings({
       enqueue,
-      now: () => 5_000,
       activeRecordingId: () => pending.id,
     });
 
@@ -159,12 +161,13 @@ describe('startAudioRuntime ordering (⚑ finding #2)', () => {
     };
 
     await startAudioRuntime({
-      recover: () => recoverInterruptedRecordings({ enqueue: queue.enqueue, now: () => 5_000 }),
+      recover: () => recoverInterruptedRecordings({ enqueue: queue.enqueue }),
       resume: queue.resume,
     });
 
     expect(queue.resume).toHaveBeenCalledTimes(1);
-    expect(seenAtResumeTime).toEqual([{ endedAt: 5_000 }]);
+    // startedAt (1_000) + 1 chunk * the 1000 ms default timeslice.
+    expect(seenAtResumeTime).toEqual([{ endedAt: 2_000 }]);
   });
 
   it('is idempotent across repeated calls (module-level flag, StrictMode-safe)', async () => {
