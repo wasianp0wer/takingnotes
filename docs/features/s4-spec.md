@@ -358,3 +358,33 @@ with both a live and a typed page navigates between them correctly.
 
 Every new test is mutation-checked (break the implementation, confirm red,
 revert) before being considered done.
+
+## 8. Known limitations
+
+### 8.1 A failed debounced write *and* a failed flush-on-unmount lose the edit, silently
+
+`TypedPageEditor` surfaces a failed debounced write as a visible error while
+it's mounted (§5.1), and its unmount cleanup retries whatever's still dirty
+so navigating away doesn't normally lose it. But if **both** fail — the
+debounced write rejects, the owner navigates to another page before a retry
+succeeds, and the unmount-triggered retry of that same pending text *also*
+rejects — there is no third attempt. `showError` is a no-op once
+`mountedRef.current` is `false` (setting React state on an unmounted
+component is itself a bug to avoid), so nothing visible records the second
+failure, and the next time that page is opened it seeds `initialText` from
+whatever was last durably persisted - silently dropping the edit between the
+two failures.
+
+This mirrors a risk `useScratchpad` already carries (its own unmount flush
+has the identical shape), so it isn't something this unit introduced. It is
+recorded here because the brief's promise for this component was stronger
+than the scratchpad's: "a failed write must not silently discard what was
+typed." Under the specific double-failure condition above, it can. Not fixed
+in this round — a retry mechanism or a navigation guard is a larger design
+question (how many retries, with what backoff, blocking navigation on a
+failed save or not) than a scoped fix belongs in. Pinned by a test
+(`TypedPageEditor.test.tsx`, "known limitation: a failed debounced write
+followed by a failed unmount flush loses the edit without a trace") so a
+future change to this behavior - fixing it, or changing the component in a
+way that happens to touch it - is a deliberate decision, not an accidental
+regression nothing would catch.

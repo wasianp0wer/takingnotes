@@ -65,9 +65,9 @@ function typeInto(el: HTMLTextAreaElement, value: string): void {
   });
 }
 
-async function seedTypedPage(): Promise<string> {
+async function seedTypedPage(text = ''): Promise<string> {
   const note = await createNote({ title: 'N', deviceId: 'huion', pageBaseline: 0 });
-  const page = await createTypedPage({ noteId: note.id, pageIndex: 0 });
+  const page = await createTypedPage({ noteId: note.id, pageIndex: 0, text });
   return page.id;
 }
 
@@ -121,6 +121,37 @@ describe('TypedPageEditor', () => {
 
     expect(container.querySelector('[role="alert"]')).toBeNull();
     expect((await getPage(pageId))?.text).toBe('resilient!');
+
+    consoleError.mockRestore();
+  });
+
+  it('known limitation: a failed debounced write followed by a failed unmount flush loses the edit without a trace', async () => {
+    // Documented in docs/features/s4-spec.md's "Known limitations" section.
+    // Not fixed here (review Finding 3, scope-limited): a retry or a
+    // navigation guard is a larger design question than this round covers,
+    // and this mirrors a risk `useScratchpad` already carries. This test
+    // pins the current behaviour, so a future change to it is a deliberate
+    // one rather than an accidental regression no test would catch.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const pageId = await seedTypedPage('original');
+
+    await mountEditor({ pageId, initialText: 'original', debounceMs: 20 });
+
+    // The debounced write fails - the error shows while still mounted.
+    vi.mocked(setPageText).mockRejectedValueOnce(new Error('disk full'));
+    typeInto(textarea(), 'lost edit');
+    await settle();
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+
+    // Navigating away triggers the flush-on-unmount retry of that same
+    // pending edit, and it fails too.
+    vi.mocked(setPageText).mockRejectedValueOnce(new Error('disk full again'));
+    act(() => root.unmount());
+    await settle();
+
+    // Neither write landed, and there is nothing left mounted to show the
+    // error on - the edit is gone, and nothing says so.
+    expect((await getPage(pageId))?.text).toBe('original');
 
     consoleError.mockRestore();
   });
