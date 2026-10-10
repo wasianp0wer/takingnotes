@@ -53,6 +53,16 @@ export interface CaptureEngine {
    * No active note → no-op, resolves null.
    */
   newPage(reason: NewPageReason): Promise<string | null>;
+  /**
+   * Finalizes the active page and makes a new *typed* page the active page
+   * (K32, K35). No active note -> no-op, resolves null, mirroring `newPage`'s
+   * own A7 rule: starting a note at all (pen input, or "New note") is a
+   * precondition. Pen input while the active page is typed opens a new
+   * *live* page instead of writing ink into it (K34) - that is this
+   * interface's implementation's business (`src/capture/engine.ts`), not
+   * this method's; this method only ever produces a typed page.
+   */
+  newTypedPage(): Promise<string | null>;
 
   /** Strokes of the active page, including the stroke in progress. For live ink rendering. */
   getLiveStrokes(): readonly PageStroke[];

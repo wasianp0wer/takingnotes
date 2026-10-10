@@ -81,6 +81,8 @@ export function createStubCaptureEngine(initial: Partial<CaptureState> = {}): St
     },
     // Resume is not exercised through this double.
     resumeNote: () => Promise.reject(new Error('resumeNote is not exercised through this double')),
+    // Neither is a typed page.
+    newTypedPage: () => Promise.reject(new Error('newTypedPage is not exercised through this double')),
     newPage(reason) {
       newPageCalls.push(reason);
       // Called synchronously, so an impl that throws throws out of newPage.
