@@ -1,6 +1,6 @@
 import { listAllPageText } from '@/storage/pages';
 import { listNotes } from '@/storage/notes';
-import { listFinishedRecordings, recordingsForNote } from '@/storage/recordings';
+import { listFinishedRecordings, recordingOwnersByNote } from '@/storage/recordings';
 import type { NoteRecord, RecordingRecord } from '@/storage/types';
 
 /**
@@ -23,18 +23,43 @@ export interface SearchNote {
   note: NoteRecord;
   /** This note's pages, `pageIndex` order. */
   pages: SearchPage[];
+  /**
+   * Fix round 3, C1: this note's owned recordings' transcript text
+   * (`AudioTranscriptRecord.text` of each `status: 'done'` recording
+   * `recordingOwner` attributes to this note), joined oldest-first. `''`
+   * when the note owns no done-transcribed recording. K41 lists audio
+   * transcripts as one of smart search's five sources same as Find's; this
+   * is what lets `smartSearch.ts` read it without re-deriving the
+   * recording -> note attribution a second time.
+   */
+  audioText: string;
+  /**
+   * The recording `audioText` came from (the earliest-started done-
+   * transcribed owned recording), or `null` when there is none. The
+   * honest target for a smart-search hit whose note has no page text to
+   * point at instead (fix round 3, C1's band-granularity ruling) - this is
+   * literally the recording whose words produced the hit.
+   */
+  primaryRecordingId: string | null;
 }
 
 export interface SearchCorpus {
   notes: SearchNote[];
   recordings: RecordingRecord[];
   /**
-   * recordingId -> noteId, built from `recordingsForNote`
-   * (docs/architecture.md §8.5) - the one place that knows both link paths
-   * (direct `noteId`, or via the note's session). See S6-A1 for the cost of
-   * building this map one note at a time.
+   * recordingId -> noteId, built from `recordingOwnersByNote`
+   * (docs/architecture.md §8.5, extended fix round 3 I5) - the one place
+   * that knows both link paths (direct `noteId`, or via the note's
+   * session), done in one pass over already-loaded notes and finished
+   * recordings rather than one `recordingsForNote` call per note (S6-A1,
+   * superseded).
    */
   recordingOwner: Map<string, string>;
+}
+
+/** A recording whose transcript is done is the only kind whose `.text` is real content, not a leftover from a different run. */
+function isDoneTranscribed(recording: RecordingRecord): boolean {
+  return recording.transcript?.status === 'done';
 }
 
 /**
@@ -64,20 +89,42 @@ export async function loadSearchCorpus(): Promise<SearchCorpus> {
   }
   for (const list of pagesByNote.values()) list.sort((a, b) => a.pageIndex - b.pageIndex);
 
-  // §8.5: `recordingsForNote` is the one place that knows both link paths
-  // (direct `noteId`, or via the note's session) - called once per note
-  // rather than re-derived by hand, per the brief.
-  const recordingOwner = new Map<string, string>();
-  for (const note of notes) {
-    for (const recording of await recordingsForNote(note.id)) {
-      recordingOwner.set(recording.id, note.id);
-    }
-  }
+  // §8.5, extended fix round 3 I5: one pass over data already in hand,
+  // rather than one `recordingsForNote` call (and its own full
+  // `listFinishedRecordings()` scan) per note.
+  const recordingOwner = recordingOwnersByNote(notes, recordings);
 
-  const searchNotes: SearchNote[] = notes.map((note) => ({
-    note,
-    pages: pagesByNote.get(note.id) ?? [],
-  }));
+  // Fix round 3, C1: group each note's own done-transcribed recordings,
+  // oldest first, so `audioText` reads like the lecture unfolded and
+  // `primaryRecordingId` names the earliest (likely the main sitting).
+  const recordingsByNote = new Map<string, RecordingRecord[]>();
+  for (const recording of recordings) {
+    if (!isDoneTranscribed(recording)) continue;
+    const ownerId = recordingOwner.get(recording.id);
+    if (ownerId === undefined) continue;
+    const list = recordingsByNote.get(ownerId) ?? [];
+    list.push(recording);
+    recordingsByNote.set(ownerId, list);
+  }
+  for (const list of recordingsByNote.values()) list.sort((a, b) => a.startedAt - b.startedAt);
+
+  const searchNotes: SearchNote[] = notes.map((note) => {
+    const owned = recordingsByNote.get(note.id) ?? [];
+    // Only recordings that actually have something to say - a done
+    // transcript with blank text (silence, or a Whisper run that heard
+    // nothing) contributes to neither the joined text nor the "primary"
+    // choice, so `primaryRecordingId` always names a recording whose words
+    // are genuinely part of `audioText`.
+    const contributing = owned
+      .map((r) => ({ recording: r, text: (r.transcript?.text ?? '').trim() }))
+      .filter((entry) => entry.text.length > 0);
+    return {
+      note,
+      pages: pagesByNote.get(note.id) ?? [],
+      audioText: contributing.map((entry) => entry.text).join('\n\n'),
+      primaryRecordingId: contributing[0]?.recording.id ?? null,
+    };
+  });
 
   return { notes: searchNotes, recordings, recordingOwner };
 }

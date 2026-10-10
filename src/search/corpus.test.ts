@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { loadSearchCorpus } from '@/search/corpus';
 import { createNote } from '@/storage/notes';
 import { createPage, createTypedPage, setPageTranscript } from '@/storage/pages';
-import { createRecording, finalizeRecording } from '@/storage/recordings';
+import { createRecording, finalizeRecording, setRecordingTranscript } from '@/storage/recordings';
 import { createSession } from '@/storage/sessions';
 import { resetDatabase } from '@/test/resetDb';
 
@@ -73,5 +73,86 @@ describe('loadSearchCorpus', () => {
     expect(corpus.recordings.map((r) => r.id).sort()).toEqual(
       [direct.id, standalone.id, viaSession.id].sort(),
     );
+  });
+
+  it("joins a note's owned, done-transcribed recordings into audioText, oldest first, and names the earliest as primaryRecordingId (fix round 3, C1)", async () => {
+    const note = await createNote({ title: 'Lecture', deviceId: 'd1', pageBaseline: 0 });
+    const later = await createRecording(
+      { title: 'later', noteId: note.id, startedAt: 2000, durationMs: 1000 },
+      new Blob(['b']),
+    );
+    await finalizeRecording(later.id, new Blob(['b']), { endedAt: 3000, durationMs: 1000 });
+    await setRecordingTranscript(later.id, {
+      text: 'second half of the lecture',
+      segments: [],
+      model: 'whisper',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
+    const earlier = await createRecording(
+      { title: 'earlier', noteId: note.id, startedAt: 1000, durationMs: 1000 },
+      new Blob(['a']),
+    );
+    await finalizeRecording(earlier.id, new Blob(['a']), { endedAt: 2000, durationMs: 1000 });
+    await setRecordingTranscript(earlier.id, {
+      text: 'first half of the lecture',
+      segments: [],
+      model: 'whisper',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
+
+    const corpus = await loadSearchCorpus();
+    const found = corpus.notes.find((n) => n.note.id === note.id)!;
+    expect(found.audioText).toBe('first half of the lecture\n\nsecond half of the lecture');
+    expect(found.primaryRecordingId).toBe(earlier.id);
+  });
+
+  it('excludes a failed or still-running transcript from audioText, and skips a recording with no owning note', async () => {
+    const note = await createNote({ title: 'Lecture', deviceId: 'd1', pageBaseline: 0 });
+    const failed = await createRecording(
+      { title: 'failed', noteId: note.id, startedAt: 1000, durationMs: 1000 },
+      new Blob(['a']),
+    );
+    await finalizeRecording(failed.id, new Blob(['a']), { endedAt: 2000, durationMs: 1000 });
+    await setRecordingTranscript(failed.id, {
+      text: 'leftover text from a stale attempt',
+      segments: [],
+      model: 'whisper',
+      language: 'en',
+      status: 'failed',
+      error: 'boom',
+      updatedAt: 1,
+    });
+    const standalone = await createRecording(
+      { title: 'standalone', startedAt: 1000, durationMs: 1000 },
+      new Blob(['b']),
+    );
+    await finalizeRecording(standalone.id, new Blob(['b']), { endedAt: 2000, durationMs: 1000 });
+    await setRecordingTranscript(standalone.id, {
+      text: 'belongs to no note',
+      segments: [],
+      model: 'whisper',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
+
+    const corpus = await loadSearchCorpus();
+    const found = corpus.notes.find((n) => n.note.id === note.id)!;
+    expect(found.audioText).toBe('');
+    expect(found.primaryRecordingId).toBeNull();
+  });
+
+  it('a note with no recordings at all has empty audioText and a null primaryRecordingId', async () => {
+    await createNote({ title: 'Silent', deviceId: 'd1', pageBaseline: 0 });
+    const corpus = await loadSearchCorpus();
+    expect(corpus.notes[0].audioText).toBe('');
+    expect(corpus.notes[0].primaryRecordingId).toBeNull();
   });
 });

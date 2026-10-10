@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import type { SearchCorpus } from '@/search/corpus';
+import type { SearchCorpus, SearchNote, SearchPage } from '@/search/corpus';
 import { findInCorpus, snippetAround } from '@/search/find';
 import type { NoteRecord, RecordingRecord } from '@/storage/types';
+
+/** A `SearchNote` with fix round 3's `audioText`/`primaryRecordingId` defaulted - Find does not read either. */
+function makeSearchNote(note: NoteRecord, pages: SearchPage[] = []): SearchNote {
+  return { note, pages, audioText: '', primaryRecordingId: null };
+}
 
 function makeNote(overrides: Partial<NoteRecord> & { id: string }): NoteRecord {
   return {
@@ -46,7 +51,7 @@ describe('findInCorpus', () => {
   it('matches a note title, case-insensitively', () => {
     const corpus: SearchCorpus = {
       ...EMPTY,
-      notes: [{ note: makeNote({ id: 'n1', title: 'Thermodynamics' }), pages: [] }],
+      notes: [makeSearchNote(makeNote({ id: 'n1', title: 'Thermodynamics' }))],
     };
     const hits = findInCorpus(corpus, 'THERMO');
     expect(hits).toHaveLength(1);
@@ -57,8 +62,8 @@ describe('findInCorpus', () => {
     const corpus: SearchCorpus = {
       ...EMPTY,
       notes: [
-        { note: makeNote({ id: 'n1', summary: 'Covers recursion and base cases.' }), pages: [] },
-        { note: makeNote({ id: 'n2', summary: null }), pages: [] },
+        makeSearchNote(makeNote({ id: 'n1', summary: 'Covers recursion and base cases.' })),
+        makeSearchNote(makeNote({ id: 'n2', summary: null })),
       ],
     };
     const hits = findInCorpus(corpus, 'recursion');
@@ -70,13 +75,10 @@ describe('findInCorpus', () => {
     const corpus: SearchCorpus = {
       ...EMPTY,
       notes: [
-        {
-          note: makeNote({ id: 'n1' }),
-          pages: [
-            { pageId: 'p0', pageIndex: 0, isTyped: false, text: 'ink mentions osmosis' },
-            { pageId: 'p1', pageIndex: 1, isTyped: true, text: 'typed mentions osmosis too' },
-          ],
-        },
+        makeSearchNote(makeNote({ id: 'n1' }), [
+          { pageId: 'p0', pageIndex: 0, isTyped: false, text: 'ink mentions osmosis' },
+          { pageId: 'p1', pageIndex: 1, isTyped: true, text: 'typed mentions osmosis too' },
+        ]),
       ],
     };
     const hits = findInCorpus(corpus, 'osmosis');
@@ -89,7 +91,7 @@ describe('findInCorpus', () => {
 
   it('matches an audio transcript segment and attributes it to the owning note', () => {
     const corpus: SearchCorpus = {
-      notes: [{ note: makeNote({ id: 'n1', title: 'Lecture' }), pages: [] }],
+      notes: [makeSearchNote(makeNote({ id: 'n1', title: 'Lecture' }))],
       recordings: [
         makeRecording({
           id: 'r1',
@@ -150,13 +152,10 @@ describe('findInCorpus', () => {
     const corpus: SearchCorpus = {
       ...EMPTY,
       notes: [
-        {
-          note: makeNote({ id: 'n1' }),
-          pages: [
-            { pageId: 'p0', pageIndex: 0, isTyped: false, text: 'first mentions gravity' },
-            { pageId: 'p1', pageIndex: 1, isTyped: false, text: 'second mentions gravity too' },
-          ],
-        },
+        makeSearchNote(makeNote({ id: 'n1' }), [
+          { pageId: 'p0', pageIndex: 0, isTyped: false, text: 'first mentions gravity' },
+          { pageId: 'p1', pageIndex: 1, isTyped: false, text: 'second mentions gravity too' },
+        ]),
       ],
     };
     expect(findInCorpus(corpus, 'gravity')).toHaveLength(2);
@@ -190,7 +189,7 @@ describe('findInCorpus', () => {
   it('returns [] for a blank or whitespace-only query', () => {
     const corpus: SearchCorpus = {
       ...EMPTY,
-      notes: [{ note: makeNote({ id: 'n1', title: 'Anything' }), pages: [] }],
+      notes: [makeSearchNote(makeNote({ id: 'n1', title: 'Anything' }))],
     };
     expect(findInCorpus(corpus, '')).toEqual([]);
     expect(findInCorpus(corpus, '   ')).toEqual([]);
