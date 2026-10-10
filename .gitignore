@@ -31,3 +31,4 @@ samples/
 
 # Throwaway spike harness (task #1)
 scripts/spike/
+logs/
