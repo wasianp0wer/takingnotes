@@ -29,23 +29,28 @@ export interface ResumeLock {
 
 export function createResumeLock(): ResumeLock {
   let inFlight = 0;
+  // Cached rather than built fresh per call: `useSyncExternalStore` compares
+  // snapshots by reference, so a `getState()` that allocated on every call
+  // would look like a change on every render and loop forever.
+  let snapshot: ResumeLockState = { pending: false };
   const emitter = createEmitter<ResumeLockState>();
 
-  function state(): ResumeLockState {
-    return { pending: inFlight > 0 };
+  function setPending(pending: boolean): void {
+    snapshot = { pending };
+    emitter.emit(snapshot);
   }
 
   return {
-    getState: state,
+    getState: () => snapshot,
     subscribe: (fn) => emitter.subscribe(fn),
     async run<T>(fn: () => Promise<T>): Promise<T> {
       inFlight += 1;
-      if (inFlight === 1) emitter.emit(state());
+      if (inFlight === 1) setPending(true);
       try {
         return await fn();
       } finally {
         inFlight -= 1;
-        if (inFlight === 0) emitter.emit(state());
+        if (inFlight === 0) setPending(false);
       }
     },
   };
