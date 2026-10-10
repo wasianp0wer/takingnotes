@@ -7,6 +7,7 @@ import type {
   PageRecord,
   PageRenderRecord,
   RecordingAudioRecord,
+  RecordingChunkRecord,
   RecordingRecord,
   SessionRecord,
   SettingRecord,
@@ -14,7 +15,7 @@ import type {
 } from '@/storage/types';
 
 export const DB_NAME = 'takingnotes';
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 
 export interface NotesDb extends DBSchema {
   notes: {
@@ -65,6 +66,15 @@ export interface NotesDb extends DBSchema {
     key: string;
     value: GapSuggestionRecord;
     indexes: { 'by-note': string; 'by-page': string };
+  };
+  /**
+   * In-line keys. Transient per-chunk audio for a recording in progress; see
+   * `RecordingChunkRecord`.
+   */
+  recordingChunks: {
+    key: string;
+    value: RecordingChunkRecord;
+    indexes: { 'by-recording': string };
   };
 }
 
@@ -120,6 +130,15 @@ export function openNotesDb(): Promise<IDBPDatabase<NotesDb>> {
           const gaps = db.createObjectStore('gaps', { keyPath: 'id' });
           gaps.createIndex('by-note', 'noteId');
           gaps.createIndex('by-page', 'pageId');
+        }
+        if (oldVersion < 4) {
+          // Phase 3 incremental audio (K4-K7). Indexed by recording so a
+          // stitch reads exactly one recording's chunks, and so a recording
+          // deleted mid-flight can drop its own without a full scan.
+          const chunks = db.createObjectStore('recordingChunks', { keyPath: 'id' });
+          chunks.createIndex('by-recording', 'recordingId');
+          // No data migration: every v4 field is optional with a documented
+          // absent-reading (K1), so existing rows are already valid v4 rows.
         }
       },
       // Without these, a version bump with a second tab open hangs forever with

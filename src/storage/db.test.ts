@@ -65,6 +65,44 @@ async function createV2Database(): Promise<void> {
   db.close();
 }
 
+/**
+ * Builds a database at schema version 3 exactly as the shipped v1, v2 and v3
+ * upgrade blocks did, so the upgrade test exercises the real v3 → v4 path
+ * rather than a fresh v4 create. Inlined for the same reason as
+ * `createV1Database`: those blocks are frozen and this copy stays frozen too.
+ */
+async function createV3Database(): Promise<void> {
+  const db = await openDB(DB_NAME, 3, {
+    upgrade(database) {
+      const notes = database.createObjectStore('notes', { keyPath: 'id' });
+      notes.createIndex('by-started', 'startedAt');
+      notes.createIndex('by-session', 'sessionId');
+      const pages = database.createObjectStore('pages', { keyPath: 'id' });
+      pages.createIndex('by-note', 'noteId');
+      database.createObjectStore('pageRenders');
+      database.createObjectStore('settings', { keyPath: 'key' });
+      const sessions = database.createObjectStore('sessions', { keyPath: 'id' });
+      sessions.createIndex('by-started', 'startedAt');
+      const recordings = database.createObjectStore('recordings', { keyPath: 'id' });
+      recordings.createIndex('by-session', 'sessionId');
+      recordings.createIndex('by-started', 'startedAt');
+      database.createObjectStore('recordingAudio');
+      const events = database.createObjectStore('events', { keyPath: 'id' });
+      events.createIndex('by-start', 'startsAt');
+      const tasks = database.createObjectStore('tasks', { keyPath: 'id' });
+      tasks.createIndex('by-status', 'status');
+      tasks.createIndex('by-event', 'eventId');
+      const gaps = database.createObjectStore('gaps', { keyPath: 'id' });
+      gaps.createIndex('by-note', 'noteId');
+      gaps.createIndex('by-page', 'pageId');
+    },
+  });
+  await db.put('notes', { id: 'note-3', title: 'Phase 2', startedAt: 3_000, sessionId: 'ses-3' });
+  await db.put('pages', { id: 'page-3', noteId: 'note-3', pageIndex: 0 });
+  await db.put('gaps', { id: 'gap-3', noteId: 'note-3', pageId: 'page-3' });
+  db.close();
+}
+
 describe('openNotesDb', () => {
   it('creates the expected object stores', async () => {
     const db = await openNotesDb();
@@ -76,6 +114,7 @@ describe('openNotesDb', () => {
       'pageRenders',
       'pages',
       'recordingAudio',
+      'recordingChunks',
       'recordings',
       'sessions',
       'settings',
@@ -109,11 +148,11 @@ describe('openNotesDb', () => {
     ]);
   });
 
-  it('upgrades a v2 database to v3 without losing its rows', async () => {
+  it('upgrades a v2 database to the current version without losing its rows', async () => {
     await createV2Database();
 
     const db = await openNotesDb();
-    expect(db.version).toBe(3);
+    expect(db.version).toBe(DB_VERSION);
     expect(await db.get('notes', 'note-2')).toMatchObject({ title: 'Phase 1' });
     expect(await db.get('pages', 'page-2')).toMatchObject({ noteId: 'note-2' });
     expect(await db.get('sessions', 'ses-1')).toMatchObject({ title: 'Phase 1' });
@@ -144,5 +183,27 @@ describe('openNotesDb', () => {
     const first = await openNotesDb();
     const second = await openNotesDb();
     expect(first).toBe(second);
+  });
+
+  it('creates the v4 recordingChunks store and its index', async () => {
+    const db = await openNotesDb();
+    expect(db.objectStoreNames).toContain('recordingChunks');
+    expect([...db.transaction('recordingChunks').store.indexNames]).toEqual(['by-recording']);
+  });
+
+  it('upgrades a v3 database to v4 without losing its rows', async () => {
+    await createV3Database();
+
+    const db = await openNotesDb();
+    expect(db.version).toBe(4);
+    expect(await db.get('notes', 'note-3')).toMatchObject({ title: 'Phase 2' });
+    expect(await db.get('pages', 'page-3')).toMatchObject({ noteId: 'note-3' });
+    expect(await db.get('gaps', 'gap-3')).toMatchObject({ pageId: 'page-3' });
+    expect(db.objectStoreNames).toContain('recordingChunks');
+    // The v2 indexes survive the version change untouched.
+    expect([...db.transaction('notes').store.indexNames].sort()).toEqual([
+      'by-session',
+      'by-started',
+    ]);
   });
 });

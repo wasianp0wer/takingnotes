@@ -1,5 +1,15 @@
 export type NoteStatus = 'active' | 'interrupted' | 'complete';
-export type PageSource = 'rom' | 'live';
+export type PageSource = 'rom' | 'live' | 'typed';
+
+/**
+ * Where a note's title came from, which is what lets auto-naming respect a
+ * manual rename (K2). Absent on v1-v3 rows, which reads as `'default'` - the
+ * `Note <timestamp>` placeholder `openNote()` writes - so every pre-Phase-3
+ * note is eligible for auto-naming. That eligibility is also the summary
+ * backfill smart search needs.
+ */
+export type TitleSource = 'default' | 'auto' | 'manual';
+
 export type TranscriptStatus = 'pending' | 'running' | 'done' | 'failed';
 /** Mirrors `TabletDeviceType` in src/types/memory.ts. */
 export type DeviceType = 'huion' | 'wacom';
@@ -76,6 +86,21 @@ export interface NoteRecord {
    * v2 upgrade needs no data migration.
    */
   sessionId?: string | null;
+  /**
+   * Free-form tags, normalized on write (K3): trimmed, lowercased,
+   * deduplicated, blanks dropped. The displayed form is the stored form, so
+   * there is no display name to keep in sync. Absent on pre-v4 rows, which
+   * reads as `[]`.
+   */
+  tags?: string[];
+  /** See `TitleSource`. Absent reads as `'default'`. */
+  titleSource?: TitleSource;
+  /**
+   * Identifies the prompt that produced `summary`, for the same reason
+   * `TranscriptRecord.promptVersion` exists: prompts get tuned far more often
+   * than models get swapped. Absent reads as `null`.
+   */
+  summaryPromptVersion?: string | null;
 }
 
 /** Dimensions and MIME type of a page render. The bytes live in `pageRenders`. */
@@ -122,6 +147,13 @@ export interface PageRecord {
    * `GapAnalysisMeta` at the end of this file.
    */
   gapAnalysis?: GapAnalysisMeta | null;
+  /**
+   * The typed content of a `source: 'typed'` page (K32). Absent on ink pages.
+   * A typed page's text is also mirrored into its `transcript` (K33), which is
+   * what lets transcription skip it while search and gap analysis read it
+   * through the one field they already know about.
+   */
+  text?: string;
 }
 
 export interface SettingRecord {
@@ -280,4 +312,20 @@ export interface GapAnalysisMeta {
   promptVersion: string;
   error: string | null;
   summarized: boolean;
+}
+
+/**
+ * One `MediaRecorder` chunk, persisted as it arrives so an interrupted session
+ * keeps its audio (K4). Transient: `stop()` stitches these into
+ * `recordingAudio` and deletes them, so a row here means a recording that is
+ * either in progress or was interrupted.
+ */
+export interface RecordingChunkRecord {
+  id: string;
+  recordingId: string;
+  /** Monotonic per recording, starting at 0. Stitch order (K6). */
+  seq: number;
+  data: ArrayBuffer;
+  /** The `MediaRecorder` MIME type, carried so stitching needs no second read. */
+  type: string;
 }
