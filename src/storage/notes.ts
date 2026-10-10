@@ -136,8 +136,12 @@ export function normalizeTags(input: readonly string[]): string[] {
   return out;
 }
 
-/** Absent on pre-v4 rows, which reads as no tags. */
-export function tagsOf(note: NoteRecord): string[] {
+/**
+ * Absent on pre-v4 rows, which reads as no tags. Returns the record's own
+ * array when it has one, so the return type is `readonly` - a caller must not
+ * be able to mutate a `NoteRecord` in place through it.
+ */
+export function tagsOf(note: NoteRecord): readonly string[] {
   return note.tags ?? [];
 }
 
