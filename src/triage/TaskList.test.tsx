@@ -28,6 +28,10 @@ function task(overrides: Partial<TaskRecord> & { id: string; title: string }): T
 const URGENT = task({ id: 'a', title: 'Urgent', required: true, dueAt: NOW + 2 * HOUR, estimatedMinutes: 240 });
 const MEDIUM = task({ id: 'b', title: 'Medium', required: true, dueAt: NOW + 48 * HOUR, estimatedMinutes: 120 });
 const LOW = task({ id: 'c', title: 'Low', required: false, dueAt: null, estimatedMinutes: 60 });
+// Score 86 (I7 reference value): required, due in 12 h, 8 h estimate.
+const AMBER_TASK = task({ id: 'f', title: 'Amber', required: true, dueAt: NOW + 12 * HOUR, estimatedMinutes: 480 });
+// Score 200 (the cap): required, 100 h overdue, no estimate.
+const RED_TASK = task({ id: 'g', title: 'Red', required: true, dueAt: NOW - 100 * HOUR, estimatedMinutes: 0 });
 
 // Deliberately out of score order, so the test would fail if rankTasks were
 // not actually applied to sort the rendered rows.
@@ -69,12 +73,67 @@ describe('TaskList', () => {
     m.unmount();
   });
 
-  it('scores at or above 100 get the destructive badge treatment', () => {
-    const m = mount(<TaskList tasks={[URGENT]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
-    const badge = m.container.querySelector('[data-testid="task-score"]')!;
-    expect(badge.className).toContain('bg-destructive/15');
-    expect(badge.className).toContain('text-destructive');
-    m.unmount();
+  describe('score band colour (K22)', () => {
+    const BAND_CLASSES = ['text-red-600', 'text-orange-600', 'text-amber-600', 'text-lime-600', 'text-green-600'];
+    const bandClassOf = (className: string): string | undefined => BAND_CLASSES.find((c) => className.includes(c));
+
+    it('red: a score of 200 (the cap) gets text-red-600 and no other band class', () => {
+      const m = mount(<TaskList tasks={[RED_TASK]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
+      const badge = m.container.querySelector('[data-testid="task-score"]')!;
+      expect(badge.textContent).toBe('200');
+      expect(bandClassOf(badge.className)).toBe('text-red-600');
+      m.unmount();
+    });
+
+    it('orange: a score of 108 gets text-orange-600', () => {
+      const m = mount(<TaskList tasks={[URGENT]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
+      const badge = m.container.querySelector('[data-testid="task-score"]')!;
+      expect(badge.textContent).toBe('108');
+      expect(bandClassOf(badge.className)).toBe('text-orange-600');
+      m.unmount();
+    });
+
+    it('amber: a score of 86 gets text-amber-600', () => {
+      const m = mount(<TaskList tasks={[AMBER_TASK]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
+      const badge = m.container.querySelector('[data-testid="task-score"]')!;
+      expect(badge.textContent).toBe('86');
+      expect(bandClassOf(badge.className)).toBe('text-amber-600');
+      m.unmount();
+    });
+
+    it('lime: a score of 34 gets text-lime-600', () => {
+      const m = mount(<TaskList tasks={[MEDIUM]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
+      const badge = m.container.querySelector('[data-testid="task-score"]')!;
+      expect(badge.textContent).toBe('34');
+      expect(bandClassOf(badge.className)).toBe('text-lime-600');
+      m.unmount();
+    });
+
+    it('green: a score of 5 gets text-green-600', () => {
+      const m = mount(<TaskList tasks={[LOW]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
+      const badge = m.container.querySelector('[data-testid="task-score"]')!;
+      expect(badge.textContent).toBe('5');
+      expect(bandClassOf(badge.className)).toBe('text-green-600');
+      m.unmount();
+    });
+
+    it('never applies the retired destructive badge treatment', () => {
+      const m = mount(<TaskList tasks={[RED_TASK]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
+      const badge = m.container.querySelector('[data-testid="task-score"]')!;
+      expect(badge.className).not.toContain('bg-destructive');
+      expect(badge.className).not.toContain('text-destructive');
+      m.unmount();
+    });
+
+    it('the score chip keeps its neutral bg-secondary background in every band', () => {
+      const m = mount(
+        <TaskList tasks={[RED_TASK, URGENT, AMBER_TASK, MEDIUM, LOW]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />,
+      );
+      const badges = [...m.container.querySelectorAll('[data-testid="task-score"]')];
+      expect(badges).toHaveLength(5);
+      for (const b of badges) expect(b.className).toContain('bg-secondary');
+      m.unmount();
+    });
   });
 
   it('shows the empty state when there are no open tasks', () => {
