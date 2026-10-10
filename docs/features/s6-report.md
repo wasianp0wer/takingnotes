@@ -127,3 +127,303 @@ it produced a genuine unhandled rejection, caught by Vitest itself) in
   archive.
 - No new setting, store, index or dependency was added; `DB_VERSION` is
   untouched.
+
+---
+
+## Fix round 1
+
+Two findings from the coordinator's review. Baseline going in: 1429 tests
+across 114 files, all four gates green. Baseline coming out: **1447 tests
+across 114 files**, all four gates green (`npx tsc -b` clean; `npm run
+lint` 0 errors, same 5 pre-existing warnings; `npm run build` succeeds;
+`npm test` 1447 passing).
+
+### Finding 1 (Important) — K41's "links to" is now a real selection, not just a tab switch
+
+**What changed.** The coordinator lifted the ownership boundary for
+exactly `src/notes/NotesView.tsx` and `src/recordings/RecordingsView.tsx`
+so this unit could add external-selection support to them.
+
+- `NotesView` gained `external?: NotesExternalSelection` (`{ token,
+  noteId, pageIndex }`) and `onExternalSelectionApplied?: () => void`.
+  The request is applied inside the *same* render-time comparison block
+  that already resolves the default/active-note selection (not in an
+  effect — that block exists specifically to avoid a placeholder-frame
+  flash, and an external request deserves the same treatment). It sits in
+  its own `else if` branch, checked *after* the existing "a note just
+  became active" branch and *before* the "nothing chosen yet" fallback.
+  The comment at that branch in `NotesView.tsx` writes out why this can
+  never fight the active-note branch: `prevActiveNoteId` initializes from
+  `state.activeNoteId` at mount, so `activeNoteIdChanged` is always
+  `false` on a fresh mount's first render — and `NotesView` is remounted
+  fresh every time `AppShell` switches to the Notes tab (Radix's
+  `TabsContent` unmounts inactive panels; confirmed by reading
+  `@radix-ui/react-tabs`'s `TabsContent` and `@radix-ui/react-presence`'s
+  `Presence`, not assumed), which is the only way a Search-driven
+  `external` ever arrives. Notifying the caller is deferred to a
+  `useEffect` keyed on the applied token, not called inline in that
+  render-time block, specifically to avoid React's "update a component
+  while rendering a different component" hazard (calling an *ancestor's*
+  setState, unlike this file's existing pattern of calling its own).
+- `RecordingsView` gained the analogous `external?:
+  RecordingsExternalSelection` (`{ token, recordingId, startMs? }`) and
+  `onExternalSelectionApplied?: () => void`, applied inside `load()` (an
+  effect-driven async function, not render — no hazard to avoid there).
+  `load`'s `useCallback` deps were changed from `[]` to `[external,
+  onExternalSelectionApplied]` so a new request arriving while this view
+  is already mounted still re-runs the subscribing effect and applies
+  immediately, not only on the next unrelated reload; `AppShell`'s
+  `clearNavigationTarget` was wrapped in `useCallback(() => …, [])` so
+  this doesn't resubscribe on every unrelated parent render.
+- `AppShell` gained `NavigationTarget` (`'note' | 'recording'`, each
+  carrying a monotonic `token`), `openNote`/`openRecording` (bump the
+  token, set the target, switch tabs), and `clearNavigationTarget`,
+  passed to both views as `onExternalSelectionApplied`.
+- `SearchView`'s `onOpenNotes`/`onOpenRecordings` props changed from
+  `() => void` to `(noteId, pageIndex) => void` /
+  `(recordingId, startMs?) => void`; `openFor` and the smart-search hit's
+  `Open` button were updated to pass the real target.
+- **One residual gap, by design:** `RecordingsView` cannot seek
+  `RecordingDetail`'s `<audio>` element — that element and its `seekTo`
+  are private to `RecordingDetail.tsx`, a third file never named in the
+  lifted boundary. Rather than stretch the grant to a file it didn't name,
+  `RecordingsView` selects the correct recording and shows a one-line hint
+  ("Jumped here from search — look for the segment at …") naming the
+  timestamp, beside that recording's own segment list (which already has
+  per-segment click-to-seek). An audio hit costs one more click than a
+  note hit. Flagging this rather than silently reaching into a third file,
+  or silently shipping less than asked without saying so.
+
+**Tests added** (all mutation-checked; token/revert pairs below show the
+actual commands and output):
+
+`src/notes/NotesView.test.tsx`, new `describe` block (5 tests):
+- *a fresh external selection wins over a different note already active
+  at mount* — seeds an active note via `engine.resumeNote` **before**
+  mounting, then renders with `external` naming a different note/page;
+  asserts the external target is shown (via the sidebar's own
+  `aria-current` attribute — a new `selectedSidebarTitle()` helper, not
+  `container.textContent`, since the sidebar always lists every note's
+  title regardless of selection and an earlier draft of this test used
+  `.textContent` and failed for the wrong reason before I caught it).
+- *calls `onExternalSelectionApplied` once the request has been applied.*
+- *re-applies the same note+page on a second request (a new token)* —
+  renders, re-renders (no unmount) with the identical `noteId`/`pageIndex`
+  but a bumped token, and asserts re-selection; also re-renders with the
+  token *unchanged* as a control and asserts it does **not** re-fire.
+- *a live session starting after an external selection was already
+  consumed still takes over (K16 keeps working).*
+- *with no external prop at all, resolves exactly as before* (regression
+  guard for every pre-existing test in the file).
+
+Mutation 1 — removed the `hasPendingExternalSelection` branch:
+```
+$ npx vitest run src/notes/NotesView.test.tsx
+× a fresh external selection wins over a different note already active at mount
+× calls onExternalSelectionApplied once the request has been applied
+× re-applies the same note+page on a second request …
+3 failed | 29 passed
+```
+Reverted; re-ran green (32/32).
+
+Mutation 2 — removed `setAppliedExternalToken(external.token)` (so the
+branch always re-fires):
+```
+$ npx vitest run src/notes/NotesView.test.tsx
+× re-applies the same note+page on a second request … (expected 'Manual Pick' to be 'Search Target')
+× a live session starting after an external selection was already consumed still takes over …
+  (expected 'Search Target' not to be 'Search Target')
+× calls onExternalSelectionApplied once the request has been applied
+3 failed | 29 passed
+```
+Reverted; re-ran green (32/32).
+
+Mutation 3 — dropped the `setPageIndex(external.pageIndex)` line:
+```
+$ npx vitest run src/notes/NotesView.test.tsx
+× a fresh external selection wins over a different note already active at mount
+  (expected … to contain 'Page 2 of 2')
+1 failed | 31 passed
+```
+Reverted; re-ran green (32/32).
+
+`src/recordings/RecordingsView.test.tsx`, new `describe` block (6 tests):
+- *selects the recording an external request names, over the newest-first
+  default.*
+- *shows the "look for the segment at" hint when the request names a
+  timestamp, and clears it on a manual pick.*
+- *calls `onExternalSelectionApplied` once the request has been applied.*
+- *re-applies the same recording on a second request (a new token).*
+- *an unrelated reload (the queue reporting a change) does not re-snap to
+  an already-applied request after a manual pick* — added mid-mutation-
+  check, see the disclosure below.
+- *a request naming an unknown recording id is ignored, falling back to
+  the normal default.*
+
+Mutation 1 — removed the whole external-selection block from `load()`:
+```
+$ npx vitest run src/recordings/RecordingsView.test.tsx
+× selects the recording an external request names … (expected … to contain 'Target')
+× shows the "look for the segment at" hint … (expected … to contain 'look for the segment')
+× calls onExternalSelectionApplied once the request has been applied (called 0 times)
+× re-applies the same recording on a second request … (expected … to contain 'Target')
+4 failed | 13 passed
+```
+(The "unknown id" test correctly stayed green — it is testing the
+fallback path this mutation didn't touch.) Reverted; re-ran green (18/18).
+
+**⚑ Mutation 2 was not detected on the first attempt — disclosing in
+full, as the brief asks.** Removing
+`appliedExternalTokenRef.current = external.token;` (so the "already
+applied" guard never actually records anything) passed **all 17 tests
+that existed at that point**:
+```
+$ npx vitest run src/recordings/RecordingsView.test.tsx
+✓ 17 tests passed
+```
+Cause: my "re-applies the same recording" test's manual-pick step clicks
+a row directly (`setSelectedId` in the `onClick`), which never calls
+`load()` at all — so there was no scenario in which `load()` ran a second
+time while the *same, unchanged* `external` value was still present. The
+only two `load()` calls in that test happened because `external` itself
+had just changed (which is exactly when the guard is supposed to let the
+request through) — so a guard that never worked would have looked
+identical. I added a new test, *an unrelated reload (the queue reporting
+a change) does not re-snap to an already-applied request after a manual
+pick*: same `external` value for the entire test, a manual pick, then
+`queue.fireChange()` (a reload with no prop change at all, simulating a
+transcript status update), asserting the manual pick survives it. Re-ran
+the same mutation against the fixed test file:
+```
+$ npx vitest run src/recordings/RecordingsView.test.tsx
+× an unrelated reload (the queue reporting a change) does not re-snap to an already-applied request after a manual pick
+  (expected 'TargetDec 31, 1969, 7:00 PM · 1:05Not…' to contain 'Other')
+1 failed | 17 passed
+```
+Now caught. Reverted; re-ran green (18/18, the new test included).
+
+Mutation 3 — dropped the `list.some((r) => r.id === external.recordingId)`
+existence check:
+```
+$ npx vitest run src/recordings/RecordingsView.test.tsx
+× a request naming an unknown recording id is ignored, falling back to the normal default
+  (AssertionError: the given combination of arguments (undefined and string) is invalid for this assertion)
+1 failed | 17 passed
+```
+Reverted; re-ran green.
+
+Mutation 4 — dropped `setSegmentHintMs(external.startMs ?? null)`:
+```
+$ npx vitest run src/recordings/RecordingsView.test.tsx
+× shows the "look for the segment at" hint … (expected … to contain 'look for the segment')
+1 failed | 17 passed
+```
+Reverted; re-ran green.
+
+Mutation 5 — dropped `setSegmentHintMs(null)` in the manual-pick
+`onClick`:
+```
+$ npx vitest run src/recordings/RecordingsView.test.tsx
+× shows the "look for the segment at" hint … (expected … not to contain 'look for the segment')
+1 failed | 17 passed
+```
+Reverted; re-ran green.
+
+`src/app/AppShell.test.tsx` (2 new end-to-end tests, seeding real notes/
+pages/recordings and driving the whole `AppShell` tree):
+- *a Search hit's Open button for a note navigates to the exact note and
+  page it names* — types a query, clicks `Open`, asserts the Notes tab is
+  active, the right note is the sidebar's `aria-current` row, and "Page 2
+  of 2" is shown.
+- *a Search hit's Open button for a recording switches to Recordings with
+  that recording selected* — asserts the Recordings tab is active, the
+  right recording is selected, and the segment hint names the right
+  timestamp.
+
+Mutation 1 — swapped `noteTarget`/`recordingTarget` wiring (passed
+`undefined` as `NotesView`'s `external`):
+```
+$ npx vitest run src/app/AppShell.test.tsx
+× a Search hit's Open button for a note navigates to the exact note and page it names
+  (expected … to contain 'Page 2 of 2')
+1 failed | 6 passed
+```
+Reverted; re-ran green (7/7).
+
+Mutation 2 — dropped `setTab('notes')` from `openNote`:
+```
+$ npx vitest run src/app/AppShell.test.tsx
+× a Search hit's Open button for a note navigates to the exact note and page it names
+  (expected 'inactive' to be 'active')
+1 failed | 6 passed
+```
+Reverted; re-ran green (7/7).
+
+**Also re-verified** (touched by this round's `SearchView.tsx` signature
+change, not newly written): mutating `hit.pageIndex ?? 0` to `hit.pageIndex!`
+(so a note-title hit would pass `undefined` instead of `0`) was caught by
+the existing "defaults to page 0 for a note-title hit" test
+(`toHaveBeenCalledExactlyOnceWith(note.id, 0)` failed with `undefined`
+received). Reverted; re-ran green.
+
+### Finding 2 (Important) — band-stage failures now report as "could not check", not "no matches"
+
+**What changed.** `SmartSearchResult` gained `uncheckedCount: number`
+(`src/search/smartSearch.ts`): incremented in the existing per-candidate
+`catch` block (the one that already drops a failed candidate so it can't
+cost the rest of the run), so the drop is now counted rather than
+silently vanishing. `SearchView.tsx` renders it in its own line
+("N notes could not be checked — search failed partway through for
+…"), styled `text-destructive`, placed above the Strong/Moderate/Weak
+sections so it is visible whether or not any section also has hits.
+
+**Tests added:**
+
+`src/search/smartSearch.test.ts` (3 tests, one updated):
+- *the existing "drops only the candidate whose band call rejects" test*
+  gained an assertion that `result.uncheckedCount === 1`.
+- *a run where some band calls fail reports both the hits it got and the
+  count it could not check* — three candidates, one band call fails,
+  asserts both surviving hits and `uncheckedCount === 1`.
+- *a run where every band call fails reports zero hits and a non-zero
+  `uncheckedCount`, not an indistinguishable empty result* — two
+  candidates, both band calls fail, asserts all three bands empty and
+  `uncheckedCount === 2`.
+
+Mutation — removed `result.uncheckedCount += 1;` from the catch block:
+```
+$ npx vitest run src/search/smartSearch.test.ts
+× drops only the candidate whose band call rejects … (expected 1 to be 0)
+× a run where some band calls fail reports both the hits it got and the count it could not check (expected 1 to be 0)
+× a run where every band call fails reports zero hits and a non-zero uncheckedCount … (expected 2 to be 0)
+3 failed | 13 passed
+```
+Reverted; re-ran green (16/16).
+
+`src/search/SearchView.test.tsx` (2 tests):
+- *reports both the hits it got and the count it could not check when
+  some band calls fail* — asserts the rendered hit text and the
+  "1 note could not be checked" line both appear.
+- *does not read as 'no matches' when every band call fails* — a single
+  candidate whose band call fails; asserts the "could not be checked"
+  line appears (rather than only the three bands' own "No matches.").
+
+Mutation — changed `{smart.uncheckedCount > 0 && (…)}` to `{false && (…)}`:
+```
+$ npx vitest run src/search/SearchView.test.tsx
+× reports both the hits it got and the count it could not check when some band calls fail
+  (expected … to contain '1 note could not be checked')
+× does not read as 'no matches' when every band call fails
+  (expected … to contain '1 note could not be checked')
+2 failed | 11 passed
+```
+Reverted; re-ran green (13/13, before Finding 1's two further additions
+brought the file to 14).
+
+### Summary of mutations not detected this round
+
+One, found and fixed within this round rather than shipped: RecordingsView's
+`appliedExternalTokenRef` update (Finding 1, Mutation 2 above). No mutation
+was left undetected in the final, committed test suite — every mutation
+listed above was re-run against the final test files after any fix and
+confirmed caught.

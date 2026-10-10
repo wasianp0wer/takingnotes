@@ -65,7 +65,9 @@ note + page, or to recording + segment timestamp for audio.
   `{ queue?, namingQueue? }`, `NotesView`'s `selectedNoteId` is private
   `useState`, and `RecordingsView`'s selection is likewise private. See
   Assumption S6-A6 for what "links to note + page" can honestly mean given
-  that boundary.
+  that boundary. (This was the state at first implementation; fix round 1
+  lifted the boundary for these two files specifically — S6-A6 now also
+  records what shipped after that.)
 - House test pattern: `createRoot` + `act`, no `@testing-library/react`
   (not a dependency). `src/notes/NotesView.test.tsx`'s `buttons()` /
   `buttonByText()` / `click()` / `settle()` helpers are the convention this
@@ -228,6 +230,12 @@ export interface SmartSearchResult {
   weak: SmartSearchHit[];
   /** Notes with `summary === null`, screened by title + page text instead (K44/K46). */
   unsummarizedCount: number;
+  /**
+   * Fix round 1, Finding 2: a screened candidate whose band call then
+   * failed — dropped from every section, but *not* folded into an
+   * indistinguishable "no match". See point 6 below.
+   */
+  uncheckedCount: number;
 }
 export interface SmartSearchDeps { generator: TextGenerator; model: string; }
 export async function runSmartSearch(
@@ -261,16 +269,26 @@ export async function runSmartSearch(
    the same reasoning `gaps/analyzer.ts`'s `summarizeChunks` already states):
    build its full page text (joined, capped `DETAIL_TEXT_MAX_CHARS`), call
    the band prompt, and push the result into `strong`/`moderate`/`weak`
-   unless `band === 'none'`. **A per-candidate failure is caught, logged and
-   skipped** — one candidate's bad answer must not cost every other
-   candidate's already-screened result (the same "one bad page must not
-   stop the rest of the note" principle as `gaps/analyzer.ts`'s
-   `analyzeNote`) — except an abort (`signal.aborted`/`AbortError`), which
-   is the user cancelling and ends the loop by rethrowing.
-6. This means: if Ollama goes unreachable *between* the screen call and the
-   band calls, each band call fails and is silently dropped, and the run
-   ends with zero hits rather than a surfaced error. This is a deliberate,
-   documented trade-off (S6-A4), not an oversight — see Assumptions.
+   unless `band === 'none'`. **A per-candidate failure is caught, logged,
+   counted in `uncheckedCount`, and the candidate is dropped** — one
+   candidate's bad answer must not cost every other candidate's
+   already-screened result (the same "one bad page must not stop the rest
+   of the note" principle as `gaps/analyzer.ts`'s `analyzeNote`) — except
+   an abort (`signal.aborted`/`AbortError`), which is the user cancelling
+   and ends the loop by rethrowing.
+6. If Ollama goes unreachable *between* the screen call and the band calls,
+   every band call fails. The run still ends with zero hits, but (fix
+   round 1, Finding 2) `uncheckedCount` equals however many candidates were
+   screened, so the view reports "could not be checked" rather than
+   letting a confidently empty result read as "no matches" — the exact
+   silent-wrong-answer class this phase has been digging out elsewhere.
+   `SearchView` renders this as its own line, separate from each band's
+   "No matches.". This still does not make K44's "fails with a plain
+   message" airtight for every call in a run — only the *first* one (the
+   screen call) can propagate as a thrown error; everything after that
+   degrades to a counted, reported omission instead. Both halves are a
+   deliberate, documented trade-off (S6-A4), not an oversight — see
+   Assumptions.
 
 ### `src/search/startSearch.ts` — settings-wired deps
 
@@ -290,9 +308,14 @@ presses. Never called by a test.
 export interface SearchViewProps {
   /** Tests only — a real mount builds its own via `getSmartSearchDeps`. */
   smartSearchDeps?: SmartSearchDeps;
-  /** From `AppShell` — best-effort cross-tab navigation (S6-A6). */
-  onOpenNotes?: () => void;
-  onOpenRecordings?: () => void;
+  /**
+   * From `AppShell` (fix round 1, Finding 1). `pageIndex` is `0` for a hit
+   * naming no specific page (a note-title/summary Find hit, or any
+   * smart-search hit).
+   */
+  onOpenNotes?: (noteId: string, pageIndex: number) => void;
+  /** `startMs` names the segment to look for, when the hit has one. */
+  onOpenRecordings?: (recordingId: string, startMs?: number) => void;
 }
 export function SearchView(props?: SearchViewProps): JSX.Element;
 ```
@@ -304,7 +327,8 @@ export function SearchView(props?: SearchViewProps): JSX.Element;
 - A query `Input`. **Find** results recompute from the already-loaded corpus
   on every keystroke (`findInCorpus`, pure, synchronous — no debounce
   needed) and render grouped by source, each row showing the snippet and a
-  button that calls `onOpenNotes`/`onOpenRecordings` (S6-A6).
+  button that calls `onOpenNotes(hit.noteId, hit.pageIndex ?? 0)` or
+  `onOpenRecordings(hit.recordingId, hit.startMs)` by hit kind (S6-A6).
 - A **Smart search** button: disabled while a run is in flight, while the
   query is blank, or while the corpus has no notes. On click, runs
   `runSmartSearch` (via `props.smartSearchDeps ?? await getSmartSearchDeps()`,
@@ -314,12 +338,17 @@ export function SearchView(props?: SearchViewProps): JSX.Element;
   so it can never reach React as an uncaught rejection or a stack trace
   (same pattern as `GapPanel.run`).
 - Results render as three headed sections, **Strong / Moderate / Weak**
-  (K42), each hit showing the note title and its `reason`, plus the
-  `onOpenNotes` button. A line states `unsummarizedCount` when it is `> 0`:
-  "N notes have no summary yet and were screened by title and page text
-  instead." (K44/K46) — shown whenever a search has run, not only when it
-  found something, so a library that is mostly unsummarized still visibly
-  says so even if nothing matched.
+  (K42), each hit showing the note title and its `reason`, plus an `onOpenNotes(hit.noteId, 0)`
+  button (a smart-search hit names a note, not a page). A line states
+  `unsummarizedCount` when it is `> 0`: "N notes have no summary yet and
+  were screened by title and page text instead." (K44/K46) — shown
+  whenever a search has run, not only when it found something, so a
+  library that is mostly unsummarized still visibly says so even if
+  nothing matched. A second, separately-styled line states
+  `uncheckedCount` when it is `> 0` (fix round 1, Finding 2): a candidate
+  the screen stage chose whose band call then failed, reported distinctly
+  from "No matches." so a run where every band call fails does not read as
+  a confidently empty result.
 - No result section render as "No matches." rather than being omitted
   entirely, so "ran and found nothing" is distinguishable from "hasn't run
   yet" (no smart-search section is rendered at all before the first run).
@@ -328,10 +357,15 @@ export function SearchView(props?: SearchViewProps): JSX.Element;
 
 Adds a fourth `TabsTrigger`/`TabsContent` ("Search") alongside
 Notes/Recordings/Triage (K39: "its own tab… it spans notes *and*
-recordings, so it does not belong inside either view"), and passes
-`onOpenNotes={() => setTab('notes')}` / `onOpenRecordings={() => setTab('recordings')}`
-to `<SearchView />` — seeAssumption S6-A6 for exactly what that navigation
-does and does not do.
+recordings, so it does not belong inside either view"). As of fix round 1,
+Finding 1, it also owns the one pending cross-tab navigation request
+(`NavigationTarget`, tagged `'note' | 'recording'`, each carrying a
+monotonic `token`): `openNote`/`openRecording` bump the token, store the
+target, and switch tabs; `clearNavigationTarget` (stable via `useCallback`)
+is passed to both `NotesView` and `RecordingsView` as
+`onExternalSelectionApplied`, so a consumed request does not linger to
+re-fire on some later, unrelated switch to that tab. See Assumption S6-A6
+for the full shape and its one named residual gap (segment auto-seek).
 
 ## Tests
 
@@ -483,40 +517,64 @@ does and does not do.
   job, not stage 1's.
 - **S6-A4** A per-candidate band-stage failure is caught and the candidate
   is dropped; only the screen-stage call's failure propagates as a visible
-  error. This means an Ollama host that goes unreachable *between* the
-  screen call and the band calls is reported as "found nothing" rather than
-  as an error — a false negative, not a crash. Accepted because the
-  alternative (treating any band failure as fatal) would make one
-  malformed-but-answered reply from a model abort every other
-  already-screened candidate's result, which is a worse everyday failure
-  mode for what is, in the common case, a transient parsing hiccup rather
-  than a dead host. Flagged here rather than silently chosen because K44
-  names "Ollama unreachable" as a case that must fail legibly, and this
-  design only guarantees that for the *first* call of a run.
+  error. **Updated by fix round 1, Finding 2:** a dropped candidate is no
+  longer indistinguishable from "found nothing" — it is counted in
+  `uncheckedCount` and `SearchView` reports it in its own line, separate
+  from each band's "No matches.". This means an Ollama host that goes
+  unreachable *between* the screen call and the band calls is now reported
+  as "N notes could not be checked" rather than silently as zero hits —
+  still not the thrown error K44 asks for (that guarantee holds only for
+  the *first* call of a run, the screen call), but no longer a false
+  negative either. The original per-candidate catch-and-drop is unchanged
+  and still the right call: the alternative (treating any band failure as
+  fatal) would make one malformed-but-answered reply from a model abort
+  every other already-screened candidate's result, which is a worse
+  everyday failure mode for what is, in the common case, a transient
+  parsing hiccup rather than a dead host.
 - **S6-A5** `runSmartSearch` makes no Ollama call at all for an empty corpus
   or a blank query; the "nothing to search yet" / "type something" messaging
   is the view's responsibility, not this function's return shape. Keeps the
   orchestration function's contract to "a result, or a rejection from a real
   model call" — no synthetic in-band error value.
-- **S6-A6** ⚑ **"Links to note + page / recording + timestamp" (K41) is
-  implemented as cross-*tab* navigation, not a deep link into the exact
-  note/page or recording/segment.** `NotesView`, `NoteList`, `NoteToolbar`
-  and `RecordingsView` are off-limits (owned by other units) and expose no
-  prop through which an external caller can set which note, page or
-  recording is selected — `NotesViewProps` is `{ queue?, namingQueue? }` and
-  every piece of "what's selected" is private `useState` inside those
-  components, with no context or module-level store standing in for it
-  either (checked: no `createContext`/`useContext` outside
-  `CaptureContext`/`TabletProvider`, neither of which carries a selection).
-  A Find/Smart-search hit's "Open" button therefore switches `AppShell`'s
-  tab to Notes or Recordings and relies on the result text (note title, page
-  number or typed/ink marker, recording title, formatted timestamp) for the
-  owner to find the right row themselves — one extra click, not a crash and
-  not a silent no-op, but not the single-click deep link K41's wording
-  suggests either. Closing this gap for real needs a prop on `NotesView`/
-  `RecordingsView` that neither this unit may add nor any other unit is
-  currently building; it is recorded here as a decision for whoever owns
-  Phase 4 rather than made silently.
+- **S6-A6** ⚑ **Superseded by fix round 1, Finding 1 — recorded here for
+  history.** Originally: "links to note + page / recording + timestamp"
+  (K41) was cross-*tab* navigation only, because `NotesView` and
+  `RecordingsView` were off-limits and exposed no prop through which an
+  external caller could set which note, page or recording was selected.
+  The coordinator verified this and lifted the ownership boundary for
+  exactly those two files. **As shipped after fix round 1:**
+  - `NotesView` takes `external?: NotesExternalSelection` (`{ token,
+    noteId, pageIndex }`) and `onExternalSelectionApplied?: () => void`.
+    Applied during the same render-time comparison block that already
+    resolves the default/active-note selection (not in an effect, so there
+    is no placeholder-frame flash) — see `NotesView.tsx`'s own comment at
+    the `hasPendingExternalSelection` branch for exactly why it cannot fire
+    on the same render as the active-note-follow branch, and therefore
+    never fights it. A single click on a note+page hit now lands on that
+    exact note and page.
+  - `RecordingsView` takes the analogous `external?:
+    RecordingsExternalSelection` (`{ token, recordingId, startMs? }`) and
+    selects the named recording. **One real gap remains, by design, not by
+    oversight:** this view cannot seek `RecordingDetail`'s `<audio>`
+    element, since that element and its `seekTo` are private to
+    `RecordingDetail.tsx` — a third file, never named in the lifted
+    boundary ("`src/notes/NotesView.tsx` and
+    `src/recordings/RecordingsView.tsx`", specifically). Rather than
+    stretch that grant to a file it did not name, `RecordingsView` instead
+    shows a one-line hint ("Jumped here from search — look for the segment
+    at …") naming the timestamp the hit matched, beside the (correctly
+    selected) recording's own segment list, which already has the "the
+    recordings view already has clickable segment timestamps" K41 points
+    at. An audio hit therefore costs one more click than a note hit does;
+    that residual gap, and the one file that would need to be added to the
+    grant to close it, is named again in `s6-report.md`'s fix round 1
+    section rather than silently worked around.
+  - In both cases, the token exists because the obvious shape — a bare
+    `{noteId, pageIndex}`/`{recordingId}` prop — cannot be re-applied: once
+    a view has "seen" a given value once, a second identical prop is
+    indistinguishable from the first and does nothing. `AppShell` bumps a
+    counter on every "Open" click, including a repeat of the exact same
+    hit, and each view tracks which token it last applied.
 - **S6-A7** No new setting is added. The brief allows one "if needed"; this
   unit needed none — there is no persisted state (no saved searches, no
   remembered query) and the model/host come entirely from `ollama.model`/
