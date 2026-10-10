@@ -83,7 +83,13 @@ describe('runSmartSearch', () => {
     const gen = createFakeTextGenerator();
     const result = await runSmartSearch('anything', corpus, { generator: gen, model: 'm' });
     expect(gen.calls.length).toBe(0);
-    expect(result).toEqual({ strong: [], moderate: [], weak: [], unsummarizedCount: 0 });
+    expect(result).toEqual({
+      strong: [],
+      moderate: [],
+      weak: [],
+      unsummarizedCount: 0,
+      uncheckedCount: 0,
+    });
   });
 
   it('makes zero generator calls for a blank query', async () => {
@@ -149,6 +155,49 @@ describe('runSmartSearch', () => {
     const result = await runSmartSearch('q', corpus, { generator: gen, model: 'm' });
     expect(result.strong).toHaveLength(1);
     expect(result.strong[0].noteId).toBe('b');
+    // Fix round 1, Finding 2: the failed candidate is counted, not folded
+    // into an indistinguishable "no match".
+    expect(result.uncheckedCount).toBe(1);
+  });
+
+  it('a run where some band calls fail reports both the hits it got and the count it could not check', async () => {
+    const corpus = corpusOf([
+      makeSearchNote('a', 's1'),
+      makeSearchNote('b', 's2'),
+      makeSearchNote('c', 's3'),
+    ]);
+    const gen = createFakeTextGenerator(['[1, 2, 3]']);
+    gen.replies.push(
+      '{"band":"strong","reason":"r1"}',
+      '{"band":"weak","reason":"r3"}',
+    );
+    let jsonCalls = 0;
+    gen.onGenerate = (call) => {
+      if (call.json) {
+        jsonCalls++;
+        // 1 = screen, 2 = band for a, 3 = band for b (fails), 4 = band for c.
+        if (jsonCalls === 3) throw new Error('boom');
+      }
+    };
+    const result = await runSmartSearch('q', corpus, { generator: gen, model: 'm' });
+    expect(result.strong).toHaveLength(1);
+    expect(result.weak).toHaveLength(1);
+    expect(result.uncheckedCount).toBe(1);
+  });
+
+  it('a run where every band call fails reports zero hits and a non-zero uncheckedCount, not an indistinguishable empty result', async () => {
+    const corpus = corpusOf([makeSearchNote('a', 's1'), makeSearchNote('b', 's2')]);
+    const gen = createFakeTextGenerator(['[1, 2]']);
+    gen.onGenerate = (call) => {
+      if (call.json && gen.calls.length > 1) throw new Error('every band call fails');
+    };
+    const result = await runSmartSearch('q', corpus, { generator: gen, model: 'm' });
+    expect(result.strong).toEqual([]);
+    expect(result.moderate).toEqual([]);
+    expect(result.weak).toEqual([]);
+    // The two chosen candidates both failed to be checked at all - this
+    // must not read the same as "both were checked and neither matched".
+    expect(result.uncheckedCount).toBe(2);
   });
 
   it('runs band calls serially, never overlapping', async () => {

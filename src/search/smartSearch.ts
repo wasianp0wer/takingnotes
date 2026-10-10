@@ -23,6 +23,17 @@ export interface SmartSearchResult {
   weak: SmartSearchHit[];
   /** Notes with `summary === null`, screened by title + page text instead (K44/K46). */
   unsummarizedCount: number;
+  /**
+   * Candidates the screen stage chose whose band call then failed (S6-A4)
+   * - a note smart search could not check, not one it checked and found no
+   * match in. Fix round 1, Finding 2: dropping a failed candidate so it
+   * cannot cost the rest of an already-screened run was the right call;
+   * reporting it as indistinguishable from "no match" was not - "no
+   * matches" and "I could not check nine of your notes" are different
+   * answers, and a confidently empty result would send the owner away
+   * believing the lecture does not exist.
+   */
+  uncheckedCount: number;
 }
 
 export interface SmartSearchDeps {
@@ -81,7 +92,7 @@ export async function runSmartSearch(
   // K44's reporting, extended by K46 to cover the fallback path too - this
   // is computed from the whole corpus, not narrowed by what follows.
   const unsummarizedCount = corpus.notes.filter((n) => n.note.summary === null).length;
-  const empty: SmartSearchResult = { strong: [], moderate: [], weak: [], unsummarizedCount };
+  const empty: SmartSearchResult = { strong: [], moderate: [], weak: [], unsummarizedCount, uncheckedCount: 0 };
 
   // No Ollama call at all for an empty corpus or a blank query (S6-A5): the
   // view renders the plain "nothing to search yet" message itself.
@@ -134,7 +145,10 @@ export async function runSmartSearch(
     } catch (error) {
       if (isAbort(error)) throw error;
       // S6-A4: one candidate's bad answer must not cost the rest of an
-      // already-screened run.
+      // already-screened run. Fix round 1, Finding 2: it must also not be
+      // reported as though it were checked and found irrelevant - counted
+      // here, surfaced by the view distinctly from "no matches".
+      result.uncheckedCount += 1;
       console.error('[search] band scoring failed for a candidate', note.note.id, errorMessage(error));
     }
   }

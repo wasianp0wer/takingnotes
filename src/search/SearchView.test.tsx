@@ -168,6 +168,38 @@ describe('SearchView', () => {
     expect(container.textContent).toMatch(/1 note.*no summary/);
   });
 
+  it('reports both the hits it got and the count it could not check when some band calls fail', async () => {
+    await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0 });
+    await createNote({ title: 'B', deviceId: 'd', pageBaseline: 0 });
+    const gen = createFakeTextGenerator(['[1, 2]', '{"band":"strong","reason":"it matches"}']);
+    let jsonCalls = 0;
+    gen.onGenerate = (call) => {
+      if (call.json) {
+        jsonCalls++;
+        if (jsonCalls === 3) throw new Error('boom');
+      }
+    };
+    render({ smartSearchDeps: { generator: gen, model: 'm' } });
+    await settle();
+    await type('something');
+    await click(buttonByText('Smart search'));
+    expect(container.textContent).toContain('it matches');
+    expect(container.textContent).toContain('1 note could not be checked');
+  });
+
+  it("does not read as 'no matches' when every band call fails", async () => {
+    await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0 });
+    const gen = createFakeTextGenerator(['[1]']);
+    gen.onGenerate = (call) => {
+      if (call.json && gen.calls.length > 1) throw new Error('every band call fails');
+    };
+    render({ smartSearchDeps: { generator: gen, model: 'm' } });
+    await settle();
+    await type('something');
+    await click(buttonByText('Smart search'));
+    expect(container.textContent).toContain('1 note could not be checked');
+  });
+
   it("a Find hit's Open button calls onOpenNotes for a note hit", async () => {
     await createNote({ title: 'Unique Title', deviceId: 'd', pageBaseline: 0 });
     const onOpenNotes = vi.fn();

@@ -147,6 +147,17 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
                   summary yet and were screened by title and page text instead.
                 </p>
               )}
+              {smart.uncheckedCount > 0 && (
+                // Fix round 1, Finding 2: distinct from "no matches" -
+                // these notes were screened as candidates but the closer
+                // check on them failed partway through, so their
+                // relevance is unknown, not ruled out.
+                <p className="text-xs text-destructive">
+                  {smart.uncheckedCount} {smart.uncheckedCount === 1 ? 'note' : 'notes'} could not be
+                  checked — search failed partway through for{' '}
+                  {smart.uncheckedCount === 1 ? 'it' : 'them'}.
+                </p>
+              )}
               {BANDS.map((band) => (
                 <div key={band}>
                   <h3 className="text-sm font-medium">{BAND_LABEL[band]}</h3>
