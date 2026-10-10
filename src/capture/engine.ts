@@ -5,14 +5,16 @@ import { createEmitter } from '@/device/emitter';
 import { createNote, getNote, listNotes, updateNote } from '@/storage/notes';
 import {
   createPage,
+  createTypedPage,
   finalizePage,
   isPageFinalized,
+  isTypedPage,
   listPages,
   pageEndedAt,
   setPageStrokes,
 } from '@/storage/pages';
 import { createSession, getSession, listSessions, updateSession } from '@/storage/sessions';
-import type { PageStroke, SessionStatus } from '@/storage/types';
+import type { PageRecord, PageStroke, SessionStatus } from '@/storage/types';
 import type { HuionPenPoint } from '@/utils/huionBLE';
 import {
   HUION_DEFAULT_PAGE_HEIGHT_A5,
@@ -165,6 +167,37 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
    */
   let pendingResume: { noteId: string; result: Promise<{ sessionId: string; noteId: string }> } | null =
     null;
+  /**
+   * The typed page currently active, if any (K34, A38). Mirrors `noteOpen`'s
+   * own discipline: a synchronous flag, flipped before any `await`, never
+   * derived from `state` (stale until an op runs). Non-null only while
+   * `noteOpen` is true, and only while `buffer.pageId` is null - the ink
+   * buffer stays parked the whole time a typed page is active, so nothing
+   * ever flushes a stroke onto it.
+   */
+  let activeTypedPageId: string | null = null;
+  /**
+   * True from the moment `newTypedPage()` is called until its op resolves
+   * (review Finding 1). In that window the new typed page has no id yet, so
+   * `activeTypedPageId` can't carry the signal on its own: without this, a
+   * stroke completing while the write is still in flight takes *neither* of
+   * `handlePen`'s two branches - `noteOpen` is already true, and
+   * `activeTypedPageId` is still null - and its ink sits in a buffer nothing
+   * is scheduled to ever claim, dropped silently and permanently. Cleared in
+   * `newTypedPage`'s own op, on both its success and its early-return/
+   * failure paths.
+   */
+  let typedPagePending = false;
+  /**
+   * True from the moment a K34 redirect (`startLivePageAfterTyping`) is
+   * itself triggered until *that* op resolves. Guards the same kind of
+   * window one level down: `activeTypedPageId`/`typedPagePending` are only
+   * cleared once their own op actually runs, so a second point of the same
+   * down-stroke arriving before either has had the chance would otherwise
+   * still see the trigger condition true and queue a second, redundant
+   * redirect racing the first one over the same buffer.
+   */
+  let typedToLiveRedirectPending = false;
 
   let buffer: Buffer = freshBuffer();
   /** Cache behind `getLiveStrokes`, invalidated whenever the ink changes. */
@@ -279,13 +312,45 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     }
   }
 
+  /**
+   * Finalizes a typed page being left behind by a live transition
+   * (`newTypedPage`, `startLivePageAfterTyping`) at `now()` - the same
+   * instant `closeOldPage` uses for a live page. Never returns an id to emit
+   * `pageFinalized` with: a typed page's transcript is already `'done'`
+   * (K33), and the transcription queue's `markPending` would overwrite it
+   * with `pending` the moment it saw one.
+   */
+  async function finalizeTypedPage(id: string): Promise<void> {
+    try {
+      await finalizePage(id, now());
+    } catch (error) {
+      console.error('[capture] finalizing a typed page failed', error);
+    }
+  }
+
+  /**
+   * `recover()`/`resumeNote()`'s shared "finalize whatever was left open"
+   * step (A38 defense in depth, independent of whether the live engine paths
+   * above already prevent an unfinalized typed page from reaching here in
+   * practice). Finalizes at `pageEndedAt`, as both callers already did - but
+   * only a *live* page's id is worth emitting `pageFinalized` for; see
+   * `finalizeTypedPage` for why a typed one is not.
+   */
+  async function finalizeLeftOpen(page: PageRecord): Promise<string | null> {
+    await finalizePage(page.id, pageEndedAt(page));
+    return isTypedPage(page) ? null : page.id;
+  }
+
   /** The closing half of `endNote`, with the "is a note open" check already done. */
   function closeNote(): Promise<void> {
     const old = closeBuffer();
+    const typedId = activeTypedPageId;
+    activeTypedPageId = null;
     noteOpen = false;
 
     return enqueue(async () => {
       const finalizedId = await closeOldPage(old);
+      if (typedId !== null) await finalizeTypedPage(typedId);
       // Read from `state` inside the op: only ops publish it, so here it still
       // describes the note this call is closing.
       const noteId = state.activeNoteId;
@@ -328,9 +393,10 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
           for (const page of pages) {
             if (isPageFinalized(page)) continue;
             // At the time writing stopped, not at the time recovery noticed:
-            // see `pageEndedAt`.
-            await finalizePage(page.id, pageEndedAt(page));
-            finalized.push(page.id);
+            // see `pageEndedAt`. A typed page's id is never added here - see
+            // `finalizeLeftOpen`.
+            const id = await finalizeLeftOpen(page);
+            if (id !== null) finalized.push(id);
           }
           const at = endedAt > 0 ? endedAt : now();
           await updateNote(note.id, { status: 'interrupted', endedAt: at });
@@ -368,9 +434,18 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     // segmenter rather than re-deciding what "down" means keeps one definition
     // of it (segmenter.ts), so the two can never drift apart.
     //
-    // Writing is never dropped: the points already sit in `buffer`, and the note
-    // this starts adopts that same buffer as its page 0.
-    if (segmenter.current() !== null && !noteOpen) void startNote();
+    // Writing is never dropped: the points already sit in `buffer`, and the
+    // note this starts adopts that same buffer as its page 0. K34: if the
+    // active page is typed - or is *becoming* typed, `newTypedPage`'s own
+    // write still in flight (review Finding 1) - the pad coming back to
+    // life opens a new live page instead; ink never lands on a typed page
+    // (A38).
+    if (segmenter.current() !== null) {
+      if (!noteOpen) void startNote();
+      else if (!typedToLiveRedirectPending && (activeTypedPageId !== null || typedPagePending)) {
+        startLivePageAfterTyping();
+      }
+    }
 
     if (result.changed) emitInk();
   }
@@ -505,10 +580,13 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     if (!noteOpen) return Promise.resolve(null);
 
     const old = closeBuffer();
+    const typedId = activeTypedPageId;
+    activeTypedPageId = null;
     const next = buffer;
 
     return enqueue(async () => {
       const finalizedId = await closeOldPage(old);
+      if (typedId !== null) await finalizeTypedPage(typedId);
       const noteId = state.activeNoteId;
       // Only reachable if the note's own creation failed; there is nothing to
       // add a page to. `old`'s strokes are dropped with it, deliberately: this
@@ -541,6 +619,101 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
       // page, or one that closed while the page was being created.
       void flushBuffer(next);
       return page.id;
+    });
+  }
+
+  /**
+   * Finalizes the active page and makes a new *typed* page the active page
+   * (K32, K35). No active note -> no-op, mirroring `newPage`'s own A7 rule.
+   *
+   * `typedPagePending` is set synchronously and cleared in the op's
+   * `finally`, covering the write-in-flight window the same way `noteOpen`
+   * covers note creation (review Finding 1): without it, a stroke
+   * completing before `createTypedPage` resolves would take neither of
+   * `handlePen`'s branches and be dropped.
+   */
+  function newTypedPage(): Promise<string | null> {
+    void start();
+    if (!noteOpen) return Promise.resolve(null);
+
+    const old = closeBuffer();
+    const typedId = activeTypedPageId;
+    activeTypedPageId = null;
+    typedPagePending = true;
+
+    return enqueue(async () => {
+      try {
+        const finalizedId = await closeOldPage(old);
+        if (typedId !== null) await finalizeTypedPage(typedId);
+        const noteId = state.activeNoteId;
+        if (noteId === null) return null;
+
+        const pageIndex = state.pageIndex + 1;
+        const page = await createTypedPage({ noteId, pageIndex, capturedAt: now() });
+
+        activeTypedPageId = page.id;
+        setState({ ...state, activePageId: page.id, pageIndex });
+        if (finalizedId !== null) emitPageFinalized(finalizedId);
+        return page.id;
+      } finally {
+        typedPagePending = false;
+      }
+    });
+  }
+
+  /**
+   * K34: the pad coming back to life while the active page is typed - or is
+   * *becoming* typed - must not write ink into it (A38). Deliberately *not*
+   * `newPage`'s pattern: `newPage` calls `closeBuffer()`, which force-ends
+   * whatever stroke is open onto the *outgoing* page - correct for a
+   * deliberate turn, where that stroke belongs to the page being left. Here
+   * the open stroke is the one that just triggered this transition, and it
+   * must land on the *new* page, so this function does not call
+   * `closeBuffer()` at all: `buffer` is already parked (`pageId: null`) and
+   * is about to receive exactly this stroke.
+   *
+   * `typedToLiveRedirectPending` is set synchronously (before any await) so
+   * a second point of the same down-stroke can't queue a second, redundant
+   * redirect while this one is still in flight.
+   *
+   * `activeTypedPageId` is read *inside* the op, not captured before it is
+   * enqueued (review Finding 1): if this fired while `newTypedPage()`'s own
+   * op was still creating its page, that op has already run by the time
+   * this one starts - the chain is FIFO - and has set `activeTypedPageId`
+   * to the page it just created. Capturing it synchronously, before this op
+   * was even enqueued, would miss that: the typed page `newTypedPage`
+   * created would never be finalized, and `activeTypedPageId` would be left
+   * pointing at a page that isn't the active one any more, wrongly tripping
+   * this same redirect again on the next stroke.
+   */
+  function startLivePageAfterTyping(): void {
+    typedToLiveRedirectPending = true;
+    const b = buffer;
+
+    void enqueue(async () => {
+      try {
+        const typedId = activeTypedPageId;
+        activeTypedPageId = null;
+        if (typedId !== null) await finalizeTypedPage(typedId);
+        const noteId = state.activeNoteId;
+        if (noteId === null) return;
+        const pageIndex = state.pageIndex + 1;
+        const buffered = [...b.strokes];
+        const page = await createPage({
+          noteId,
+          pageIndex,
+          devicePageNum: null,
+          source: 'live',
+          strokes: buffered,
+          capturedAt: now(),
+        });
+        b.pageId = page.id;
+        if (b.strokes.length === buffered.length) b.dirty = false;
+        setState({ ...state, activePageId: page.id, pageIndex });
+        void flushBuffer(b);
+      } finally {
+        typedToLiveRedirectPending = false;
+      }
     });
   }
 
@@ -619,11 +792,12 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
         const pages = await listPages(noteId);
         // A page left open by an interruption is closed before appending, so
         // the note never holds two unfinalized pages. Finalized at the time the
-        // writing stopped, not now: see `pageEndedAt`.
+        // writing stopped, not now: see `pageEndedAt`. A typed page's id is
+        // never added here - see `finalizeLeftOpen`.
         for (const page of pages) {
           if (isPageFinalized(page)) continue;
-          await finalizePage(page.id, pageEndedAt(page));
-          finalized.push(page.id);
+          const id = await finalizeLeftOpen(page);
+          if (id !== null) finalized.push(id);
         }
 
         // `pages` is `pageIndex`-sorted by `listPages`, but max-of-last is read
@@ -712,6 +886,7 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     startSession,
     resumeNote,
     newPage,
+    newTypedPage,
 
     endNote: endOpenNote,
     // One session is one note, started and ended together (spec J4), so ending

@@ -7,7 +7,7 @@ import { createCaptureEngine } from '@/capture/engine';
 import type { LiveCaptureEngine } from '@/capture/engine';
 import { NotesView } from '@/notes/NotesView';
 import { createNote, setNoteTags } from '@/storage/notes';
-import { createPage, setPageTranscript } from '@/storage/pages';
+import { createPage, getPage, setPageTranscript } from '@/storage/pages';
 import type { NoteRecord, PageRecord, TranscriptStatus } from '@/storage/types';
 import { createFakeDeviceController } from '@/test/fakeDeviceController';
 import { resetDatabase } from '@/test/resetDb';
@@ -373,5 +373,48 @@ describe('NotesView', () => {
     expect(container.textContent).toContain('thesis');
     // The filter bar's chip for the new tag.
     expect(buttonByText('thesis')).toBeTruthy();
+  });
+
+  it('disables "Type page" with no active note', async () => {
+    await render();
+    expect(buttonByText('Type page').disabled).toBe(true);
+  });
+
+  it('creates a typed page via "Type page" and lets it be typed into', async () => {
+    await render();
+    await click(buttonByText('New note'));
+
+    await click(buttonByText('Type page'));
+
+    expect(engine.getState().pageIndex).toBe(1);
+    const activePageId = engine.getState().activePageId!;
+    const activePage = await getPage(activePageId);
+    expect(activePage?.source).toBe('typed');
+
+    const ta = container.querySelector('textarea')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+    await act(async () => {
+      setter.call(ta, 'Newton: F=ma');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // The real default debounce (500ms) - this is the one place it's worth
+    // proving the full NotesView -> TypedPageEditor -> setPageText wiring
+    // against it; TypedPageEditor.test.tsx covers the debounce logic itself
+    // with a fast override.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    });
+
+    const saved = await getPage(activePageId);
+    expect(saved?.text).toBe('Newton: F=ma');
+    expect(saved?.transcript?.markdown).toBe('Newton: F=ma');
+  });
+
+  it('does not show the "not yet transcribed" message for the active typed page', async () => {
+    await render();
+    await click(buttonByText('New note'));
+    await click(buttonByText('Type page'));
+
+    expect(container.textContent).not.toContain('Transcribed when the page is finished');
   });
 });

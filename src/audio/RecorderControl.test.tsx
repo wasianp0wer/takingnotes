@@ -86,6 +86,7 @@ function createFakeCaptureEngine(state: CaptureState): CaptureEngine {
     // Resume is not exercised through this double.
     resumeNote: notExercised('resumeNote'),
     newPage: notExercised('newPage'),
+    newTypedPage: notExercised('newTypedPage'),
     getLiveStrokes: () => {
       throw new Error('getLiveStrokes is not exercised through this double');
     },

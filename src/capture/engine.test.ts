@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createCaptureEngine, sessionStartedAtOf, type LiveCaptureEngine } from '@/capture/engine';
 import type { CaptureState } from '@/capture/types';
 import { createNote, getNote, listNotes } from '@/storage/notes';
-import { createPage, getPage, listPages } from '@/storage/pages';
+import { createPage, createTypedPage, getPage, listPages } from '@/storage/pages';
 import { createSession, getSession, listSessions } from '@/storage/sessions';
 import { createFakeDeviceController, type FakeDeviceController } from '@/test/fakeDeviceController';
 import { resetDatabase } from '@/test/resetDb';
@@ -14,7 +14,18 @@ import { resetDatabase } from '@/test/resetDb';
  * on the engine's op chain, well after the call that armed it, so a test cannot
  * disarm it by hand without racing the op it is trying to break.
  */
-const hooks = vi.hoisted(() => ({ failSessionWrites: 0, failNoteWrites: 0, failNoteUpdates: 0 }));
+const hooks = vi.hoisted(() => ({
+  failSessionWrites: 0,
+  failNoteWrites: 0,
+  failNoteUpdates: 0,
+  /**
+   * When set, the next `createTypedPage` call awaits this before doing its
+   * real write - a lever for holding `newTypedPage`'s op open mid-flight, so
+   * a test can inject a pen event into the exact window the page doesn't
+   * have an id yet (review Finding 1).
+   */
+  deferredTypedPage: null as Promise<void> | null,
+}));
 
 vi.mock('@/storage/notes', async () => {
   const actual = await vi.importActual<typeof import('@/storage/notes')>('@/storage/notes');
@@ -42,6 +53,21 @@ vi.mock('@/storage/notes', async () => {
         return Promise.reject(new Error('note update failed'));
       }
       return actual.updateNote(id, patch);
+    },
+  };
+});
+
+vi.mock('@/storage/pages', async () => {
+  const actual = await vi.importActual<typeof import('@/storage/pages')>('@/storage/pages');
+  return {
+    ...actual,
+    createTypedPage: async (input: Parameters<typeof actual.createTypedPage>[0]) => {
+      if (hooks.deferredTypedPage) {
+        const wait = hooks.deferredTypedPage;
+        hooks.deferredTypedPage = null;
+        await wait;
+      }
+      return actual.createTypedPage(input);
     },
   };
 });
@@ -85,6 +111,7 @@ beforeEach(async () => {
   hooks.failSessionWrites = 0;
   hooks.failNoteWrites = 0;
   hooks.failNoteUpdates = 0;
+  hooks.deferredTypedPage = null;
   await resetDatabase();
   fake = createFakeDeviceController();
   engine = createCaptureEngine({ controller: fake });
@@ -402,6 +429,38 @@ describe('capture engine', () => {
     expect(await getNote(doneNote.id)).toMatchObject({ status: 'complete', endedAt: 2000 });
     expect(await getSession(doneSession.id)).toMatchObject({ status: 'ended', endedAt: 2000 });
     expect((await getPage(donePage.id))!.finalizedAt).toBe(1500);
+  });
+
+  it('recovers a typed page left open without queuing it for transcription (A38)', async () => {
+    const note = await createNote({
+      title: 'Crashed with a typed page',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'active',
+    });
+    const livePage = await createPage({
+      noteId: note.id,
+      pageIndex: 0,
+      devicePageNum: null,
+      source: 'live',
+      strokes: [{ points: [{ x: 0.1, y: 0.1, pressure: 0.5, t: 1000 }], startedAt: 900, endedAt: 1000 }],
+      finalizedAt: null,
+    });
+    const typedPage = await createTypedPage({
+      noteId: note.id,
+      pageIndex: 1,
+      text: 'left open',
+      capturedAt: 1200,
+    });
+
+    const finalized: string[] = [];
+    engine.subscribePageFinalized((id) => finalized.push(id));
+    await engine.start();
+
+    expect((await getPage(livePage.id))!.finalizedAt).toBe(1000);
+    expect((await getPage(typedPage.id))!.finalizedAt).toBe(1200);
+    expect((await getPage(typedPage.id))!.transcript?.status).toBe('done');
+    expect(finalized).toEqual([livePage.id]);
   });
 
   it('exposes live ink and notifies per point', async () => {
@@ -745,6 +804,171 @@ describe('capture engine', () => {
     expect((await getSession(sessionId))?.title).toMatch(/^Session ./);
     expect((await getNote(noteId))?.title).toBe((await getSession(sessionId))?.title);
   });
+
+  describe('newTypedPage', () => {
+    it('finalizes the outgoing live page, emits pageFinalized for it, and creates a typed page', async () => {
+      const noteId = await engine.startNote();
+      const first = engine.getState().activePageId!;
+      const finalized: string[] = [];
+      engine.subscribePageFinalized((id) => finalized.push(id));
+
+      const second = await engine.newTypedPage();
+
+      expect(second).toBeTruthy();
+      expect(second).not.toBe(first);
+
+      const pages = await listPages(noteId);
+      expect(pages.map((p) => p.pageIndex)).toEqual([0, 1]);
+      expect(pages[0].finalizedAt).toBeTypeOf('number');
+      expect(pages[1]).toMatchObject({
+        id: second,
+        pageIndex: 1,
+        source: 'typed',
+        devicePageNum: null,
+        finalizedAt: null,
+        strokes: [],
+      });
+      expect(finalized).toEqual([first]);
+      expect(engine.getState()).toMatchObject({ activePageId: second, pageIndex: 1 });
+    });
+
+    it('finalizes an outgoing typed page without emitting pageFinalized for it', async () => {
+      await engine.startNote();
+      const first = (await engine.newTypedPage())!;
+      const finalized: string[] = [];
+      engine.subscribePageFinalized((id) => finalized.push(id));
+
+      const second = await engine.newTypedPage();
+
+      expect(second).toBeTruthy();
+      expect(second).not.toBe(first);
+      expect((await getPage(first))!.finalizedAt).toBeTypeOf('number');
+      expect(finalized).toEqual([]);
+    });
+
+    it('is a no-op with no active note', async () => {
+      await engine.start();
+
+      expect(await engine.newTypedPage()).toBeNull();
+
+      expect(await listNotes()).toEqual([]);
+      expect(engine.getState()).toEqual(IDLE);
+    });
+  });
+
+  describe('typed pages and pen input (K34)', () => {
+    it('opens a new, unsplit live page when the pen writes while the active page is typed', async () => {
+      const noteId = await engine.startNote();
+      const typedId = (await engine.newTypedPage())!;
+
+      stroke(fake, [
+        [0.1, 0.1],
+        [0.2, 0.2],
+      ]);
+      await engine.flush();
+
+      const pages = await listPages(noteId);
+      expect(pages.map((p) => p.pageIndex)).toEqual([0, 1, 2]);
+
+      const typedPage = pages.find((p) => p.id === typedId)!;
+      expect(typedPage.strokes).toEqual([]);
+      expect(typedPage.finalizedAt).toBeTypeOf('number');
+
+      const liveAfterTyped = pages[2];
+      expect(liveAfterTyped.source).toBe('live');
+      expect(liveAfterTyped.strokes).toHaveLength(1);
+      expect(liveAfterTyped.strokes[0].points).toHaveLength(2);
+      expect(engine.getState()).toMatchObject({ activePageId: liveAfterTyped.id, pageIndex: 2 });
+    });
+
+    it('finalizes the typed page it leaves behind, without emitting pageFinalized for it', async () => {
+      const noteId = await engine.startNote();
+      const liveFirst = engine.getState().activePageId!;
+      const typedId = (await engine.newTypedPage())!;
+      const finalized: string[] = [];
+      engine.subscribePageFinalized((id) => finalized.push(id));
+
+      stroke(fake, [[0.1, 0.1]]);
+      await engine.flush();
+
+      // The redirect actually happened - a new live page exists and is
+      // active - so `finalized` staying empty below is a real assertion
+      // about the typed page specifically, not a vacuous one about nothing
+      // having run at all (review Finding 2: `[].includes(x)` is always
+      // false, so this test previously could not fail even if K34's
+      // redirect were deleted outright).
+      const pages = await listPages(noteId);
+      expect(pages.map((p) => p.source)).toEqual(['live', 'typed', 'live']);
+      const liveAfterTyped = pages[2];
+      expect(liveAfterTyped.id).not.toBe(liveFirst);
+      expect(engine.getState().activePageId).toBe(liveAfterTyped.id);
+
+      // The typed page it left behind is finalized...
+      expect((await getPage(typedId))!.finalizedAt).toBeTypeOf('number');
+      // ...but never queued for transcription.
+      expect(finalized).toEqual([]);
+    });
+
+    it('does not re-trigger on later points of the same stroke', async () => {
+      await engine.startNote();
+      await engine.newTypedPage();
+
+      fake.emitPen({ x: 0.1, y: 0.1 });
+      fake.emitPen({ x: 0.2, y: 0.2 });
+      fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+      await engine.flush();
+
+      const noteId = engine.getState().activeNoteId!;
+      const pages = await listPages(noteId);
+      // Exactly one new live page, not one per point.
+      expect(pages.map((p) => p.source)).toEqual(['live', 'typed', 'live']);
+    });
+
+    it('does not drop a stroke that completes while newTypedPage is still creating its page', async () => {
+      // Review Finding 1: `newTypedPage` clears `activeTypedPageId` and parks
+      // `buffer` synchronously, but only sets `activeTypedPageId` to the new
+      // page's id *inside* its enqueued op, after `createTypedPage` resolves.
+      // A stroke completing in that window must not be silently dropped.
+      const noteId = await engine.startNote();
+      const liveFirst = engine.getState().activePageId!;
+
+      let release!: () => void;
+      hooks.deferredTypedPage = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      const creating = engine.newTypedPage();
+      // The whole stroke completes before `createTypedPage`'s write
+      // resolves - `newTypedPage`'s op hasn't even started running yet
+      // (enqueue defers to a microtask), let alone finished.
+      stroke(fake, [
+        [0.3, 0.3],
+        [0.4, 0.4],
+      ]);
+
+      release();
+      const typedId = await creating;
+      await engine.flush();
+
+      expect(typedId).toBeTruthy();
+      const pages = await listPages(noteId);
+      expect(pages.map((p) => p.source)).toEqual(['live', 'typed', 'live']);
+      expect(pages[0].id).toBe(liveFirst);
+
+      const typedPage = pages[1];
+      expect(typedPage.id).toBe(typedId);
+      // Created and immediately finalized - the same harmless artifact as
+      // pressing "Type page" and then immediately writing.
+      expect(typedPage.strokes).toEqual([]);
+      expect(typedPage.finalizedAt).toBeTypeOf('number');
+
+      const liveAfterTyped = pages[2];
+      expect(liveAfterTyped.source).toBe('live');
+      expect(liveAfterTyped.strokes).toHaveLength(1);
+      expect(liveAfterTyped.strokes[0].points).toHaveLength(2);
+      expect(engine.getState()).toMatchObject({ activePageId: liveAfterTyped.id, pageIndex: 2 });
+    });
+  });
 });
 
 describe('resumeNote', () => {
@@ -881,6 +1105,30 @@ describe('resumeNote', () => {
     // would leave the page correctly finalized in storage but silently never
     // queued for transcription.
     expect(finalized).toContain(open.id);
+  });
+
+  it('resumes a note whose last page was typed and left open, without emitting pageFinalized for it', async () => {
+    const note = await createNote({
+      title: 'Typed then interrupted',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+    });
+    const typedPage = await createTypedPage({
+      noteId: note.id,
+      pageIndex: 0,
+      text: 'unfinished',
+      capturedAt: 1_000,
+    });
+    const finalized: string[] = [];
+    engine.subscribePageFinalized((id) => finalized.push(id));
+
+    await engine.resumeNote(note.id);
+    await engine.flush();
+
+    expect((await getPage(typedPage.id))!.finalizedAt).toBe(1_000);
+    expect(finalized).toEqual([]);
+    expect((await listPages(note.id)).map((p) => p.pageIndex)).toEqual([0, 1]);
   });
 
   it('rejects an unknown note and releases noteOpen for the next pen point', async () => {
