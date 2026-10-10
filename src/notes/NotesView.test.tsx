@@ -6,6 +6,7 @@ import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine } from '@/capture/engine';
 import type { LiveCaptureEngine } from '@/capture/engine';
 import { NotesView } from '@/notes/NotesView';
+import { resetResumeLockForTests } from '@/notes/resumeLock';
 import { createNote } from '@/storage/notes';
 import { createPage, setPageTranscript } from '@/storage/pages';
 import type { NoteRecord, PageRecord, TranscriptStatus } from '@/storage/types';
@@ -66,6 +67,7 @@ function createFakeQueue(): FakeQueue {
 beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   await resetDatabase();
+  resetResumeLockForTests();
   ink = { calls: [] };
   // happy-dom has no canvas backend; a recording context lets the real
   // `drawStrokes` run so a bad stroke shape would still throw here.
@@ -122,6 +124,14 @@ function buttonByText(text: string): HTMLButtonElement {
 
 function findButtonByText(text: string): HTMLButtonElement | undefined {
   return buttons().find((b) => b.textContent?.trim() === text);
+}
+
+/** The Resume button inside the sidebar row whose title is `noteTitle`. */
+function resumeButtonForNote(noteTitle: string): HTMLButtonElement | undefined {
+  const row = [...container.querySelectorAll('li')].find((li) =>
+    li.textContent?.includes(noteTitle),
+  );
+  return [...(row?.querySelectorAll('button') ?? [])].find((b) => b.textContent?.trim() === 'Resume');
 }
 
 function buttonByLabel(label: string): HTMLButtonElement {
@@ -323,5 +333,55 @@ describe('NotesView', () => {
     await settle();
 
     expect(buttonByText('New note').disabled).toBe(true);
+  });
+
+  it('offers Resume on a finished note and makes it active (K14)', async () => {
+    await seedNote({ title: 'This week', status: 'complete', startedAt: 2_000 });
+    const lastWeek = await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    await render();
+    expect(engine.getState().activeNoteId).toBeNull();
+
+    const resumeButton = resumeButtonForNote('Last week');
+    expect(resumeButton).toBeDefined();
+    expect(resumeButton!.disabled).toBe(false);
+
+    await click(resumeButton!);
+    await act(async () => {
+      await engine.flush();
+    });
+
+    expect(engine.getState().activeNoteId).toBe(lastWeek.id);
+  });
+
+  it('disables Resume on another note while a session is locked (K15)', async () => {
+    const other = await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    await render();
+
+    await act(async () => {
+      await engine.startSession();
+    });
+    await settle();
+    const activeId = engine.getState().activeNoteId;
+    expect(activeId).not.toBeNull();
+    expect(activeId).not.toBe(other.id);
+
+    const resumeButton = resumeButtonForNote('Last week');
+    expect(resumeButton).toBeDefined();
+    expect(resumeButton!.disabled).toBe(true);
+
+    await click(resumeButton!);
+    await act(async () => {
+      await engine.flush();
+    });
+
+    // Disabled, so the click was a no-op: the session's own note is still active.
+    expect(engine.getState().activeNoteId).toBe(activeId);
+  });
+
+  it('does not offer Resume on the active note itself', async () => {
+    await render();
+    await click(buttonByText('New note'));
+
+    expect(findButtonByText('Resume')).toBeUndefined();
   });
 });

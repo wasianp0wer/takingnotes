@@ -7,6 +7,7 @@ import { RecorderControl } from '@/audio/RecorderControl';
 import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine, type LiveCaptureEngine } from '@/capture/engine';
 import { interruptedNoteOf, SessionPanel } from '@/capture/SessionControls';
+import { resetResumeLockForTests } from '@/notes/resumeLock';
 import { createNote, listNotes } from '@/storage/notes';
 import { countPoints, listPages } from '@/storage/pages';
 import { createRecording } from '@/storage/recordings';
@@ -84,6 +85,7 @@ let clock = 1_000_000;
 beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   await resetDatabase();
+  resetResumeLockForTests();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -674,6 +676,64 @@ describe('SessionPanel', () => {
 
     expect(panel().textContent).toContain('"Bare note" was interrupted.');
     expect(panel().textContent).not.toContain('recording was lost');
+  });
+
+  it('offers Resume in the interrupted banner, and resuming it makes the note active (K14)', async () => {
+    const session = await createSession({ title: 'Interrupted seminar', startedAt: 5_000 });
+    const interrupted = await createNote({
+      title: 'Interrupted seminar',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      startedAt: 5_000,
+      sessionId: session.id,
+    });
+    render();
+    await settle();
+
+    await click(button('Resume'));
+    await settle();
+
+    expect(engine.getState().activeNoteId).toBe(interrupted.id);
+  });
+
+  it('disables every Resume button and Start session for as long as a resume is in flight (architecture.md §8.3)', async () => {
+    const session = await createSession({ title: 'Interrupted seminar', startedAt: 5_000 });
+    await createNote({
+      title: 'Interrupted seminar',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      startedAt: 5_000,
+      sessionId: session.id,
+    });
+
+    // Rejects rather than resolves, deliberately: a *successful* resume
+    // itself sets `sessionStartedAt` (K13), which would replace "Start
+    // session" with "End session" regardless of the lock, confounding what
+    // this test checks. A rejection keeps `isActive` false throughout, so
+    // "Start session" stays the button to inspect.
+    let release: (() => void) | null = null;
+    const held = new Promise<never>((_resolve, reject) => {
+      release = () => reject(new Error('Note not found'));
+    });
+    const wrapped = { ...engine, resumeNote: () => held } as unknown as LiveCaptureEngine;
+    render({ engine: wrapped });
+    await settle();
+
+    const resumeButton = button('Resume');
+    await act(async () => {
+      resumeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(resumeButton.disabled).toBe(true);
+    expect(button('Start session').disabled).toBe(true);
+
+    (release as (() => void) | null)?.();
+    await settle();
+
+    expect(button('Start session').disabled).toBe(false);
+    expect(button('Resume').disabled).toBe(false);
   });
 
   it('says nothing when the newest note finished cleanly', async () => {

@@ -10,6 +10,8 @@ import type { CaptureEngine } from '@/capture/types';
 import { Button } from '@/components/ui/button';
 import type { DeviceController } from '@/device/controller';
 import { useHuionDevice } from '@/device/TabletProvider';
+import { ResumeButton } from '@/notes/ResumeButton';
+import { getResumeLock } from '@/notes/resumeLock';
 import { listNotes } from '@/storage/notes';
 import type { NoteRecord } from '@/storage/types';
 
@@ -77,6 +79,8 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
   const capture = useSyncExternalStore(engine.subscribe, engine.getState);
   const device = useSyncExternalStore(controller.subscribeState, controller.getState);
   const audio = useSyncExternalStore(recorder.subscribe, recorder.getState);
+  const resumeLock = getResumeLock();
+  const resumeLockState = useSyncExternalStore(resumeLock.subscribe, resumeLock.getState);
 
   const [phase, setPhase] = useState<Phase>('idle');
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -256,7 +260,16 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
           {phase === 'ending' ? 'Ending...' : 'End session'}
         </Button>
       ) : (
-        <Button variant="default" size="sm" disabled={phase !== 'idle'} onClick={() => void start()}>
+        <Button
+          variant="default"
+          size="sm"
+          // The second half of the architecture.md §8.3 hazard: while a
+          // resume's op has not yet published state, sessionStartedAt still
+          // reads null, so Start session would otherwise be clickable and
+          // fall through to closeNote() against the half-opened resume.
+          disabled={phase !== 'idle' || resumeLockState.pending}
+          onClick={() => void start()}
+        >
           <Play />
           {phase === 'starting' ? 'Starting...' : 'Start session'}
         </Button>
@@ -290,6 +303,15 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
       {interrupted && interrupted.note.id !== dismissedNoteId && (
         <span role="status" className="flex items-center gap-1 text-xs text-amber-600">
           {`"${interrupted.note.title}" was interrupted.`}
+          {/* K14: Resume on the interrupted note itself, right beside the
+              notice - the same ResumeButton the sidebar uses, so both share
+              the one in-flight lock and the one disabled-while-locked rule. */}
+          <ResumeButton
+            note={interrupted.note}
+            engine={engine}
+            activeNoteId={capture.activeNoteId}
+            sessionLocked={isActive}
+          />
           <button
             type="button"
             className="underline"

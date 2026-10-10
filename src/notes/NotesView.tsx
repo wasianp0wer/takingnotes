@@ -8,6 +8,7 @@ import { GapPanel } from '@/notes/GapPanel';
 import { InkCanvas } from '@/notes/InkCanvas';
 import { NoteList } from '@/notes/NoteList';
 import { NoteToolbar } from '@/notes/NoteToolbar';
+import { ResumeButton } from '@/notes/ResumeButton';
 import { TranscriptPanel } from '@/notes/TranscriptPanel';
 import { useNotesData } from '@/notes/useNotesData';
 
@@ -105,6 +106,14 @@ export function NotesView(props?: NotesViewProps) {
         selectedNoteId={selectedNoteId}
         activeNoteId={state.activeNoteId}
         onSelect={selectNote}
+        rowActions={(note) => (
+          <ResumeButton
+            note={note}
+            engine={engine}
+            activeNoteId={state.activeNoteId}
+            sessionLocked={sessionLocked}
+          />
+        )}
       />
 
       <div className="flex flex-1 flex-col">
