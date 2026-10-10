@@ -178,13 +178,19 @@ export interface NoteSummaryInput {
 
 /**
  * K18: the summary always lands; the title lands only when the user has not
- * renamed the note. Read-modify-write in one transaction via `updateNote`,
- * after reading the existing row to decide about the title - two separate
- * transactions would let a rename land in between and be overwritten.
+ * renamed the note. Read, decide, and write all in one transaction (K20, A34):
+ * two transactions would let a `renameNote` land in between and be silently
+ * overwritten by a stale decision.
  */
 export async function setNoteSummary(id: string, input: NoteSummaryInput): Promise<NoteRecord> {
-  const existing = await getNote(id);
-  if (!existing) throw new Error(`Note not found: ${id}`);
+  const db = await openNotesDb();
+  const tx = db.transaction('notes', 'readwrite');
+  const existing = await tx.store.get(id);
+  if (!existing) {
+    tx.abort();
+    await tx.done.catch(() => undefined);
+    throw new Error(`Note not found: ${id}`);
+  }
 
   const patch: Partial<Omit<NoteRecord, 'id'>> = {
     summary: input.summary,
@@ -199,7 +205,11 @@ export async function setNoteSummary(id: string, input: NoteSummaryInput): Promi
     patch.title = title;
     patch.titleSource = 'auto';
   }
-  return updateNote(id, patch);
+
+  const merged: NoteRecord = { ...existing, ...patch, id: existing.id };
+  await tx.store.put(merged);
+  await tx.done;
+  return merged;
 }
 
 /**
