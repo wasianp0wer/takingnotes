@@ -555,6 +555,22 @@ describe('GapPanel', () => {
     expect(container.textContent).toContain(new Date(window!.toMs).toLocaleTimeString());
   });
 
+  it('shows the source window computed with the configured margins, not the defaults (fix round 1, Important 3)', async () => {
+    const { setSettingValue } = await import('@/storage/settingKeys');
+    await setSettingValue('gaps.leadMs', 150_000);
+    await setSettingValue('gaps.trailMs', 90_000);
+    const { noteId, pageId } = await seedPage();
+
+    await render({ noteId, pageId });
+
+    const page = await getPage(pageId);
+    const configuredWindow = speechWindowForPage(page!, { leadMs: 150_000, trailMs: 90_000 });
+    const defaultWindow = speechWindowForPage(page!);
+    expect(configuredWindow).not.toEqual(defaultWindow);
+    expect(container.textContent).toContain(new Date(configuredWindow!.fromMs).toLocaleTimeString());
+    expect(container.textContent).toContain(new Date(configuredWindow!.toMs).toLocaleTimeString());
+  });
+
   it('says when the speech was summarized', async () => {
     const summarized = await seedPage();
     await setPageGapAnalysis(summarized.pageId, gapAnalysisMeta('done', { summarized: true }));
@@ -596,6 +612,36 @@ describe('GapPanel', () => {
     expect(container.textContent).not.toContain('Comparing against the recording');
     expect(buttonByText('Find gaps').disabled).toBe(true);
     expect(buttonByText('Find gaps in note').disabled).toBe(true);
+  });
+
+  it("reads the configured gaps.leadMs/trailMs, so eligibility matches what the analyzer will actually use (fix round 1, Important 3)", async () => {
+    // Before the fix, the panel always computed the page's window with the
+    // default margins (speechWindowForPage's own fallback), while a real
+    // analyzer run reads gaps.leadMs/gaps.trailMs
+    // (createConfiguredGapAnalyzer). With a non-default lead configured, the
+    // two could disagree on whether a page is eligible at all - P1-A4
+    // forbids "Find gaps" looking available when the analyzer would skip.
+    const startedAt = 1_000_000;
+    // Written well after the recording ends (startedAt + 600_000): the
+    // default 60_000ms lead does not reach back far enough to overlap it.
+    const { noteId, pageId } = await seedPage({
+      strokes: [stroke(startedAt + 700_000, startedAt + 710_000)],
+      finalizedAt: startedAt + 715_000,
+    });
+
+    await render({ noteId, pageId });
+    expect(buttonByText('Find gaps').disabled).toBe(true);
+
+    act(() => root.unmount());
+    root = createRoot(container);
+
+    // A configured lead wide enough to pull the window's start back into the
+    // recording's span - the same setting a real analyzer run would read.
+    const { setSettingValue } = await import('@/storage/settingKeys');
+    await setSettingValue('gaps.leadMs', 150_000);
+
+    await render({ noteId, pageId });
+    expect(buttonByText('Find gaps').disabled).toBe(false);
   });
 
   it('says the window matched no speech rather than that no gaps were found', async () => {
