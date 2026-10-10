@@ -311,4 +311,17 @@ describe('NotesView', () => {
     expect(container.textContent).toContain('No notes yet');
     expect(container.textContent).toContain('No note selected');
   });
+
+  it('disables New note once a session is open (K15)', async () => {
+    await render();
+
+    expect(buttonByText('New note').disabled).toBe(false);
+
+    await act(async () => {
+      await engine.startSession();
+    });
+    await settle();
+
+    expect(buttonByText('New note').disabled).toBe(true);
+  });
 });
