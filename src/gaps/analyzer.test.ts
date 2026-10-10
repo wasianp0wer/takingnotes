@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createGapAnalyzer } from '@/gaps/analyzer';
+import { createGapAnalyzer, noteHasRecording } from '@/gaps/analyzer';
 import { chunkSpeech } from '@/gaps/chunk';
 import {
   createFakeTextGenerator,
@@ -588,7 +588,14 @@ describe('createGapAnalyzer', () => {
     expect(meta?.error).toMatch(/abort/i);
   });
 
-  it('uses the earliest recording linked to the note', async () => {
+  it('picks the recording with the greatest overlap with the page window (K45)', async () => {
+    // The page's window (computed by `seed`) is
+    // [startedAt-50_000, startedAt+55_000]. `earlier` starts well before it
+    // and ends well after - it contains the whole window (overlap 105_000ms)
+    // - while the seeded recording only overlaps the window's second half
+    // (overlap 55_000ms). The old "earliest recording" rule and the new
+    // "greatest overlap" rule happen to agree here, which is exactly why a
+    // second case below is needed to tell them apart.
     const { pageId, sessionId, noteId, recordingId, startedAt } = await seed();
     const earlier = await createRecording(
       {
@@ -620,6 +627,136 @@ describe('createGapAnalyzer', () => {
     expect(records[0].recordingId).not.toBe(recordingId);
   });
 
+  it('picks the later-started recording when it overlaps the page window more (K45)', async () => {
+    // Page window: [startedAt-50_000, startedAt+55_000] (from `seed`'s fixed
+    // stroke/finalizedAt setup). `early` starts well before the window but
+    // ends only 5_000ms into it; `late` starts after `early` - and after the
+    // window's own start - but runs long enough to cover 45_000ms of it. The
+    // old "earliest recording" rule would pick `early`; K45 must pick `late`.
+    const { pageId, sessionId, noteId, startedAt } = await seed({ withRecording: false });
+    const early = await createRecording(
+      {
+        sessionId,
+        noteId,
+        title: 'Starts earliest, barely overlaps',
+        startedAt: startedAt - 200_000,
+        endedAt: startedAt - 45_000,
+        durationMs: 155_000,
+      },
+      audio(),
+    );
+    await setRecordingTranscript(early.id, {
+      text: 'speech',
+      segments: [{ startMs: 0, endMs: 1_000, text: SPEECH }],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 0,
+    });
+    const late = await createRecording(
+      {
+        sessionId,
+        noteId,
+        title: 'Starts later, overlaps most of the window',
+        startedAt: startedAt + 10_000,
+        endedAt: startedAt + 200_000,
+        durationMs: 190_000,
+      },
+      audio(),
+    );
+    await setRecordingTranscript(late.id, {
+      text: 'speech',
+      segments: [{ startMs: 0, endMs: 1_000, text: SPEECH }],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 0,
+    });
+    const generator = createFakeTextGenerator([ONE_POINT]);
+
+    await analyzerFor(generator).analyzePage(pageId);
+
+    const records = await listGapsByPage(pageId);
+    expect(records).toHaveLength(1);
+    // early overlaps 5_000ms of the window; late overlaps 45_000ms.
+    expect(records[0].recordingId).toBe(late.id);
+  });
+
+  it("skips a page whose window overlaps none of the note's recordings", async () => {
+    // A recording linked to the note (K12: via session) but nowhere near the
+    // page's window in time - a wrongly-linked recording, or a page written
+    // long before or after it.
+    const { pageId, sessionId, noteId } = await seed({ withRecording: false });
+    const far = await createRecording(
+      {
+        sessionId,
+        noteId,
+        title: 'Far away',
+        startedAt: 500_000_000,
+        endedAt: 500_600_000,
+        durationMs: 600_000,
+      },
+      audio(),
+    );
+    await setRecordingTranscript(far.id, {
+      text: 'speech',
+      segments: [{ startMs: 0, endMs: 1_000, text: SPEECH }],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 0,
+    });
+    const generator = createFakeTextGenerator([ONE_POINT]);
+
+    expect(await analyzerFor(generator).analyzePage(pageId)).toEqual([]);
+    expect(generator.calls).toEqual([]);
+    expect(await listGapsByPage(pageId)).toEqual([]);
+    expect(await gapAnalysisOf(pageId)).toBeUndefined();
+  });
+
+  it('ignores an unfinished recording even when its time span would overlap (K45, architecture.md §8.2)', async () => {
+    const { pageId, sessionId, noteId } = await seed({ withRecording: false });
+    // Still recording: endedAt is null, so `listFinishedRecordings()` must
+    // exclude it even though its startedAt/now overlaps the page's window.
+    await createRecording(
+      {
+        sessionId,
+        noteId,
+        title: 'Still recording',
+        startedAt: 1_000_000,
+        endedAt: null,
+        durationMs: 0,
+      },
+      audio(),
+    );
+    const generator = createFakeTextGenerator([ONE_POINT]);
+
+    expect(await analyzerFor(generator).analyzePage(pageId)).toEqual([]);
+    expect(generator.calls).toEqual([]);
+    expect(await gapAnalysisOf(pageId)).toBeUndefined();
+  });
+
+  it("noteHasRecording is false for a note whose only recording is still unfinished", async () => {
+    // This is the half of the architecture.md §8.2 bug `recordingForPage`'s
+    // own defensive `endedAt === null` guard does not reach: that guard
+    // stops a candidate being *selected*, but `noteHasRecording` (what
+    // `GapPanel`'s "Find gaps in note" gates on) must independently not
+    // count an in-progress recording as "the note has one" - it calls
+    // `candidateRecordings` directly, with no such guard of its own, so this
+    // is the one place a regression to `listRecordings()` would actually be
+    // invisible to every other test here.
+    const { sessionId, noteId } = await seed({ withRecording: false });
+    await createRecording(
+      { sessionId, noteId, title: 'Still recording', startedAt: 1_000_000, endedAt: null, durationMs: 0 },
+      audio(),
+    );
+
+    expect(await noteHasRecording(noteId)).toBe(false);
+  });
+
   it('finds a recording linked only through the note session', async () => {
     const { pageId, sessionId, startedAt } = await seed({ withRecording: false });
     const recording = await createRecording(
@@ -649,6 +786,98 @@ describe('createGapAnalyzer', () => {
     const records = await listGapsByPage(pageId);
     expect(records).toHaveLength(1);
     expect(records[0].recordingId).toBe(recording.id);
+  });
+
+  it("analyzeNote compares each page against the recording that overlaps it, not one shared for the whole note (K45, K12)", async () => {
+    const startedAt = 1_000_000;
+    const session = await createSession({ title: 'Multi-sitting' });
+    const note = await createNote({
+      title: 'Multi-sitting',
+      deviceId: 'dev',
+      pageBaseline: 0,
+      sessionId: session.id,
+    });
+
+    const pageA = await createPage({
+      noteId: note.id,
+      pageIndex: 0,
+      devicePageNum: 1,
+      source: 'live',
+      strokes: [stroke(startedAt + 10_000, startedAt + 20_000)],
+      finalizedAt: startedAt + 25_000,
+    });
+    await setPageTranscript(pageA.id, {
+      markdown: 'Page A notes.',
+      model: MODEL,
+      promptVersion: 'gemma-v1',
+      status: 'done',
+      error: null,
+      updatedAt: 0,
+    });
+
+    const pageB = await createPage({
+      noteId: note.id,
+      pageIndex: 1,
+      devicePageNum: 2,
+      source: 'live',
+      strokes: [stroke(startedAt + 700_000, startedAt + 710_000)],
+      finalizedAt: startedAt + 715_000,
+    });
+    await setPageTranscript(pageB.id, {
+      markdown: 'Page B notes.',
+      model: MODEL,
+      promptVersion: 'gemma-v1',
+      status: 'done',
+      error: null,
+      updatedAt: 0,
+    });
+
+    // Recording 1 only overlaps page A's window; recording 2 (a later
+    // sitting, K12) only overlaps page B's.
+    const recording1 = await createRecording(
+      { sessionId: session.id, noteId: note.id, title: 'Sitting 1', startedAt, endedAt: startedAt + 600_000, durationMs: 600_000 },
+      audio(),
+    );
+    await setRecordingTranscript(recording1.id, {
+      text: 'speech a',
+      segments: [{ startMs: 10_000, endMs: 20_000, text: 'Speech A' }],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 0,
+    });
+    const recording2 = await createRecording(
+      {
+        sessionId: session.id,
+        noteId: note.id,
+        title: 'Sitting 2',
+        startedAt: startedAt + 620_000,
+        endedAt: startedAt + 1_200_000,
+        durationMs: 580_000,
+      },
+      audio(),
+    );
+    await setRecordingTranscript(recording2.id, {
+      text: 'speech b',
+      segments: [{ startMs: 80_000, endMs: 90_000, text: 'Speech B' }],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 0,
+    });
+
+    const generator = createFakeTextGenerator([ONE_POINT, ONE_POINT]);
+
+    await analyzerFor(generator).analyzeNote(note.id);
+
+    const gapsA = await listGapsByPage(pageA.id);
+    const gapsB = await listGapsByPage(pageB.id);
+    expect(gapsA).toHaveLength(1);
+    expect(gapsB).toHaveLength(1);
+    expect(gapsA[0].recordingId).toBe(recording1.id);
+    expect(gapsB[0].recordingId).toBe(recording2.id);
   });
 
   it('analyzeNote marks the pages pending, then analyzes them in page order, one at a time', async () => {

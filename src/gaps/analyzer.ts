@@ -9,12 +9,13 @@ import {
 import { gapEligibility } from '@/gaps/eligibility';
 import { gapPromptVersion, getGapPrompt } from '@/gaps/prompts';
 import { dropReviewed, validateGapPoints, type GapPoint } from '@/gaps/validate';
-import { segmentsInWindow, speechTextOf, speechWindowForPage } from '@/gaps/window';
+import { overlapMs, segmentsInWindow, speechTextOf, speechWindowForPage } from '@/gaps/window';
+import type { SpeechWindow } from '@/gaps/window';
 import type { TextGenerator } from '@/llm/ollamaText';
 import { createGaps, deleteGapsByPage, listGapsByPage } from '@/storage/gaps';
 import { getNote } from '@/storage/notes';
 import { getPage, listPages, setPageGapAnalysis } from '@/storage/pages';
-import { listRecordings, listRecordingsBySession } from '@/storage/recordings';
+import { listFinishedRecordings } from '@/storage/recordings';
 import type {
   GapAnalysisMeta,
   GapAnalysisStatus,
@@ -64,26 +65,77 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 /**
- * The recording a note's speech comes from: the earliest one linked to it (A21),
- * whether linked directly (`recording.noteId`) or through the note's session.
- * `recordings` has no `by-note` index, so the direct link is found by filtering
- * the metadata listing - which is cheap, the audio bytes living in their own
- * store.
+ * Every finished recording linked to a note, directly (`recording.noteId`)
+ * or through the note's session (K12: a session may hold several - A32).
+ * Only *finished* recordings are candidates (`listFinishedRecordings()`, not
+ * `listRecordings()` - architecture.md §8.2): since K5 a `RecordingRecord`
+ * exists from the moment recording starts, so a still-recording row would
+ * otherwise be read as ready to compare against. `recordings` has no
+ * `by-note` index, so the direct link is found by filtering the metadata
+ * listing - which is cheap, the audio bytes living in their own store.
  */
-export async function recordingForNote(noteId: string): Promise<RecordingRecord | null> {
+async function candidateRecordings(noteId: string): Promise<RecordingRecord[]> {
   const note = await getNote(noteId);
-  const linked = (await listRecordings()).filter((recording) => recording.noteId === noteId);
-  const viaSession =
-    typeof note?.sessionId === 'string' ? await listRecordingsBySession(note.sessionId) : [];
-
-  // De-duplicated by id: a recording linked both ways appears in both listings.
+  const finished = await listFinishedRecordings();
   const candidates = new Map<string, RecordingRecord>();
-  for (const recording of [...linked, ...viaSession]) candidates.set(recording.id, recording);
+  for (const recording of finished) {
+    const linkedDirectly = recording.noteId === noteId;
+    const linkedViaSession =
+      typeof note?.sessionId === 'string' && recording.sessionId === note.sessionId;
+    if (linkedDirectly || linkedViaSession) candidates.set(recording.id, recording);
+  }
+  return [...candidates.values()];
+}
 
-  const ordered = [...candidates.values()].sort(
+/**
+ * Whether a note has any finished recording linked to it at all, regardless
+ * of whether it overlaps any particular page. This is what "Find gaps in
+ * note" (`GapPanel`) gates on: a note-wide run may still find a usable
+ * recording for some *other* page even when the page currently viewed has
+ * none of its own (K45 made recording selection per-page, which this keeps
+ * from narrowing the note-wide action down to one page's answer).
+ */
+export async function noteHasRecording(noteId: string): Promise<boolean> {
+  return (await candidateRecordings(noteId)).length > 0;
+}
+
+/**
+ * K45: the recording whose time span overlaps a page's speech window the
+ * most, among every finished recording linked to the note. `null` when the
+ * note has no linked recording, or the window overlaps none of them (A41) -
+ * a page in that position is skipped (A22's "no linked recording" case
+ * extended to "no *overlapping* recording"), not compared against a sitting
+ * it does not belong to. A `null` window (an ineligible page) always yields
+ * `null`, which is harmless: `gapEligibility` has already rejected the page
+ * on `no-timestamps` before this would matter.
+ *
+ * Ties (equal overlap) favour the earlier-started recording, then its id,
+ * for a deterministic result (S1-A4) - reachable only when two finished
+ * recordings share an identical span, which nothing in this app produces.
+ */
+export async function recordingForPage(
+  noteId: string,
+  window: SpeechWindow | null,
+): Promise<RecordingRecord | null> {
+  if (window === null) return null;
+  const candidates = await candidateRecordings(noteId);
+  if (candidates.length === 0) return null;
+
+  const ordered = [...candidates].sort(
     (a, b) => a.startedAt - b.startedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
-  return ordered[0] ?? null;
+
+  let best: RecordingRecord | null = null;
+  let bestOverlap = 0;
+  for (const recording of ordered) {
+    if (recording.endedAt === null) continue; // listFinishedRecordings() already guarantees this; defensive only.
+    const overlap = overlapMs(window, { startedAt: recording.startedAt, endedAt: recording.endedAt });
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+      best = recording;
+    }
+  }
+  return best;
 }
 
 export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
@@ -172,10 +224,10 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
    * `analyzeNote` needs to tell a skip from an analysis that found nothing, and
    * both return no records.
    *
-   * `resolvedRecording` is the note's recording when the caller has already found
-   * it; `undefined` means nobody has. `recordingForNote` scans every recording's
-   * metadata, so a note-wide run passes its one answer down rather than repeating
-   * the scan per page.
+   * `resolvedRecording` is this *page's* recording (K45: per-page, not
+   * per-note) when the caller has already found it; `undefined` means
+   * nobody has. `analyzeNote` resolves each page's own recording once and
+   * passes it down, rather than repeating `recordingForPage`'s scan per page.
    */
   async function runPage(
     pageId: string,
@@ -187,9 +239,9 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
     // that never existed or has been deleted under it.
     if (!page) throw new Error(`Page not found: ${pageId}`);
 
-    const recording =
-      resolvedRecording === undefined ? await recordingForNote(page.noteId) : resolvedRecording;
     const window = speechWindowForPage(page, { leadMs, trailMs });
+    const recording =
+      resolvedRecording === undefined ? await recordingForPage(page.noteId, window) : resolvedRecording;
 
     // Not eligible is a skip that writes **no** `gapAnalysis` at all (A22,
     // P1-A1): stamping `done` on a page that was never compared would tell the
@@ -299,23 +351,25 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
     const pages: PageRecord[] = await listPages(noteId);
     if (pages.length === 0) return;
 
-    // One recording lookup for the whole note: it reads every recording's
-    // metadata, and the answer is the same for every page, so it is passed down
-    // to each page rather than looked up again per page.
-    const recording = await recordingForNote(noteId);
+    // K45: each page is compared against the recording that overlaps *it*,
+    // not one recording shared across the whole note - a resumed note's
+    // second sitting (K12) may have its own recording. Resolved once per
+    // page here and reused by `runPage` below, rather than resolved twice.
     const marked = new Set<string>();
+    const resolved = new Map<string, RecordingRecord | null>();
     const promptVersion = gapPromptVersion(deps.model, false);
     for (const page of pages) {
-      if (!gapEligibility(page, recording, speechWindowForPage(page, { leadMs, trailMs })).ok) {
-        continue;
-      }
+      const window = speechWindowForPage(page, { leadMs, trailMs });
+      const recording = await recordingForPage(page.noteId, window);
+      resolved.set(page.id, recording);
+      if (!gapEligibility(page, recording, window).ok) continue;
       await writeMeta(page.id, 'pending', promptVersion, false, null);
       marked.add(page.id);
     }
 
     for (const page of pages) {
       try {
-        const run = await runPage(page.id, opts, recording);
+        const run = await runPage(page.id, opts, resolved.get(page.id) ?? null);
         // A page that was eligible during the scan but not by the time its turn
         // came - its transcript re-run, its strokes trimmed - must not keep the
         // `pending` mark: a skipped page carries no `gapAnalysis` (P1-A1), and a
