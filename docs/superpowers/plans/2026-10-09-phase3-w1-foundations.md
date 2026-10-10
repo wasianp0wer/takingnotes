@@ -1360,7 +1360,21 @@ For each, break it, confirm the named test goes red, revert:
 
 - [ ] **Step 7: Check the fake engine implementations**
 
-`resumeNote` is now on the `CaptureEngine` interface, so any test double implementing it must grow the method. Run `npx tsc -b` and add `resumeNote` to each one it names (likely `src/capture/pageTurnTestEngine.ts`), implemented as a rejecting stub with a comment saying resume is not exercised through that double.
+`resumeNote` is now on the `CaptureEngine` interface, so every object-literal implementation of it must grow the method or `tsc -b` fails. There are exactly three, all found by searching for literals typed as `CaptureEngine`:
+
+- `src/capture/pageTurnTestEngine.ts:59` — `StubCaptureEngine`
+- `src/audio/RecorderControl.test.tsx:68` — `createFakeCaptureEngine`
+- `src/transcription/startTranscription.test.ts:55` — the inline `engine = { ... }`
+
+Add `resumeNote` to each as a rejecting stub, with a one-line comment saying resume is not exercised through that double:
+
+```ts
+    resumeNote: () => Promise.reject(new Error('resumeNote is not exercised through this double')),
+```
+
+A rejecting stub rather than a resolving one deliberately: if a future test reaches resume through one of these doubles, it should fail loudly rather than silently receive a fabricated session id.
+
+Run `npx tsc -b` after, and if it names a fourth implementation, add it the same way and say so in your report.
 
 - [ ] **Step 8: Full verification and commit**
 
