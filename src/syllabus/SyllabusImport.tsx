@@ -129,7 +129,11 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
 
   const runExtraction = useCallback(
     async (
-      key: string,
+      // A thunk as well as a plain string, because the PDF path's key depends
+      // on the file's content: resolving it inside the `try` below keeps a
+      // failed read on the same error, progress and busy path as everything
+      // else, instead of escaping as an unhandled rejection.
+      key: string | (() => Promise<string>),
       run: (
         extractor: SyllabusExtractor,
         opts: { model: string; onProgress: (p: ExtractProgress) => void },
@@ -145,6 +149,7 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
       includeOverridesRef.current = new Map();
       setProgress('Starting…');
       try {
+        const resolvedKey = typeof key === 'string' ? key : await key();
         const [model, baseUrl] = await Promise.all([
           d.getSetting('ollama.model'),
           d.getSetting('ollama.baseUrl'),
@@ -166,11 +171,11 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
         const at = d.now();
         const built = rowsFromExtracted(extracted, termStart ?? at, at);
         const fetchedEvents = await d.listEvents();
-        const withExisting = markExisting(built, fetchedEvents, key);
+        const withExisting = markExisting(built, fetchedEvents, resolvedKey);
         if (stale()) return;
         setEvents(fetchedEvents);
         setRows(withExisting);
-        setImportKey(key);
+        setImportKey(resolvedKey);
         setProgress(null);
       } catch (err) {
         if (!stale()) {
@@ -198,8 +203,13 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
   const pickPdf = useCallback(
     (file: File | undefined) => {
       if (!file) return;
-      void runExtraction(importKeyForFile(file.name), async (extractor, opts) =>
-        extractor.fromPdf(await file.arrayBuffer(), opts),
+      // Read once and reuse: the key needs the bytes and so does the
+      // extractor, and reading twice would double the work on a large PDF.
+      let data: ArrayBuffer | null = null;
+      const load = async (): Promise<ArrayBuffer> => (data ??= await file.arrayBuffer());
+      void runExtraction(
+        async () => importKeyForFile(file.name, await load()),
+        async (extractor, opts) => extractor.fromPdf(await load(), opts),
       );
     },
     [runExtraction],

@@ -360,8 +360,38 @@ describe('SyllabusImport', () => {
     expect(valueWrites).toEqual(['']);
     await click(buttonNamed(m.container, 'Add'));
     await flush();
-    expect(h.imported[0].importKey).toBe('file:hist101.pdf');
+    // Shape, not the literal hash: what matters is that the key carries a
+    // content component as well as the name, not which hash produced it.
+    expect(h.imported[0].importKey).toMatch(/^file:[0-9a-f]{8}:hist101\.pdf$/);
     m.unmount();
+  });
+
+  it('keeps two different files that share a name apart', async () => {
+    // The real case: two courses each hand out a `syllabus.pdf`. Importing the
+    // second must add its own events, not quietly update the first's.
+    const h = harness();
+
+    async function importFile(bytes: number[]) {
+      const m = mount(<SyllabusImport deps={h.deps} />);
+      const picker = byLabel<HTMLInputElement>(m.container, 'Syllabus PDF');
+      const file = new File([new Uint8Array(bytes)], 'syllabus.pdf', {
+        type: 'application/pdf',
+      });
+      Object.defineProperty(picker, 'files', { value: [file] });
+      await act(async () => {
+        picker.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await flush();
+      await click(buttonNamed(m.container, 'Add'));
+      await flush();
+      m.unmount();
+    }
+
+    await importFile([1, 2, 3]);
+    await importFile([9, 9, 9, 9]);
+
+    expect(h.imported).toHaveLength(2);
+    expect(h.imported[0].importKey).not.toBe(h.imported[1].importKey);
   });
 
   it('passes the model, base URL, the displayed term start and the pasted text through to the extractor (finding 7)', async () => {

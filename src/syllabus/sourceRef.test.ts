@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { dedupeAssignments } from '@/syllabus/assignments';
 import { importKeyForFile, importKeyForPastedText, sourceRefFor } from '@/syllabus/sourceRef';
 
+const bytes = (text: string): ArrayBuffer => new TextEncoder().encode(text).buffer as ArrayBuffer;
+
 const local = (y: number, m: number, d: number, h = 0) => new Date(y, m - 1, d, h).getTime();
 const KEY = 'file:hist101.pdf';
 
@@ -117,7 +119,27 @@ describe('agreement with dedupeAssignments on "the same day" (day.ts)', () => {
 
 describe('import keys', () => {
   it('names a file', () => {
-    expect(importKeyForFile('HIST 101 syllabus.pdf')).toBe('file:HIST 101 syllabus.pdf');
+    expect(importKeyForFile('HIST 101 syllabus.pdf', bytes('a'))).toMatch(
+      /^file:[0-9a-f]{8}:HIST 101 syllabus\.pdf$/,
+    );
+  });
+
+  it('distinguishes two different files that share a name', () => {
+    // Two courses both handing out `syllabus.pdf` must not import over each
+    // other, so the key covers the content and not just the name.
+    const a = importKeyForFile('syllabus.pdf', bytes('HIST 101: essay due Oct 15'));
+    const b = importKeyForFile('syllabus.pdf', bytes('BIOL 210: lab report due Nov 3'));
+    expect(a).not.toBe(b);
+    expect(sourceRefFor(a, { title: 'Essay 1', dueAt: local(2026, 10, 15) })).not.toBe(
+      sourceRefFor(b, { title: 'Essay 1', dueAt: local(2026, 10, 15) }),
+    );
+  });
+
+  it('gives the same file the same key twice', () => {
+    const content = bytes('HIST 101: essay due Oct 15');
+    expect(importKeyForFile('syllabus.pdf', content)).toBe(
+      importKeyForFile('syllabus.pdf', bytes('HIST 101: essay due Oct 15')),
+    );
   });
 
   it('hashes pasted text, deterministically', () => {

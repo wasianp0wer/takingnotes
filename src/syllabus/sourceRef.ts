@@ -46,8 +46,29 @@ export function sourceRefFor(
   return `${escapePart(importKey)}#${escapePart(titleKey)}@${dayPart(a.dueAt)}`;
 }
 
-export function importKeyForFile(name: string): string {
-  return `file:${name}`;
+/** FNV-1a over raw bytes, matching `fnv1a`'s behaviour for ASCII input. */
+function fnv1aBytes(data: ArrayBuffer): string {
+  const view = new Uint8Array(data);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < view.length; i += 1) {
+    hash ^= view[i];
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+/**
+ * Identified by content as well as name: two courses both handing out a
+ * `syllabus.pdf` would otherwise share one import key, so importing the second
+ * would silently update the first one's events instead of adding its own.
+ *
+ * The name is kept after the hash purely so the ref stays readable when
+ * debugging. A content change therefore yields a new key, which is why
+ * re-importing an edited syllabus adds events rather than updating them
+ * (`docs/features/p2-spec.md` L1, accepted).
+ */
+export function importKeyForFile(name: string, content: ArrayBuffer): string {
+  return `file:${fnv1aBytes(content)}:${name}`;
 }
 
 /** Pasted text has no file name, so it is identified by its own content (A26). */

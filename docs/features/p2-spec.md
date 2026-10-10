@@ -375,6 +375,9 @@ entries or trades one of these failures for a worse one, and that is not a call
 to make inside a feature branch.
 
 - **L1 — a re-import whose dates changed duplicates instead of updating.**
+  *Accepted by the owner 2026-10-09: a syllabus rarely changes, and a changed
+  one can be corrected by hand. Not fixed; the paragraph below records what the
+  behaviour is.*
   `sourceRef` includes the assignment's resolved local day (A26), so when a
   professor revises a date — or the first extraction mis-read one and the
   student corrected it on the review screen — the revised row computes a *new*
@@ -392,20 +395,16 @@ to make inside a feature branch.
   means deleting calendar entries, so it needs its own design and its own
   confirmation step.
 
-- **L2 — the file import key is the bare file name, so two courses collide.**
-  `importKeyForFile(name)` is `file:<name>` (A26). Measured: History
-  `syllabus.pdf` with "Midterm exam / 15 Oct / 90 min", then Biology
-  `syllabus.pdf` with "Midterm exam / 15 Oct / 300 min" → one event,
-  `{ created: 0, updated: 1 }`; History's deadline is gone. `syllabus.pdf` is
-  the commonest name a course site serves. The student does at least see
-  "Already imported — will update", but that sentence then asserts something
-  false. The mirror case is quieter and worse: the same file saved as
-  `syllabus (1).pdf` produces a complete duplicate set with no marker at all.
-  Candidate remedy: mix a content hash of the PDF bytes into the key, as the
-  pasted-text path already does. Note the trade: that fixes the collision but
-  makes any revision of the file orphan every event it previously created,
-  which is L1 made worse. The real fix is probably to let the user name or
-  pick the import, which is a product change.
+- **L2 — two courses sharing a file name — FIXED 2026-10-09.**
+  `importKeyForFile(name)` was `file:<name>`, so History `syllabus.pdf` and
+  Biology `syllabus.pdf` were one import: the second updated the first's events
+  and History's deadline was lost. The key is now
+  `file:<content hash>:<name>` (`sourceRef.ts`), which the owner approved as the
+  remedy, explicitly accepting the trade it carries: a revised file is a new
+  import, so it orphans the events its previous version created, which is L1
+  above. Covered by `sourceRef.test.ts` ("distinguishes two different files that
+  share a name") and `SyllabusImport.test.tsx` ("keeps two different files that
+  share a name apart"), both verified to fail without the fix.
 
 - **L3 — a two-column page can produce a plausible, pre-ticked, wrong date.**
   PDF text assembly trusts pdf.js's item order and deliberately does not sort

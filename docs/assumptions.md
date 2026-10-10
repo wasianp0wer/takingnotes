@@ -82,10 +82,13 @@ asking. Each can be revisited; the ones most worth a second look are marked ⚑.
   `TranscriptRecord.markdown`.
 - A25 The syllabus review table always appears; nothing is written to the
   calendar without confirmation, even when every row parsed cleanly.
-- A26 `sourceRef` is derived from an import key (the file name, or `pasted`
-  plus a hash of the text) plus the assignment title and resolved date. Editing
-  a title on the review screen therefore creates a new event rather than
-  updating the old one.
+- A26 `sourceRef` is derived from an import key (a hash of the file's content
+  plus its name, or `pasted` plus a hash of the text) plus the assignment title
+  and resolved date. Two files sharing a name are therefore distinct imports.
+  Editing a title on the review screen, or re-importing a syllabus whose dates
+  changed, creates a new event rather than updating the old one; the owner
+  accepted that on 2026-10-09, on the grounds that a syllabus rarely changes
+  and a changed one can be fixed by hand.
 - A27 Assignments whose date cannot be resolved are shown with an empty date
   for manual entry and are excluded until one is given.
 - A28 ⚑ Starting a session requests the microphone. If that is refused the
