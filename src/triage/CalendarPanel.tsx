@@ -39,6 +39,31 @@ export function parseAgendaDays(input: string): number | null {
   return days;
 }
 
+/**
+ * K23/K25: the agenda's candidate days. For a finite horizon this is exactly
+ * the old fixed window (`agendaDays + 1` consecutive local days starting
+ * today - `7` reproduces the old hard-coded `AGENDA_DAYS = 8`). For the "All"
+ * sentinel (`Infinity`) there is no fixed-length window to build, so instead
+ * every distinct local day, today or later, that the passed-in `events` has
+ * at least one event on is returned, ascending - no upper bound, and no day
+ * invented that has nothing in it.
+ */
+export function candidateDaysForAgenda(
+  events: readonly CalendarEventRecord[],
+  today: number,
+  agendaDays: number,
+): number[] {
+  if (Number.isFinite(agendaDays)) {
+    return Array.from({ length: agendaDays + 1 }, (_, i) => addLocalDays(today, i));
+  }
+  const days = new Set<number>();
+  for (const e of events) {
+    const day = startOfLocalDay(e.startsAt);
+    if (day >= today) days.add(day);
+  }
+  return [...days].sort((a, b) => a - b);
+}
+
 /** A cell shows at most this many dots, so a busy day never overflows. */
 const MAX_DOTS = 3;
 

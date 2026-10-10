@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { CalendarEventRecord } from '@/storage/types';
-import { AGENDA_DAYS, CalendarPanel, parseAgendaDays } from '@/triage/CalendarPanel';
+import { AGENDA_DAYS, CalendarPanel, candidateDaysForAgenda, parseAgendaDays } from '@/triage/CalendarPanel';
+import { addLocalDays, startOfLocalDay } from '@/triage/dates';
 import { click, mount, typeInto } from '@/triage/testing';
 
 const at = (y: number, m: number, d: number, h = 0, min = 0) => new Date(y, m, d, h, min).getTime();
 
 const NOW = at(2026, 8, 28, 15); // Monday 28 Sep 2026, 15:00
+const HOUR = 3_600_000;
 
 function event(overrides: Partial<CalendarEventRecord> & Pick<CalendarEventRecord, 'id' | 'title' | 'startsAt'>): CalendarEventRecord {
   return {
@@ -44,6 +46,33 @@ describe('parseAgendaDays (K23 custom horizon validation)', () => {
   it('rejects a fractional value that floors to zero', () => expect(parseAgendaDays('0.5')).toBeNull());
   it('trims surrounding whitespace', () => expect(parseAgendaDays('  14  ')).toBe(14));
   it('rejects a literal "Infinity"', () => expect(parseAgendaDays('Infinity')).toBeNull());
+});
+
+describe('candidateDaysForAgenda (K23, K25)', () => {
+  const today = startOfLocalDay(NOW);
+
+  it('a finite agendaDays reproduces the old fixed 8-day window, independent of events', () => {
+    const days = candidateDaysForAgenda([], today, 7);
+    expect(days).toEqual(Array.from({ length: 8 }, (_, i) => addLocalDays(today, i)));
+  });
+
+  it('"All" (Infinity) with no events returns an empty list', () => {
+    expect(candidateDaysForAgenda([], today, Number.POSITIVE_INFINITY)).toEqual([]);
+  });
+
+  it('"All" includes every distinct day from today onward with an event, ascending, excluding yesterday', () => {
+    const yesterday = event({ id: 'y', title: 'Yesterday', startsAt: addLocalDays(today, -1) + HOUR });
+    const todayEvent = event({ id: 'd0', title: 'Today', startsAt: today + HOUR });
+    const farEvent = event({ id: 'd40', title: 'Far', startsAt: addLocalDays(today, 40) + HOUR });
+    const days = candidateDaysForAgenda([yesterday, todayEvent, farEvent], today, Number.POSITIVE_INFINITY);
+    expect(days).toEqual([today, addLocalDays(today, 40)]);
+  });
+
+  it('two events on the same day produce that day once', () => {
+    const a = event({ id: 'a', title: 'A', startsAt: today + HOUR });
+    const b = event({ id: 'b', title: 'B', startsAt: today + 2 * HOUR });
+    expect(candidateDaysForAgenda([a, b], today, Number.POSITIVE_INFINITY)).toEqual([today]);
+  });
 });
 
 describe('CalendarPanel', () => {
