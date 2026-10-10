@@ -1,9 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { recordingTitle } from '@/audio/format';
-import type { MediaRecorderLike, RecorderDeps } from '@/audio/recorder';
+import type { CreatePendingInput, MediaRecorderLike, RecorderDeps } from '@/audio/recorder';
 import { createRecorder } from '@/audio/recorder';
-import type { CreateRecordingInput } from '@/storage/recordings';
 import type { RecordingRecord } from '@/storage/types';
 
 class FakeTrack {
@@ -62,43 +61,98 @@ beforeEach(() => {
   FakeMediaRecorder.supported = new Set(['audio/webm;codecs=opus']);
 });
 
+interface ChunkRow {
+  seq: number;
+  blob: Blob;
+}
+
 interface Harness {
   recorder: ReturnType<typeof createRecorder>;
-  save: ReturnType<typeof vi.fn>;
+  createPending: ReturnType<typeof vi.fn>;
+  appendChunk: ReturnType<typeof vi.fn>;
+  stitch: ReturnType<typeof vi.fn>;
+  finalize: ReturnType<typeof vi.fn>;
+  deletePending: ReturnType<typeof vi.fn>;
   onSaved: ReturnType<typeof vi.fn>;
   getUserMedia: ReturnType<typeof vi.fn>;
+  chunksOf: (id: string) => ChunkRow[];
   tick: () => void;
   advance: (ms: number) => void;
   lastMediaRecorder: () => FakeMediaRecorder;
   intervalCallbacks: (() => void)[];
 }
 
+/**
+ * The default `stitch` mock concatenates whatever `appendChunk` actually
+ * recorded, in `seq` order - not a canned blob - so a bug that persists
+ * chunks out of order or drops one shows up in the stitched bytes a test
+ * reads back, the same way the real `stitchRecordingChunks` would catch it.
+ */
 function makeHarness(overrides: Partial<RecorderDeps> = {}, stream = fakeStream()): Harness {
   let t = 1_000;
   const now = () => t;
   const intervalCallbacks: (() => void)[] = [];
-  const save = vi.fn(
-    async (input: CreateRecordingInput, blob: Blob): Promise<RecordingRecord> =>
-      ({
-        id: 'r1',
-        sessionId: input.sessionId ?? null,
-        noteId: input.noteId ?? null,
-        title: input.title,
-        startedAt: input.startedAt ?? 0,
-        endedAt: input.endedAt ?? null,
-        durationMs: input.durationMs,
-        mimeType: input.mimeType ?? blob.type,
-        byteLength: blob.size,
-        transcript: null,
-      }) as RecordingRecord,
+  const store = new Map<string, ChunkRow[]>();
+  let nextId = 0;
+
+  const createPending = vi.fn(async (input: CreatePendingInput): Promise<RecordingRecord> => {
+    const id = `r${++nextId}`;
+    store.set(id, []);
+    return {
+      id,
+      sessionId: input.sessionId,
+      noteId: input.noteId,
+      title: input.title,
+      startedAt: input.startedAt,
+      endedAt: null,
+      durationMs: 0,
+      mimeType: input.mimeType,
+      byteLength: 0,
+      transcript: null,
+    };
+  });
+  const appendChunk = vi.fn(async (id: string, seq: number, blob: Blob) => {
+    store.get(id)?.push({ seq, blob });
+  });
+  const stitch = vi.fn(async (id: string): Promise<Blob | null> => {
+    const rows = store.get(id) ?? [];
+    if (rows.length === 0) return null;
+    const ordered = [...rows].sort((a, b) => a.seq - b.seq);
+    const type = ordered.find((r) => r.blob.type !== '')?.blob.type ?? '';
+    return new Blob(ordered.map((r) => r.blob), { type });
+  });
+  const finalize = vi.fn(
+    async (
+      id: string,
+      audio: Blob,
+      patch: { endedAt: number; durationMs: number; mimeType?: string },
+    ): Promise<RecordingRecord> => ({
+      id,
+      sessionId: null,
+      noteId: null,
+      title: 'x',
+      startedAt: 0,
+      endedAt: patch.endedAt,
+      durationMs: patch.durationMs,
+      mimeType: patch.mimeType ?? audio.type,
+      byteLength: audio.size,
+      transcript: null,
+    }),
   );
+  const deletePending = vi.fn(async (id: string) => {
+    store.delete(id);
+  });
   const onSaved = vi.fn();
   const getUserMedia = vi.fn(async () => stream);
 
   const recorder = createRecorder({
     getUserMedia,
     MediaRecorder: FakeMediaRecorder as unknown as RecorderDeps['MediaRecorder'],
-    save,
+    createPending,
+    appendChunk,
+    stitch,
+    finalize,
+    deletePending,
     onSaved,
     now,
     setInterval: (fn) => {
@@ -114,9 +168,14 @@ function makeHarness(overrides: Partial<RecorderDeps> = {}, stream = fakeStream(
 
   return {
     recorder,
-    save,
+    createPending,
+    appendChunk,
+    stitch,
+    finalize,
+    deletePending,
     onSaved,
     getUserMedia,
+    chunksOf: (id) => store.get(id) ?? [],
     tick: () => intervalCallbacks.forEach((fn) => fn()),
     advance: (ms: number) => {
       t += ms;
@@ -127,6 +186,7 @@ function makeHarness(overrides: Partial<RecorderDeps> = {}, stream = fakeStream(
 }
 
 async function flush() {
+  await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
@@ -182,10 +242,94 @@ describe('createRecorder', () => {
     expect(listener).toHaveBeenCalled();
   });
 
-  it('stops, saves the recorded chunks, stops tracks, clears the tick, and goes idle', async () => {
+  // --- K5: the pending record exists before any chunk does ---------------
+
+  it('K5: creates the pending record before any chunk is appended, with endedAt implicitly open', async () => {
+    const { recorder, createPending, appendChunk } = makeHarness();
+
+    await recorder.start({ sessionId: 's1', noteId: 'n1' });
+
+    expect(createPending).toHaveBeenCalledTimes(1);
+    const input = createPending.mock.calls[0][0] as CreatePendingInput;
+    expect(input).toMatchObject({
+      sessionId: 's1',
+      noteId: 'n1',
+      startedAt: 1_000,
+      mimeType: 'audio/webm;codecs=opus',
+      title: recordingTitle(1_000),
+    });
+    // The pending row is created strictly before the first chunk append -
+    // not just "at some point before stop()".
+    expect(appendChunk).not.toHaveBeenCalled();
+  });
+
+  // --- K4: chunks persist as they arrive, in order ------------------------
+
+  it('K4: persists each chunk with a correct, distinct monotonic seq as it arrives', async () => {
+    const { recorder, appendChunk, chunksOf } = makeHarness();
+
+    await recorder.start({ sessionId: null, noteId: null });
+    const id = 'r1';
+    const fake = FakeMediaRecorder.instances[0];
+    fake.emit([10]);
+    fake.emit([20]);
+    fake.emit([30]);
+    await flush();
+
+    // Three real calls, not the same seq repeated - a bug that always wrote
+    // seq 0 would collapse these into one row and this assertion would fail.
+    expect(appendChunk).toHaveBeenCalledTimes(3);
+    expect(appendChunk.mock.calls.map((c) => c[1])).toEqual([0, 1, 2]);
+    expect(appendChunk.mock.calls.every((c) => c[0] === id)).toBe(true);
+
+    const rows = chunksOf(id as string);
+    expect(rows.map((r) => r.seq)).toEqual([0, 1, 2]);
+  });
+
+  it('a zero-byte dataavailable event is not persisted as a chunk', async () => {
+    const { recorder, appendChunk } = makeHarness();
+
+    await recorder.start({ sessionId: null, noteId: null });
+    const fake = FakeMediaRecorder.instances[0];
+    fake.ondataavailable?.({ data: new Blob([], { type: fake.mimeType }) });
+    fake.emit([1]);
+    await flush();
+
+    expect(appendChunk).toHaveBeenCalledTimes(1);
+    expect(appendChunk.mock.calls[0][1]).toBe(0);
+  });
+
+  // --- K6: stop() awaits every append, stitches, then finalizes atomically
+
+  it('K6: stop() awaits in-flight chunk appends before stitching', async () => {
+    let resolveAppend!: () => void;
+    const slowAppend = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveAppend = resolve;
+        }),
+    );
+    const { recorder, stitch } = makeHarness({ appendChunk: slowAppend });
+
+    await recorder.start({ sessionId: null, noteId: null });
+    FakeMediaRecorder.instances[0].emit([1]);
+
+    const stopPromise = recorder.stop();
+    await flush();
+    // The append from `emit` above is still pending - stitch must not have
+    // run yet, or this test could not tell "awaited" apart from "didn't".
+    expect(stitch).not.toHaveBeenCalled();
+
+    resolveAppend();
+    await stopPromise;
+
+    expect(stitch).toHaveBeenCalledTimes(1);
+  });
+
+  it('K6: stop() stitches, then finalizes atomically with the derived patch; onSaved fires with the result', async () => {
     const track = new FakeTrack();
     const stream = fakeStream([track]);
-    const { recorder, save, onSaved, advance, intervalCallbacks } = makeHarness({}, stream);
+    const { recorder, finalize, onSaved, stitch, advance } = makeHarness({}, stream);
 
     await recorder.start({ sessionId: 's1', noteId: 'n1' });
     const fake = FakeMediaRecorder.instances[0];
@@ -195,29 +339,72 @@ describe('createRecorder', () => {
 
     const result = await recorder.stop();
 
-    expect(save).toHaveBeenCalledTimes(1);
-    const [input, blob] = save.mock.calls[0] as [CreateRecordingInput, Blob];
-    expect(blob.size).toBe(3);
-    expect(blob.type).toBe('audio/webm;codecs=opus');
-    expect(input.title).toBe(recordingTitle(1_000));
-    expect(input.startedAt).toBe(1_000);
-    expect(input.endedAt).toBe(6_000);
-    expect(input.durationMs).toBe(5_000);
+    expect(stitch).toHaveBeenCalledTimes(1);
+    expect(finalize).toHaveBeenCalledTimes(1);
+    const [id, audio, patch] = finalize.mock.calls[0] as [string, Blob, { endedAt: number; durationMs: number; mimeType?: string }];
+    expect(id).toBe('r1');
+    expect(audio.size).toBe(3);
+    expect(patch.endedAt).toBe(6_000);
+    expect(patch.durationMs).toBe(5_000);
+    expect(patch.mimeType).toBe('audio/webm;codecs=opus');
     expect(track.stopped).toBe(true);
 
     const state = recorder.getState();
     expect(state.status).toBe('idle');
     expect(state.error).toBeNull();
     expect(onSaved).toHaveBeenCalledWith(result);
+  });
 
-    // The tick was cleared: no interval callback still ticks elapsedMs.
-    const before = recorder.getState();
-    intervalCallbacks.forEach((fn) => fn());
-    expect(recorder.getState()).toBe(before);
+  it('K7 precondition: no chunks at all -> stitch returns null, the pending row is deleted, finalize is never called', async () => {
+    const track = new FakeTrack();
+    const { recorder, finalize, deletePending } = makeHarness({}, fakeStream([track]));
+
+    await recorder.start({ sessionId: null, noteId: null });
+    const result = await recorder.stop();
+
+    expect(result).toBeNull();
+    expect(finalize).not.toHaveBeenCalled();
+    expect(deletePending).toHaveBeenCalledWith('r1');
+    expect(recorder.getState().status).toBe('idle');
+    expect(recorder.getState().error).toBe('Nothing was recorded');
+    expect(track.stopped).toBe(true);
+  });
+
+  it('a finalize failure leaves the pending row and its chunks untouched for later recovery', async () => {
+    const finalize = vi.fn(async () => {
+      throw new Error('disk full');
+    });
+    const { recorder, deletePending } = makeHarness({ finalize });
+
+    await recorder.start({ sessionId: null, noteId: null });
+    FakeMediaRecorder.instances[0].emit([1]);
+    const result = await recorder.stop();
+
+    expect(result).toBeNull();
+    expect(recorder.getState().error).toBe('Could not save the recording: disk full');
+    // Nothing was cleaned up on a finalize failure: no deletePending call at
+    // all - the row and its chunks are left exactly as K7 recovery expects
+    // to find them on the next launch.
+    expect(deletePending).not.toHaveBeenCalled();
+  });
+
+  it('a createPending failure reports a start-time error and leaves no MediaRecorder running', async () => {
+    const track = new FakeTrack();
+    const createPending = vi.fn(async () => {
+      throw new Error('storage unavailable');
+    });
+    const { recorder, appendChunk } = makeHarness({ createPending }, fakeStream([track]));
+
+    await recorder.start({ sessionId: null, noteId: null });
+
+    expect(recorder.getState().status).toBe('idle');
+    expect(recorder.getState().error).toBe('Could not start recording: storage unavailable');
+    expect(track.stopped).toBe(true);
+    expect(appendChunk).not.toHaveBeenCalled();
   });
 
   it('captures the link at start, immune to later mutation of the caller object', async () => {
-    const { recorder, save } = makeHarness();
+    const { recorder, createPending } = makeHarness();
     const link = { sessionId: 's1', noteId: 'n1' };
 
     await recorder.start(link);
@@ -226,19 +413,19 @@ describe('createRecorder', () => {
     FakeMediaRecorder.instances[0].emit([1]);
     await recorder.stop();
 
-    expect(save.mock.calls[0][0]).toMatchObject({ sessionId: 's1', noteId: 'n1' });
+    expect(createPending.mock.calls[0][0]).toMatchObject({ sessionId: 's1', noteId: 'n1' });
 
-    save.mockClear();
+    createPending.mockClear();
     await recorder.start({ sessionId: null, noteId: null });
     FakeMediaRecorder.instances[1].emit([1]);
     await recorder.stop();
 
-    expect(save.mock.calls[0][0]).toMatchObject({ sessionId: null, noteId: null });
+    expect(createPending.mock.calls[0][0]).toMatchObject({ sessionId: null, noteId: null });
   });
 
-  it('reports mic denial without saving', async () => {
+  it('reports mic denial without creating a pending record', async () => {
     const error = Object.assign(new Error('denied'), { name: 'NotAllowedError' });
-    const { recorder, save } = makeHarness({ getUserMedia: vi.fn(async () => Promise.reject(error)) });
+    const { recorder, createPending } = makeHarness({ getUserMedia: vi.fn(async () => Promise.reject(error)) });
 
     await recorder.start({ sessionId: null, noteId: null });
 
@@ -246,7 +433,7 @@ describe('createRecorder', () => {
     expect(recorder.getState().error).toBe(
       'Microphone access was denied. Allow it in the browser to record.',
     );
-    expect(save).not.toHaveBeenCalled();
+    expect(createPending).not.toHaveBeenCalled();
   });
 
   it('reports no microphone found', async () => {
@@ -280,23 +467,9 @@ describe('createRecorder', () => {
     await expect(idleRecorder.stop()).resolves.toBeNull();
   });
 
-  it('reports nothing recorded when no chunks arrived, and still stops tracks', async () => {
-    const track = new FakeTrack();
-    const { recorder, save } = makeHarness({}, fakeStream([track]));
-
-    await recorder.start({ sessionId: null, noteId: null });
-    const result = await recorder.stop();
-
-    expect(result).toBeNull();
-    expect(save).not.toHaveBeenCalled();
-    expect(recorder.getState().status).toBe('idle');
-    expect(recorder.getState().error).toBe('Nothing was recorded');
-    expect(track.stopped).toBe(true);
-  });
-
   it('saves on a spontaneous stop (mic unplugged) with no explicit stop() call', async () => {
     const track = new FakeTrack();
-    const { recorder, save } = makeHarness({}, fakeStream([track]));
+    const { recorder, finalize } = makeHarness({}, fakeStream([track]));
 
     await recorder.start({ sessionId: null, noteId: null });
     const fake = FakeMediaRecorder.instances[0];
@@ -308,28 +481,9 @@ describe('createRecorder', () => {
     fake.onstop?.();
     await flush();
 
-    expect(save).toHaveBeenCalledTimes(1);
+    expect(finalize).toHaveBeenCalledTimes(1);
     expect(track.stopped).toBe(true);
     expect(recorder.getState().status).toBe('idle');
-  });
-
-  it('reports a save failure without losing track cleanup; clearError clears it', async () => {
-    const track = new FakeTrack();
-    const save = vi.fn(async () => {
-      throw new Error('disk full');
-    });
-    const { recorder } = makeHarness({ save }, fakeStream([track]));
-
-    await recorder.start({ sessionId: null, noteId: null });
-    FakeMediaRecorder.instances[0].emit([1]);
-    const result = await recorder.stop();
-
-    expect(result).toBeNull();
-    expect(recorder.getState().error).toBe('Could not save the recording: disk full');
-    expect(track.stopped).toBe(true);
-
-    recorder.clearError();
-    expect(recorder.getState().error).toBeNull();
   });
 
   it('stop() while starting (deferred getUserMedia) aborts before recording begins', async () => {
@@ -342,7 +496,7 @@ describe('createRecorder', () => {
           resolveGetUserMedia = resolve;
         }),
     );
-    const { recorder, save } = makeHarness({ getUserMedia });
+    const { recorder, createPending } = makeHarness({ getUserMedia });
 
     const startPromise = recorder.start({ sessionId: null, noteId: null });
     expect(recorder.getState().status).toBe('starting');
@@ -359,7 +513,7 @@ describe('createRecorder', () => {
     expect(recorder.getState().error).toBeNull();
     expect(track.stopped).toBe(true);
     expect(FakeMediaRecorder.instances).toHaveLength(0);
-    expect(save).not.toHaveBeenCalled();
+    expect(createPending).not.toHaveBeenCalled();
   });
 
   it('ignores a second start while starting (getUserMedia called once)', async () => {
@@ -397,7 +551,7 @@ describe('createRecorder', () => {
       }
     }
     const track = new FakeTrack();
-    const { recorder, save } = makeHarness(
+    const { recorder, createPending } = makeHarness(
       { MediaRecorder: ThrowingMediaRecorder as unknown as RecorderDeps['MediaRecorder'] },
       fakeStream([track]),
     );
@@ -407,7 +561,7 @@ describe('createRecorder', () => {
     expect(recorder.getState().status).toBe('idle');
     expect(recorder.getState().error).toBe('Could not start recording: boom');
     expect(track.stopped).toBe(true);
-    expect(save).not.toHaveBeenCalled();
+    expect(createPending).not.toHaveBeenCalled();
   });
 
   it('getState() returns the same object reference until something changes', async () => {
@@ -425,5 +579,19 @@ describe('createRecorder', () => {
     const afterTick = recorder.getState();
     expect(afterTick).not.toBe(afterStart);
     expect(recorder.getState()).toBe(afterTick);
+  });
+
+  it('stops every mic track and clears the tick on stop', async () => {
+    const track = new FakeTrack();
+    const { recorder, intervalCallbacks } = makeHarness({}, fakeStream([track]));
+
+    await recorder.start({ sessionId: null, noteId: null });
+    FakeMediaRecorder.instances[0].emit([1]);
+    await recorder.stop();
+
+    expect(track.stopped).toBe(true);
+    const before = recorder.getState();
+    intervalCallbacks.forEach((fn) => fn());
+    expect(recorder.getState()).toBe(before);
   });
 });

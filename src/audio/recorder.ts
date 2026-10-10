@@ -1,12 +1,22 @@
 // Captures microphone audio with MediaRecorder and saves it linked to the
 // note/session that was active when recording started (A10: that link is
-// null when there was no active note). Runs entirely in memory - chunks are
-// buffered as they arrive and only ever touch storage once, in `save()`, so
-// a recording never exists half-written.
+// null when there was no active note).
+//
+// K4-K6: the recording survives an interruption. The `RecordingRecord` is
+// created at `start()` - before any chunk exists - with `endedAt: null`, and
+// every `MediaRecorder` timeslice is persisted to storage as it arrives
+// (`appendRecordingChunk`). `stop()` stitches those chunks and closes the
+// recording through `finalizeRecording`'s single atomic transaction (writes
+// the audio, patches `endedAt`/`durationMs`/`byteLength`/`mimeType`, deletes
+// the chunk rows) - never a stitch-then-patch sequence of separate writes,
+// which would reopen the crash window `finalizeRecording` exists to close
+// (a crash between those steps would leave `endedAt === null`, zero chunks,
+// and a complete recording already on disk, which startup recovery would
+// then read as an abandoned empty row and delete).
 import { recordingTitle } from '@/audio/format';
-import { createRecording } from '@/storage/recordings';
-import type { CreateRecordingInput } from '@/storage/recordings';
+import { createRecording, deleteRecording, finalizeRecording } from '@/storage/recordings';
 import type { RecordingRecord } from '@/storage/types';
+import { appendRecordingChunk, stitchRecordingChunks } from '@/storage/recordingChunks';
 
 export const PREFERRED_MIME_TYPES = [
   'audio/webm;codecs=opus',
@@ -46,10 +56,36 @@ export interface MediaRecorderCtor {
   isTypeSupported(type: string): boolean;
 }
 
+/** Input to `RecorderDeps.createPending` (K5): everything known before any audio exists. */
+export interface CreatePendingInput {
+  title: string;
+  sessionId: string | null;
+  noteId: string | null;
+  startedAt: number;
+  mimeType: string;
+}
+
 export interface RecorderDeps {
   getUserMedia?: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
   MediaRecorder?: MediaRecorderCtor;
-  save?: (input: CreateRecordingInput, audio: Blob) => Promise<RecordingRecord>;
+  /**
+   * K5: creates the `RecordingRecord` before any chunk exists, with
+   * `endedAt: null`. Default wraps `createRecording` with a zero-byte Blob
+   * and `endedAt: null`, `durationMs: 0`.
+   */
+  createPending?: (input: CreatePendingInput) => Promise<RecordingRecord>;
+  /** K4: persists one `MediaRecorder` timeslice as it arrives. Default: `appendRecordingChunk`. */
+  appendChunk?: (recordingId: string, seq: number, blob: Blob) => Promise<void>;
+  /** Reassembles a recording's persisted chunks in order. Default: `stitchRecordingChunks`. */
+  stitch?: (recordingId: string) => Promise<Blob | null>;
+  /** K6: the one atomic close. Default: `finalizeRecording`. */
+  finalize?: (
+    id: string,
+    audio: Blob,
+    patch: { endedAt: number; durationMs: number; mimeType?: string },
+  ) => Promise<RecordingRecord>;
+  /** Cleans up a pending row that never received any audio. Default: `deleteRecording`. */
+  deletePending?: (id: string) => Promise<void>;
   onSaved?: (recording: RecordingRecord) => void;
   now?: () => number;
   setInterval?: (fn: () => void, ms: number) => unknown;
@@ -98,20 +134,46 @@ function micErrorMessage(error: unknown): string {
   return `Could not start recording: ${messageOf(error)}`;
 }
 
+async function defaultCreatePending(input: CreatePendingInput): Promise<RecordingRecord> {
+  return createRecording(
+    {
+      title: input.title,
+      durationMs: 0,
+      sessionId: input.sessionId,
+      noteId: input.noteId,
+      startedAt: input.startedAt,
+      endedAt: null,
+      mimeType: input.mimeType,
+    },
+    new Blob([], { type: input.mimeType }),
+  );
+}
+
 export function createRecorder(deps: RecorderDeps = {}): Recorder {
   let state: RecorderState = IDLE_STATE;
   const listeners = new Set<() => void>();
 
   let mediaRecorder: MediaRecorderLike | null = null;
   let stream: MediaStream | null = null;
-  let chunks: Blob[] = [];
   let chosenType: string | undefined;
   let tickHandle: unknown = null;
   let stopWaiters: Array<(result: RecordingRecord | null) => void> = [];
   // Set by stop() when it lands during 'starting' - the only await point in
-  // start() is the getUserMedia call below, so this is the only window where
-  // a stop request can otherwise be silently dropped, leaving the mic live.
+  // start() before the pending record is created is the getUserMedia call
+  // below, so this is the only window where a stop request can otherwise be
+  // silently dropped, leaving the mic live.
   let stopRequested = false;
+
+  // K4: the recording id (once the pending record exists) and the next chunk
+  // sequence number. `pendingAppends` collects every in-flight
+  // `appendChunk()` promise (already internally caught) so `finish()` can
+  // await all of them before stitching - without this, the last chunk or
+  // two (delivered by MediaRecorder's own `stop()`) could still be in
+  // flight to IndexedDB when stitching reads back, silently dropping the
+  // very end of the recording.
+  let recordingId: string | null = null;
+  let nextSeq = 0;
+  let pendingAppends: Promise<void>[] = [];
 
   // Resolved fresh in start() (defaults are lazy - not evaluated until a
   // recording actually begins - so definite assignment here, not a default
@@ -119,7 +181,15 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
   // held here so finish() - which can run long after start() returns, or
   // from a spontaneous onstop - uses the same instances throughout one
   // recording rather than re-resolving against possibly-changed globals.
-  let saveFn!: (input: CreateRecordingInput, audio: Blob) => Promise<RecordingRecord>;
+  let createPendingFn!: (input: CreatePendingInput) => Promise<RecordingRecord>;
+  let appendChunkFn!: (recordingId: string, seq: number, blob: Blob) => Promise<void>;
+  let stitchFn!: (recordingId: string) => Promise<Blob | null>;
+  let finalizeFn!: (
+    id: string,
+    audio: Blob,
+    patch: { endedAt: number; durationMs: number; mimeType?: string },
+  ) => Promise<RecordingRecord>;
+  let deletePendingFn!: (id: string) => Promise<void>;
   let nowFn!: () => number;
   let setIntervalFn!: (fn: () => void, ms: number) => unknown;
   let clearIntervalFn!: (handle: unknown) => void;
@@ -149,50 +219,61 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
   /**
    * Shared by an explicit `stop()` and a spontaneous stop (mic unplugged, or
    * `onerror` forcing a stop) - both end up here through `onstop`, so a
-   * recording is saved (or dropped as empty) the same way regardless of why
-   * MediaRecorder stopped.
+   * recording is closed the same way regardless of why MediaRecorder
+   * stopped.
    */
   async function finish(): Promise<RecordingRecord | null> {
     stopTick();
     const startedAt = state.startedAt;
-    const link = state.link;
+    const id = recordingId;
     const endedAt = nowFn();
     stopStream();
 
     const type = mediaRecorder?.mimeType || chosenType || 'audio/webm';
-    const blob = new Blob(chunks, { type });
-    chunks = [];
+    // Every chunk append issued so far (including one MediaRecorder's own
+    // stop() just triggered via a final ondataavailable) must be durably
+    // written before stitching reads them back.
+    await Promise.all(pendingAppends);
+    pendingAppends = [];
     mediaRecorder = null;
     stream = null;
 
     let result: RecordingRecord | null = null;
-    if (blob.size === 0 || startedAt === null) {
+    if (id === null || startedAt === null) {
       setState({ ...IDLE_STATE, error: 'Nothing was recorded' });
     } else {
-      try {
-        const record = await saveFn(
-          {
-            title: recordingTitle(startedAt),
-            durationMs: endedAt - startedAt,
-            sessionId: link?.sessionId ?? null,
-            noteId: link?.noteId ?? null,
-            startedAt,
-            endedAt,
-            mimeType: blob.type,
-          },
-          blob,
-        );
-        setState({ ...IDLE_STATE });
-        result = record;
+      const stitched = await stitchFn(id);
+      if (stitched === null) {
         try {
-          deps.onSaved?.(record);
+          await deletePendingFn(id);
         } catch (error) {
-          console.error('[recorder] onSaved threw', error);
+          console.error('[recorder] could not delete an empty pending recording', error);
         }
-      } catch (error) {
-        setState({ ...IDLE_STATE, error: `Could not save the recording: ${messageOf(error)}` });
+        setState({ ...IDLE_STATE, error: 'Nothing was recorded' });
+      } else {
+        try {
+          const record = await finalizeFn(id, stitched, {
+            endedAt,
+            durationMs: endedAt - startedAt,
+            mimeType: type,
+          });
+          setState({ ...IDLE_STATE });
+          result = record;
+          try {
+            deps.onSaved?.(record);
+          } catch (error) {
+            console.error('[recorder] onSaved threw', error);
+          }
+        } catch (error) {
+          // Deliberately no cleanup here: the pending row and its chunks are
+          // left exactly as they are, so K7's startup recovery can still
+          // find and finish this recording on the next launch.
+          setState({ ...IDLE_STATE, error: `Could not save the recording: ${messageOf(error)}` });
+        }
       }
     }
+
+    recordingId = null;
 
     const waiters = stopWaiters;
     stopWaiters = [];
@@ -223,9 +304,10 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
     }
 
     // A stop() that arrived while getUserMedia was pending (the only await
-    // point in this function) must not be silently dropped: without this
-    // check the mic would stay live and recording would start anyway once
-    // permission came through, even though the caller already asked to stop.
+    // point in this function before the pending record exists) must not be
+    // silently dropped: without this check the mic would stay live and
+    // recording would start anyway once permission came through, even
+    // though the caller already asked to stop.
     if (stopRequested) {
       stopRequested = false;
       nextStream.getTracks().forEach((track) => track.stop());
@@ -248,21 +330,14 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
 
     // Resolve the rest of the deps now, for use by finish()/the tick - see
     // the comment on the outer declarations.
-    saveFn = deps.save ?? createRecording;
+    createPendingFn = deps.createPending ?? defaultCreatePending;
+    appendChunkFn = deps.appendChunk ?? appendRecordingChunk;
+    stitchFn = deps.stitch ?? stitchRecordingChunks;
+    finalizeFn = deps.finalize ?? finalizeRecording;
+    deletePendingFn = deps.deletePending ?? deleteRecording;
     nowFn = deps.now ?? Date.now;
     setIntervalFn = deps.setInterval ?? ((fn, ms) => globalThis.setInterval(fn, ms));
     clearIntervalFn = deps.clearInterval ?? ((handle) => globalThis.clearInterval(handle as number));
-
-    chunks = [];
-    nextRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) chunks.push(event.data);
-    };
-    nextRecorder.onstop = () => {
-      void finish();
-    };
-    nextRecorder.onerror = () => {
-      if (nextRecorder.state === 'recording') nextRecorder.stop();
-    };
 
     const timesliceMs = deps.timesliceMs ?? 1000;
     try {
@@ -273,10 +348,62 @@ export function createRecorder(deps: RecorderDeps = {}): Recorder {
       return;
     }
 
+    const startedAt = nowFn();
+    const type = nextRecorder.mimeType || chosenType || 'audio/webm';
+
+    // K5: the RecordingRecord is created now, before any chunk is persisted
+    // - the link, title and startedAt are durable before the first byte of
+    // audio is. A failure here means recording never really started: stop
+    // the MediaRecorder and the tracks, and report it the same way any
+    // other start-time failure is reported.
+    let pending: RecordingRecord;
+    try {
+      pending = await createPendingFn({
+        title: recordingTitle(startedAt),
+        sessionId: link.sessionId,
+        noteId: link.noteId,
+        startedAt,
+        mimeType: type,
+      });
+    } catch (error) {
+      try {
+        nextRecorder.stop();
+      } catch {
+        /* best-effort; nothing is listening to onstop yet */
+      }
+      nextStream.getTracks().forEach((track) => track.stop());
+      setState({ status: 'idle', error: `Could not start recording: ${messageOf(error)}` });
+      return;
+    }
+
+    recordingId = pending.id;
+    nextSeq = 0;
+    pendingAppends = [];
+
+    nextRecorder.ondataavailable = (event) => {
+      if (event.data.size === 0 || recordingId === null) return;
+      const id = recordingId;
+      const seq = nextSeq++;
+      pendingAppends.push(
+        appendChunkFn(id, seq, event.data).catch((error) => {
+          // A42: audio must never block writing, and one lost chunk must
+          // never abort the recording in progress - storage's own
+          // `stitchRecordingChunks` already tolerates a hole in the
+          // sequence.
+          console.error('[recorder] failed to persist a chunk', error);
+        }),
+      );
+    };
+    nextRecorder.onstop = () => {
+      void finish();
+    };
+    nextRecorder.onerror = () => {
+      if (nextRecorder.state === 'recording') nextRecorder.stop();
+    };
+
     stream = nextStream;
     mediaRecorder = nextRecorder;
 
-    const startedAt = nowFn();
     const capturedLink: RecorderLink = { sessionId: link.sessionId, noteId: link.noteId };
     setState({ status: 'recording', startedAt, elapsedMs: 0, link: capturedLink, error: null });
 
