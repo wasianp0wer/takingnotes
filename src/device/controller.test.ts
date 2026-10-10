@@ -76,16 +76,12 @@ describe('device controller', () => {
   });
 
   it('fans page turns out to every subscriber', async () => {
-    // subscribePageTurn now delivers detector events, not the raw 0x8A
-    // notification - so this drives the whole path: the notification only
-    // hints the detector to poll sooner, and the poll interval here is set
-    // far longer than the test so only that hint can possibly find the turn.
-    let count = 0;
-    const transport = pageCountFake(() => count);
-    const controller = createDeviceController(
-      () => new HuionNoteBLE(transport),
-      { pageTurn: { pollIntervalMs: 60_000 } },
-    );
+    // K28: 0x8A is the page-turn trigger directly - no poll needed to find
+    // it. pageCountFake is only here so startCapture()'s baseline read
+    // resolves fast; the count itself (held constant) never changes and
+    // plays no part in the turn below.
+    const transport = pageCountFake(() => 0);
+    const controller = createDeviceController(() => new HuionNoteBLE(transport));
     const first = vi.fn();
     const second = vi.fn();
     controller.subscribePageTurn(first);
@@ -93,9 +89,7 @@ describe('device controller', () => {
 
     await controller.connect();
     await controller.startCapture();
-    count = 1;
     transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
-    await tick(50);
     controller.stopCapture();
 
     expect(first).toHaveBeenCalledTimes(1);
@@ -116,24 +110,15 @@ describe('device controller', () => {
   });
 
   it('stops delivering to an unsubscribed consumer', async () => {
-    // Same detector-backed path as the fan-out test above (see its comment);
-    // the count bump plus hint would deliver a page turn if `listener` were
-    // still subscribed, which is what makes this test meaningful.
-    let count = 0;
-    const transport = pageCountFake(() => count);
-    const controller = createDeviceController(
-      () => new HuionNoteBLE(transport),
-      { pageTurn: { pollIntervalMs: 60_000 } },
-    );
+    const transport = pageCountFake(() => 0);
+    const controller = createDeviceController(() => new HuionNoteBLE(transport));
     const listener = vi.fn();
     const unsubscribe = controller.subscribePageTurn(listener);
     await controller.connect();
     await controller.startCapture();
 
     unsubscribe();
-    count = 1;
     transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
-    await tick(50);
     controller.stopCapture();
 
     expect(listener).not.toHaveBeenCalled();
@@ -158,7 +143,7 @@ describe('device controller', () => {
 });
 
 describe('capture lifecycle', () => {
-  it('emits page turns from the count poll with no 0x8A involved', async () => {
+  it('K29: a rising count poll updates storedPageCount but no longer emits a page turn', async () => {
     let count = 0;
     const transport = pageCountFake(() => count);
     const controller = createDeviceController(
@@ -174,17 +159,17 @@ describe('capture lifecycle', () => {
     await tick(80);
     controller.stopCapture();
 
-    expect(turns).toHaveLength(1);
+    // storedPageCount is still the poll's job (engine.devicePageNum() reads
+    // it) - only what the poll *triggers* changed.
     expect(controller.getState().storedPageCount).toBe(2);
+    expect(turns).toHaveLength(0);
   });
 
-  it('re-polls on reconnect so turns during the gap are found', async () => {
+  it('K29/K30: the reconnect re-poll still catches up storedPageCount, but misses made while the link was down are not recovered as page turns', async () => {
     let count = 0;
     const transport = pageCountFake(() => count);
     const controller = createDeviceController(
       () => new HuionNoteBLE(transport),
-      // Poll interval far longer than the test: only the reconnect re-poll
-      // can possibly find this turn, which is the point being proven.
       { pageTurn: { pollIntervalMs: 60_000 }, reconnect: { delaysMs: [10] } },
     );
     const turns: number[] = [];
@@ -193,12 +178,71 @@ describe('capture lifecycle', () => {
     await controller.connect();
     await controller.startCapture();
     transport.dropConnection();
-    count = 3; // three page turns while the link was down
+    count = 3; // three presses while the link was down, none of them 0x8A frames
     await tick(400);
     controller.stopCapture();
 
-    expect(turns).toHaveLength(1);
     expect(controller.getState().storedPageCount).toBe(3);
+    expect(turns).toHaveLength(0);
+  });
+
+  it('K28/K31: one 0x8A press, no count change, still creates exactly one page turn', async () => {
+    const transport = pageCountFake(() => 0);
+    const controller = createDeviceController(() => new HuionNoteBLE(transport));
+    const turns: number[] = [];
+    controller.subscribePageTurn(() => turns.push(1));
+
+    await controller.connect();
+    await controller.startCapture();
+    transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
+    controller.stopCapture();
+
+    expect(turns).toHaveLength(1);
+    // The count the pad happened to report never changed - the press alone
+    // was enough, which is the whole point of K28.
+    expect(controller.getState().storedPageCount).toBe(0);
+  });
+
+  it('K31: two 0x8A frames within the dedupe window make one page turn; two further apart make two', async () => {
+    const transport = pageCountFake(() => 0);
+    let t = 0;
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      { now: () => t, pageTurnDedupeMs: 300 },
+    );
+    const turns: number[] = [];
+    controller.subscribePageTurn(() => turns.push(1));
+
+    await controller.connect();
+    await controller.startCapture();
+
+    t = 1_000;
+    transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
+    t = 1_150; // 150ms later - inside the 300ms window
+    transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
+    expect(turns).toHaveLength(1);
+
+    t = 1_460; // 310ms after the *first* press - outside the window
+    transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
+    expect(turns).toHaveLength(2);
+
+    controller.stopCapture();
+  });
+
+  it('a 0x8A notification before startCapture() (or after stopCapture()) is harmless', async () => {
+    const transport = pageCountFake(() => 0);
+    const controller = createDeviceController(() => new HuionNoteBLE(transport));
+    const turns: number[] = [];
+    controller.subscribePageTurn(() => turns.push(1));
+
+    await controller.connect();
+    transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
+    expect(turns).toHaveLength(0);
+
+    await controller.startCapture();
+    controller.stopCapture();
+    transport.emit(withChecksum([0xcd, CMD.NEXT_PAGE, 0x06, 0, 0, 0]));
+    expect(turns).toHaveLength(0);
   });
 
   it('does not chase a drop that happened after stopCapture', async () => {
@@ -271,6 +315,115 @@ describe('capture lifecycle', () => {
     expect(controller.getState().isConnected).toBe(true);
     expect(controller.getState().isStreaming).toBe(false);
     expect(transport.written.some((f) => f[1] === CMD.ONLINE_ENABLE)).toBe(false);
+  });
+});
+
+/** A fake setInterval/clearInterval pair, matching the pattern recorder.test.ts uses. */
+function fakeIntervalPair() {
+  const callbacks: (() => void)[] = [];
+  return {
+    callbacks,
+    setInterval: (fn: () => void) => {
+      callbacks.push(fn);
+      return callbacks.length;
+    },
+    clearInterval: (handle: unknown) => {
+      callbacks[(handle as number) - 1] = () => {};
+    },
+    fireAll: () => callbacks.forEach((fn) => fn()),
+  };
+}
+
+function batteryFrame(percent: number): Uint8Array {
+  return withChecksum([0xcd, CMD.BATTERY, 0x04, percent]);
+}
+
+describe('battery (K26, K27)', () => {
+  it('is null before connecting', () => {
+    const controller = createDeviceController(() => new HuionNoteBLE(connectedFake()));
+    expect(controller.getState().batteryPercent).toBeNull();
+  });
+
+  it('is set from a CMD.BATTERY reply (the handshake already queries it on connect)', async () => {
+    const transport = connectedFake();
+    const controller = createDeviceController(() => new HuionNoteBLE(transport));
+
+    await controller.connect();
+    transport.emit(batteryFrame(82));
+
+    expect(controller.getState().batteryPercent).toBe(82);
+  });
+
+  it('the periodic poll issues a further CMD.BATTERY query', async () => {
+    const transport = connectedFake();
+    const interval = fakeIntervalPair();
+    const controller = createDeviceController(() => new HuionNoteBLE(transport), {
+      setInterval: interval.setInterval,
+      clearInterval: interval.clearInterval,
+    });
+
+    await controller.connect();
+    const before = transport.written.filter((f) => f[1] === CMD.BATTERY).length;
+
+    interval.fireAll();
+    await tick(10); // requestBattery()'s write is a dangling async call
+
+    const after = transport.written.filter((f) => f[1] === CMD.BATTERY).length;
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it('a drop clears batteryPercent synchronously and stops the poll from issuing further queries', async () => {
+    const transport = connectedFake();
+    const interval = fakeIntervalPair();
+    const controller = createDeviceController(() => new HuionNoteBLE(transport), {
+      setInterval: interval.setInterval,
+      clearInterval: interval.clearInterval,
+    });
+
+    await controller.connect();
+    transport.emit(batteryFrame(60));
+    expect(controller.getState().batteryPercent).toBe(60);
+
+    transport.dropConnection();
+    // Synchronous with the drop - not waiting on the next poll tick.
+    expect(controller.getState().batteryPercent).toBeNull();
+
+    const before = transport.written.filter((f) => f[1] === CMD.BATTERY).length;
+    interval.fireAll();
+    await tick(10);
+    const after = transport.written.filter((f) => f[1] === CMD.BATTERY).length;
+    expect(after).toBe(before);
+  });
+
+  it('a successful reconnect resumes the periodic poll', async () => {
+    const transport = pageCountFake(() => 0);
+    const interval = fakeIntervalPair();
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      { setInterval: interval.setInterval, clearInterval: interval.clearInterval, reconnect: { delaysMs: [10] } },
+    );
+
+    await controller.connect();
+    // The reconnect chase (and therefore its onSuccess, which restarts the
+    // battery poll) only engages while capturing - handleDrop() is a no-op
+    // otherwise, same as every other reconnect test in this file.
+    await controller.startCapture();
+    const beforeDrop = interval.callbacks.length;
+
+    transport.dropConnection();
+    // The reconnect handshake includes a real ~100ms sleep (VERIFY_RESPONSE
+    // -> MAX_INFO); 300ms comfortably covers the 10ms retry delay plus that.
+    await tick(300);
+
+    expect(interval.callbacks.length).toBeGreaterThan(beforeDrop);
+
+    const before = transport.written.filter((f) => f[1] === CMD.BATTERY).length;
+    interval.fireAll();
+    await tick(10);
+    const after = transport.written.filter((f) => f[1] === CMD.BATTERY).length;
+    // The *new* (post-reconnect) interval callback is live and issues a query.
+    expect(after).toBeGreaterThan(before);
+    controller.stopCapture();
   });
 });
 

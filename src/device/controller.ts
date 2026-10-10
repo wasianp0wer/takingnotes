@@ -12,12 +12,21 @@ export interface DeviceState {
   deviceName: string;
   status: string;
   storedPageCount: number;
+  /** K26: null before the first reply and while disconnected - never a stale number shown as current (K27). */
+  batteryPercent: number | null;
 }
 
 export interface DeviceControllerOptions {
   reconnect?: ReconnectOptions;
   liveness?: LivenessOptions;
   pageTurn?: PageTurnOptions;
+  /** K27: how often to refresh the battery level while connected. Default 5 minutes. */
+  batteryPollMs?: number;
+  /** K31: dedupe window for a direct 0x8A page turn. Default 300ms. */
+  pageTurnDedupeMs?: number;
+  now?: () => number;
+  setInterval?: (fn: () => void, ms: number) => unknown;
+  clearInterval?: (handle: unknown) => void;
 }
 
 export interface DeviceController {
@@ -45,7 +54,13 @@ const initialState: DeviceState = {
   deviceName: '',
   status: 'Disconnected',
   storedPageCount: 0,
+  batteryPercent: null,
 };
+
+/** K27 default: refresh the battery level every 5 minutes while connected. */
+const DEFAULT_BATTERY_POLL_MS = 5 * 60_000;
+/** K31 default: a 300ms dedupe window for a direct 0x8A page turn. */
+const DEFAULT_PAGE_TURN_DEDUPE_MS = 300;
 
 /**
  * Owns exactly one `HuionNoteBLE` instance and claims all four of its
@@ -83,6 +98,46 @@ export function createDeviceController(
   // never triggers a reconnect chase - see endCapture()/disconnect() below.
   let capturing = false;
 
+  const nowFn = opts.now ?? Date.now;
+  const setIntervalFn = opts.setInterval ?? ((fn: () => void, ms: number) => globalThis.setInterval(fn, ms));
+  const clearIntervalFn = opts.clearInterval ?? ((handle: unknown) => globalThis.clearInterval(handle as number));
+  const batteryPollMs = opts.batteryPollMs ?? DEFAULT_BATTERY_POLL_MS;
+  const pageTurnDedupeMs = opts.pageTurnDedupeMs ?? DEFAULT_PAGE_TURN_DEDUPE_MS;
+
+  // K27: a poll must not outlive its connection. `stopBatteryPoll()` is
+  // called everywhere the link stops being connected (explicit disconnect,
+  // any detected drop), and `batteryPercent` is reset to null in the same
+  // place - never left showing a stale number while disconnected.
+  let batteryTimer: unknown = null;
+  function stopBatteryPoll(): void {
+    if (batteryTimer !== null) {
+      clearIntervalFn(batteryTimer);
+      batteryTimer = null;
+    }
+  }
+  function requestBattery(): void {
+    device.requestBattery().catch((err: unknown) => {
+      logEmitter.emit(`Battery query failed: ${String(err)}`);
+    });
+  }
+  function startBatteryPoll(): void {
+    stopBatteryPoll();
+    batteryTimer = setIntervalFn(requestBattery, batteryPollMs);
+  }
+
+  // K28/K31: a 0x8A notification is the page-turn trigger directly, guarded
+  // by a dedupe window against one physical press producing a doubled
+  // frame. Gated on `capturing` the same way `detector.hint()` was
+  // implicitly gated before (a no-op unless `detector.start()` had run).
+  let lastPageTurnAt = -Infinity;
+  function emitPageTurn(): void {
+    if (!capturing) return;
+    const t = nowFn();
+    if (t - lastPageTurnAt < pageTurnDedupeMs) return;
+    lastPageTurnAt = t;
+    pageTurnEmitter.emit();
+  }
+
   // Shared by the detector's poll, the watchdog's ping and the public
   // getStoredPageCount() below: this composition gives `device.
   // getStoredPageCount()` three independent callers, but the driver itself
@@ -114,9 +169,12 @@ export function createDeviceController(
   const detector = createPageTurnDetector(
     {
       getStoredPageCount: () => readStoredPageCount(),
+      // K29: the poll keeps running as the liveness heartbeat and as the
+      // source of storedPageCount (engine.devicePageNum() reads it) - but a
+      // rising count no longer emits a page turn itself (K28 moves that to
+      // the 0x8A notification directly).
       onPageTurn: (count) => {
         setState({ storedPageCount: count });
-        pageTurnEmitter.emit();
       },
       onError: (err) => logEmitter.emit(`Page count poll failed: ${String(err)}`),
     },
@@ -179,6 +237,9 @@ export function createDeviceController(
         // loss only, not a correctness one: `known` is untouched, so the
         // next scheduled poll still finds the turn.
         detector.hint();
+        // K27: the poll was stopped on the drop (onStatus's 'Disconnected'
+        // handling below); a successful reconnect resumes it.
+        startBatteryPoll();
       },
       onGiveUp: () => setState({ isReconnecting: false }),
     },
@@ -216,16 +277,16 @@ export function createDeviceController(
   }
 
   device.onPen = (point) => penEmitter.emit(point);
-  // Demoted to a hint: a field run measured roughly a 20% miss rate on the
-  // notification in sustained use (about 1 press in 5 produced no 0x8A), so
-  // it only makes the detector look sooner. That miss rate is exactly why
-  // the poll is load-bearing rather than a redundant safety net - relying on
-  // the notification alone would silently merge two pages' worth of writing
-  // about once every five turns, and D9 provides no ROM backfill to repair
-  // it afterward. The detector - backed by the ROM page count - decides what
-  // a page turn actually is.
-  device.onNextPage = () => detector.hint();
+  // K28: the pad does not commit pages to ROM while streaming, so the count
+  // never rises during a live session - demoting this to a detector hint
+  // (as it used to be) made every physical press invisible in practice. The
+  // owner's probe confirmed the notification itself is reliable enough to
+  // act on directly (K30 accepts its ~20% miss rate rather than
+  // compensating for it: a missed press costs one app page boundary and is
+  // recovered by pressing again).
+  device.onNextPage = () => emitPageTurn();
   device.onFrame = () => watchdog.noteFrame();
+  device.onBattery = (percent) => setState({ batteryPercent: percent });
   device.onLog = (line) => logEmitter.emit(line);
   device.onStatus = (status) => {
     setState({
@@ -234,7 +295,17 @@ export function createDeviceController(
       isStreaming: device.isStreaming,
       deviceName: device.deviceName,
     });
-    if (status === 'Disconnected') handleDrop();
+    if (status === 'Disconnected') {
+      // K27: the poll must not outlive its connection, and a stale number
+      // must never be shown as current - both happen synchronously with the
+      // drop, not on whatever the next poll tick happens to be. Covers an
+      // explicit disconnect() and every detected drop (transport-level and
+      // watchdog-detected alike), since both funnel through this same
+      // status transition.
+      stopBatteryPoll();
+      setState({ batteryPercent: null });
+      handleDrop();
+    }
   };
 
   return {
@@ -262,6 +333,9 @@ export function createDeviceController(
       // shared onStatus handler above already picks both up, so no separate
       // setState is needed here, matching disconnect/startStreaming/stopStreaming.
       await device.connect();
+      // K27: requested on connect (the driver's own handshake already
+      // queries it once after MAX_INFO); this starts the periodic refresh.
+      startBatteryPoll();
     },
     async disconnect() {
       // endCapture() first: device.disconnect() below fires onStatus

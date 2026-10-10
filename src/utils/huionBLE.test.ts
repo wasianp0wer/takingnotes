@@ -874,3 +874,49 @@ describe('onFrame hook', () => {
     expect(device.isConnected).toBe(true); // the throw did not tear anything down
   });
 });
+
+describe('battery (K26, K27)', () => {
+  it('parses CMD.BATTERY into config.battery and fires onBattery with the percentage', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    const seen: number[] = [];
+    device.onBattery = (percent) => seen.push(percent);
+
+    await device.connect();
+    // connect()'s own post-MAX_INFO handshake already queries CMD.BATTERY;
+    // this is that reply, exactly as the device sends it (byte 3 = percent).
+    transport.emit(withChecksum([0xcd, CMD.BATTERY, 0x04, 73]));
+
+    expect(device.config.battery).toBe(73);
+    expect(seen).toEqual([73]);
+  });
+
+  it('a throwing onBattery handler is caught and logged, not propagated', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    device.onBattery = () => {
+      throw new Error('consumer blew up');
+    };
+    const logs: string[] = [];
+    device.onLog = (line) => logs.push(line);
+
+    await device.connect();
+    transport.emit(withChecksum([0xcd, CMD.BATTERY, 0x04, 50]));
+
+    expect(device.config.battery).toBe(50);
+    expect(logs.some((line) => line.includes('onBattery handler threw'))).toBe(true);
+    expect(device.isConnected).toBe(true); // the throw did not tear anything down
+  });
+
+  it('requestBattery() writes the CMD.BATTERY frame', async () => {
+    const transport = connectedFake();
+    const device = new HuionNoteBLE(transport);
+    await device.connect();
+    const before = transport.written.filter((frame) => frame[1] === CMD.BATTERY).length;
+
+    await device.requestBattery();
+
+    const after = transport.written.filter((frame) => frame[1] === CMD.BATTERY).length;
+    expect(after).toBe(before + 1);
+  });
+});
