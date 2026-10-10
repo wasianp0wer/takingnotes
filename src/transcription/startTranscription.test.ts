@@ -51,15 +51,39 @@ beforeEach(async () => {
   pageFinalized = createEmitter<string>();
   subscribeCount = 0;
   // The queue only ever touches `subscribePageFinalized`; the rest of the
-  // engine surface is irrelevant here, so a stub stands in for it.
+  // engine surface is irrelevant here, so every other member is a rejecting
+  // (or throwing) stub rather than a cast - `tsc -b` then catches it the day
+  // `CaptureEngine` grows a member this double doesn't have.
+  const notExercised = (name: string) => () =>
+    Promise.reject(new Error(`${name} is not exercised through this double`));
   engine = {
+    getState: () => {
+      throw new Error('getState is not exercised through this double');
+    },
+    subscribe: () => {
+      throw new Error('subscribe is not exercised through this double');
+    },
+    startNote: notExercised('startNote'),
+    endNote: notExercised('endNote'),
+    startSession: notExercised('startSession'),
+    endSession: notExercised('endSession'),
+    // Resume is not exercised through this double.
+    resumeNote: notExercised('resumeNote'),
+    newPage: notExercised('newPage'),
+    getLiveStrokes: () => {
+      throw new Error('getLiveStrokes is not exercised through this double');
+    },
+    subscribeInk: () => {
+      throw new Error('subscribeInk is not exercised through this double');
+    },
     subscribePageFinalized: (fn: (pageId: string) => void) => {
       subscribeCount += 1;
       return pageFinalized.subscribe(fn);
     },
-    // Resume is not exercised through this double.
-    resumeNote: () => Promise.reject(new Error('resumeNote is not exercised through this double')),
-  } as unknown as CaptureEngine;
+    dispose: () => {
+      throw new Error('dispose is not exercised through this double');
+    },
+  };
 });
 
 afterEach(() => {

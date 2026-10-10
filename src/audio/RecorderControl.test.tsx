@@ -65,13 +65,40 @@ function createFakeRecorder(initial: Partial<RecorderState> = {}): FakeRecorder 
   };
 }
 
+/**
+ * Only `getState`/`subscribe` are exercised here (via `useCaptureState`); every
+ * other member is a rejecting (or throwing) stub, not a cast, so `tsc -b`
+ * catches it the day `CaptureEngine` grows a member this double doesn't have
+ * - loudly, at compile time, rather than as a silent "not a function" the
+ * first time some future test reaches further into the double than this one
+ * does.
+ */
 function createFakeCaptureEngine(state: CaptureState): CaptureEngine {
+  const notExercised = (name: string) => () =>
+    Promise.reject(new Error(`${name} is not exercised through this double`));
   return {
     getState: () => state,
     subscribe: () => () => {},
+    startNote: notExercised('startNote'),
+    endNote: notExercised('endNote'),
+    startSession: notExercised('startSession'),
+    endSession: notExercised('endSession'),
     // Resume is not exercised through this double.
-    resumeNote: () => Promise.reject(new Error('resumeNote is not exercised through this double')),
-  } as unknown as CaptureEngine;
+    resumeNote: notExercised('resumeNote'),
+    newPage: notExercised('newPage'),
+    getLiveStrokes: () => {
+      throw new Error('getLiveStrokes is not exercised through this double');
+    },
+    subscribeInk: () => {
+      throw new Error('subscribeInk is not exercised through this double');
+    },
+    subscribePageFinalized: () => {
+      throw new Error('subscribePageFinalized is not exercised through this double');
+    },
+    dispose: () => {
+      throw new Error('dispose is not exercised through this double');
+    },
+  };
 }
 
 function render(recorder: Recorder, capture: CaptureEngine) {
