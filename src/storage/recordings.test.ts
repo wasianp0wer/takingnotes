@@ -8,9 +8,14 @@ import {
   getRecordingAudio,
   listRecordings,
   listRecordingsBySession,
+  listUnfinishedRecordings,
   setRecordingTranscript,
   updateRecording,
 } from '@/storage/recordings';
+import {
+  appendRecordingChunk,
+  listRecordingChunks,
+} from '@/storage/recordingChunks';
 import type { AudioTranscriptRecord } from '@/storage/types';
 import { resetDatabase } from '@/test/resetDb';
 
@@ -157,5 +162,32 @@ describe('recordings repository', () => {
 
   it('deleting an unknown recording is a no-op', async () => {
     await expect(deleteRecording('missing')).resolves.toBeUndefined();
+  });
+});
+
+describe('unfinished recordings', () => {
+  it('lists only those with no endedAt, newest first', async () => {
+    const open = await createRecording(
+      { sessionId: 's1', noteId: 'n1', title: 'Open', startedAt: 2_000, durationMs: 0, endedAt: null },
+      new Blob([], { type: 'audio/webm' }),
+    );
+    const closed = await createRecording(
+      { sessionId: 's1', noteId: 'n1', title: 'Closed', startedAt: 1_000, durationMs: 500 },
+      new Blob(['y'], { type: 'audio/webm' }),
+    );
+    await updateRecording(closed.id, { endedAt: 1_500 });
+
+    const unfinished = await listUnfinishedRecordings();
+    expect(unfinished.map((r) => r.id)).toEqual([open.id]);
+  });
+
+  it('deleting a recording drops its chunks too', async () => {
+    const rec = await createRecording(
+      { sessionId: 's1', noteId: 'n1', title: 'Open', startedAt: 1_000, durationMs: 0, endedAt: null },
+      new Blob([], { type: 'audio/webm' }),
+    );
+    await appendRecordingChunk(rec.id, 0, new Blob(['a'], { type: 'audio/webm' }));
+    await deleteRecording(rec.id);
+    expect(await listRecordingChunks(rec.id)).toEqual([]);
   });
 });

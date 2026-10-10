@@ -101,6 +101,16 @@ export async function listRecordingsBySession(sessionId: string): Promise<Record
   return recordings.sort((a, b) => a.startedAt - b.startedAt);
 }
 
+/**
+ * K5: a recording created at start, before any chunk exists, so recovery can
+ * find it by `endedAt === null` and knows its link, title and start time.
+ * Newest first, matching `listRecordings`.
+ */
+export async function listUnfinishedRecordings(): Promise<RecordingRecord[]> {
+  const all = await listRecordings();
+  return all.filter((recording) => recording.endedAt === null);
+}
+
 /** Reconstructs the audio as a `Blob`; `null` when there are no bytes for that id. */
 export async function getRecordingAudio(id: string): Promise<Blob | null> {
   const db = await openNotesDb();
@@ -109,11 +119,16 @@ export async function getRecordingAudio(id: string): Promise<Blob | null> {
   return new Blob([record.data], { type: record.type });
 }
 
-/** Deletes the record and its bytes in one transaction. */
+/** Deletes the record, its bytes and any chunks left over, in one transaction. */
 export async function deleteRecording(id: string): Promise<void> {
   const db = await openNotesDb();
-  const tx = db.transaction(['recordings', 'recordingAudio'], 'readwrite');
+  const tx = db.transaction(['recordings', 'recordingAudio', 'recordingChunks'], 'readwrite');
   await tx.objectStore('recordings').delete(id);
   await tx.objectStore('recordingAudio').delete(id);
+  // A recording deleted while still open would otherwise leave its chunks
+  // behind forever: nothing else scans for orphans.
+  const chunkStore = tx.objectStore('recordingChunks');
+  const keys = await chunkStore.index('by-recording').getAllKeys(IDBKeyRange.only(id));
+  for (const key of keys) await chunkStore.delete(key);
   await tx.done;
 }
