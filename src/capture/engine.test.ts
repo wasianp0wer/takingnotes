@@ -14,7 +14,7 @@ import { resetDatabase } from '@/test/resetDb';
  * on the engine's op chain, well after the call that armed it, so a test cannot
  * disarm it by hand without racing the op it is trying to break.
  */
-const hooks = vi.hoisted(() => ({ failSessionWrites: 0, failNoteWrites: 0 }));
+const hooks = vi.hoisted(() => ({ failSessionWrites: 0, failNoteWrites: 0, failNoteUpdates: 0 }));
 
 vi.mock('@/storage/notes', async () => {
   const actual = await vi.importActual<typeof import('@/storage/notes')>('@/storage/notes');
@@ -28,6 +28,20 @@ vi.mock('@/storage/notes', async () => {
         return Promise.reject(new Error('note write failed'));
       }
       return actual.createNote(input);
+    },
+    // Separate from `failNoteWrites`: `resumeNote` never calls `createNote`, so
+    // a test needs its own lever to fail *after* resume's finalize loop and
+    // session reuse have already committed, to prove the failure path owes
+    // both of those their cleanup/trigger.
+    updateNote: (
+      id: Parameters<typeof actual.updateNote>[0],
+      patch: Parameters<typeof actual.updateNote>[1],
+    ) => {
+      if (hooks.failNoteUpdates > 0) {
+        hooks.failNoteUpdates -= 1;
+        return Promise.reject(new Error('note update failed'));
+      }
+      return actual.updateNote(id, patch);
     },
   };
 });
@@ -70,6 +84,7 @@ let engine: LiveCaptureEngine;
 beforeEach(async () => {
   hooks.failSessionWrites = 0;
   hooks.failNoteWrites = 0;
+  hooks.failNoteUpdates = 0;
   await resetDatabase();
   fake = createFakeDeviceController();
   engine = createCaptureEngine({ controller: fake });
@@ -860,9 +875,95 @@ describe('resumeNote', () => {
     expect((await getPage(open.id))?.finalizedAt).toBe(7_000);
   });
 
-  it('rejects an unknown note and leaves nothing open', async () => {
+  it('rejects an unknown note and releases noteOpen for the next pen point', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await engine.start();
+
     await expect(engine.resumeNote('no-such-note')).rejects.toThrow(/not found/i);
     await engine.flush();
     expect(engine.getState().activeNoteId).toBeNull();
+
+    // Idle `state` alone does not constrain this: the failure path never
+    // touches `state`, so that assertion holds even with the `openerSeq`
+    // rollback deleted entirely - and `startNote()` would then tolerate a
+    // stuck flag anyway, since it force-closes whatever `noteOpen` claims is
+    // open before opening its own. The one place a stuck flag actually bites
+    // is pen-driven auto-start, which only fires when `noteOpen` is false - a
+    // flag stuck true here would silently drop this stroke forever.
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await engine.flush();
+
+    const notes = await listNotes();
+    expect(notes).toHaveLength(1);
+    expect(notes[0].status).toBe('active');
+    const pages = await listPages(notes[0].id);
+    expect(pages[0].strokes).toHaveLength(1);
+
+    logged.mockRestore();
+  });
+
+  it('gives two concurrent resumes of the same note the same promise', async () => {
+    const noteId = await engine.startNote();
+    await engine.newPage('manual');
+    await engine.endNote();
+    await engine.flush();
+
+    // Neither call is awaited before the second fires, so both run while
+    // `state` still describes the idle engine - the published-state no-op
+    // guard cannot see either of them yet.
+    const [first, second] = await Promise.all([
+      engine.resumeNote(noteId),
+      engine.resumeNote(noteId),
+    ]);
+    await engine.flush();
+
+    expect(first).toEqual(second);
+    const pages = await listPages(noteId);
+    // Exactly one page appended, not two, and it is the live page - a second,
+    // independent resume would have reopened and then immediately finalized
+    // the first one's new page.
+    expect(pages.map((p) => p.pageIndex)).toEqual([0, 1, 2]);
+    expect(pages[2].finalizedAt).toBeNull();
+    expect(engine.getState().activePageId).toBe(pages[2].id);
+  });
+
+  it('restores a reused session and still queues finalized pages when a later write fails', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const session = await createSession({ title: 'Reused', status: 'ended', endedAt: 5_000 });
+    const note = await createNote({
+      title: 'Reused',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      sessionId: session.id,
+    });
+    const open = await createPage({
+      noteId: note.id, pageIndex: 0, devicePageNum: null, source: 'live',
+      strokes: [{ points: [], endedAt: 7_000 }], capturedAt: 1_000,
+    });
+
+    const finalized: string[] = [];
+    engine.subscribePageFinalized((id) => finalized.push(id));
+
+    // Fails resumeNote's own `updateNote` call, which runs after the session
+    // has already been flipped active and the finalize loop has already
+    // committed - both of those writes are real and must not be stranded.
+    hooks.failNoteUpdates = 1;
+    await expect(engine.resumeNote(note.id)).rejects.toThrow('note update failed');
+    await engine.flush();
+
+    // The finalize write landed before the failure, so the page is still owed
+    // its transcription trigger even though resume as a whole failed.
+    expect(finalized).toEqual([open.id]);
+    expect((await getPage(open.id))?.finalizedAt).toBe(7_000);
+
+    // The session was flipped active for this attempt; it must be put back
+    // rather than left dangling `active` with a note that never reopened.
+    expect(await getSession(session.id)).toMatchObject({ status: 'ended', endedAt: 5_000 });
+
+    logged.mockRestore();
   });
 });

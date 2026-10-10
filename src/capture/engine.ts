@@ -12,7 +12,7 @@ import {
   setPageStrokes,
 } from '@/storage/pages';
 import { createSession, getSession, listSessions, updateSession } from '@/storage/sessions';
-import type { PageStroke } from '@/storage/types';
+import type { PageStroke, SessionStatus } from '@/storage/types';
 import type { HuionPenPoint } from '@/utils/huionBLE';
 import {
   HUION_DEFAULT_PAGE_HEIGHT_A5,
@@ -156,6 +156,15 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
    * of the one that succeeded.
    */
   let openerSeq = 0;
+  /**
+   * The resume whose op has been enqueued but has not published state yet, if
+   * any. `state` is only published from inside an op, so the no-op guard in
+   * `resumeNote` cannot see an in-flight resume - and without this, a second
+   * click arriving in the same tick would fall through to `closeNote()` and
+   * finalize the page the first one just opened for writing.
+   */
+  let pendingResume: { noteId: string; result: Promise<{ sessionId: string; noteId: string }> } | null =
+    null;
 
   let buffer: Buffer = freshBuffer();
   /** Cache behind `getLiveStrokes`, invalidated whenever the ink changes. */
@@ -554,13 +563,24 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
       return Promise.resolve({ sessionId: state.activeSessionId, noteId });
     }
 
+    // Already being resumed, by a call whose op has not run yet: hand back the
+    // same promise rather than starting a second resume of the same note.
+    // `state` is only published from inside an op, so the guard above cannot
+    // see this case - without it, this second call would fall through to
+    // `closeNote()` and finalize the page the first call's op is about to open.
+    if (pendingResume !== null && pendingResume.noteId === noteId) return pendingResume.result;
+
     if (noteOpen) void closeNote();
     noteOpen = true;
     const opener = ++openerSeq;
     const b = buffer;
 
-    return enqueue(async () => {
+    const result = enqueue(async () => {
       let createdSessionId: string | null = null;
+      // The session row's own previous state, captured before it is flipped
+      // active for this resume - restored on failure so a reused session is
+      // never left dangling `active` with a note that never actually reopened.
+      let restoreSession: { id: string; status: SessionStatus; endedAt: number | null } | null = null;
       const finalized: string[] = [];
       try {
         const at = now();
@@ -571,7 +591,18 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
         // session row that has since been deleted. Either way every note is
         // resumable (K14), so a missing session is created rather than fatal.
         let sessionId = note.sessionId ?? null;
-        if (sessionId !== null && !(await getSession(sessionId))) sessionId = null;
+        if (sessionId !== null) {
+          const existingSession = await getSession(sessionId);
+          if (!existingSession) {
+            sessionId = null;
+          } else {
+            restoreSession = {
+              id: existingSession.id,
+              status: existingSession.status,
+              endedAt: existingSession.endedAt,
+            };
+          }
+        }
         if (sessionId === null) {
           const session = await createSession({
             title: note.title,
@@ -637,9 +668,32 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
             console.error('[capture] ending a half-created session failed', cleanupError);
           }
         }
+        if (restoreSession !== null) {
+          try {
+            await updateSession(restoreSession.id, {
+              status: restoreSession.status,
+              endedAt: restoreSession.endedAt,
+            });
+          } catch (cleanupError) {
+            console.error('[capture] restoring a reused session failed', cleanupError);
+          }
+        }
+        // Whatever pages the finalize loop got to already landed in storage
+        // before this failed, so their transcription trigger is still owed -
+        // the note's status never changed, so startup recovery will not
+        // revisit them either.
+        for (const pageId of finalized) emitPageFinalized(pageId);
         throw error;
       }
     });
+    const mine = { noteId, result };
+    pendingResume = mine;
+    // Cleared only while still the newest pending resume, so a later resume's
+    // own marker is not wiped by an earlier one settling after it.
+    void result.catch(() => undefined).finally(() => {
+      if (pendingResume === mine) pendingResume = null;
+    });
+    return result;
   }
 
   return {
