@@ -62,10 +62,13 @@ export async function listRecordingChunks(
 export async function stitchRecordingChunks(recordingId: string): Promise<Blob | null> {
   const chunks = await listRecordingChunks(recordingId);
   if (chunks.length === 0) return null;
-  return new Blob(
-    chunks.map((c) => c.data),
-    { type: chunks[0].type },
-  );
+  // Chunk 0's type can be missing: it's the one lost to a failed write, or
+  // (in some browsers) only the first `dataavailable` blob carries a full
+  // type at all, with later ones arriving as `''`. A zero-type blob reaching
+  // `<audio>` or the Whisper decode path is worse than a type recovered from
+  // whichever chunk happens to carry one.
+  const type = chunks.find((c) => c.type !== '')?.type ?? '';
+  return new Blob(chunks.map((c) => c.data), { type });
 }
 
 export async function deleteRecordingChunks(recordingId: string): Promise<void> {

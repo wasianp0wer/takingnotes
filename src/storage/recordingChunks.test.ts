@@ -65,6 +65,21 @@ describe('recording chunks', () => {
     expect(await textOf(blob!)).toBe('ac');
   });
 
+  it('prefers the first non-empty type when chunk 0 has none', async () => {
+    await appendRecordingChunk('rec-1', 0, new Blob(['a'], { type: '' }));
+    await appendRecordingChunk('rec-1', 1, new Blob(['b'], { type: TYPE }));
+    const blob = await stitchRecordingChunks('rec-1');
+    expect(blob!.type).toBe(TYPE);
+    expect(await textOf(blob!)).toBe('ab');
+  });
+
+  it('falls back to empty when no chunk has a type', async () => {
+    await appendRecordingChunk('rec-1', 0, new Blob(['a'], { type: '' }));
+    await appendRecordingChunk('rec-1', 1, new Blob(['b'], { type: '' }));
+    const blob = await stitchRecordingChunks('rec-1');
+    expect(blob!.type).toBe('');
+  });
+
   it('stitches nothing to null', async () => {
     expect(await stitchRecordingChunks('rec-nope')).toBeNull();
   });
