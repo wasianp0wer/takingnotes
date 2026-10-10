@@ -1,15 +1,18 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 import { useCaptureEngine, useCaptureState } from '@/capture/CaptureContext';
 import { sessionStartedAtOf } from '@/capture/engine';
 import { ensureTranscriptionQueue } from '@/transcription/startTranscription';
 import type { TranscriptionQueue } from '@/transcription/queue';
+import { Button } from '@/components/ui/button';
 import { GapPanel } from '@/notes/GapPanel';
 import { InkCanvas } from '@/notes/InkCanvas';
 import { NoteList } from '@/notes/NoteList';
 import { NoteToolbar } from '@/notes/NoteToolbar';
 import { TranscriptPanel } from '@/notes/TranscriptPanel';
+import { TypedPageEditor } from '@/notes/TypedPageEditor';
 import { useNotesData } from '@/notes/useNotesData';
+import { isTypedPage } from '@/storage/pages';
 
 export interface NotesViewProps {
   /** Tests only - a real mount builds its own via `ensureTranscriptionQueue`. */
@@ -89,6 +92,25 @@ export function NotesView(props?: NotesViewProps) {
     setPageIndex(index);
   }
 
+  // Debounces a double-click into one typed page, the same pattern
+  // `PageTurnControls`'s own "New page" button uses for its manual turn.
+  const [creatingTypedPage, setCreatingTypedPage] = useState(false);
+  const typedPageInFlight = useRef(false);
+
+  async function handleTypePage() {
+    if (typedPageInFlight.current) return;
+    typedPageInFlight.current = true;
+    setCreatingTypedPage(true);
+    try {
+      await engine.newTypedPage();
+    } catch (error) {
+      console.error('[notes] starting a typed page failed', error);
+    } finally {
+      typedPageInFlight.current = false;
+      setCreatingTypedPage(false);
+    }
+  }
+
   const dims = {
     pageWidth: selectedNote?.pageWidth ?? null,
     pageHeight: selectedNote?.pageHeight ?? null,
@@ -114,6 +136,21 @@ export function NotesView(props?: NotesViewProps) {
           hasActiveNote={state.activeNoteId !== null}
           onNewNote={() => void engine.startNote()}
           onEndNote={() => void engine.endNote()}
+          actions={
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={state.activeNoteId === null || creatingTypedPage}
+              title={
+                state.activeNoteId === null
+                  ? 'Start a note to begin typing'
+                  : 'Finish this page and start a new, typed one'
+              }
+              onClick={() => void handleTypePage()}
+            >
+              Type page
+            </Button>
+          }
           pageCount={pages.length}
           viewedIndex={viewedIndex}
           onGoToPage={goToPage}
@@ -122,7 +159,12 @@ export function NotesView(props?: NotesViewProps) {
         <div className="flex flex-1 overflow-hidden">
           <div className="flex flex-1 items-start justify-center overflow-auto p-4">
             {viewedPage &&
-              (viewedPage.id === state.activePageId ? (
+              (isTypedPage(viewedPage) ? (
+                // Remounts per page (key), so a previous page's local edit
+                // state (and its own flush-on-unmount) never bleeds into the
+                // next one shown here.
+                <TypedPageEditor key={viewedPage.id} pageId={viewedPage.id} initialText={viewedPage.text ?? ''} />
+              ) : viewedPage.id === state.activePageId ? (
                 <InkCanvas live dims={dims} />
               ) : (
                 <InkCanvas strokes={viewedPage.strokes} dims={dims} />
@@ -131,14 +173,21 @@ export function NotesView(props?: NotesViewProps) {
           <div className="w-96 shrink-0 overflow-auto border-l border-border">
             {viewedPage && (
               <>
-                <TranscriptPanel
-                  // Remounts per page, so a "Already queued." notice from one
-                  // page's Retry never shows up against another page.
-                  key={viewedPage.id}
-                  page={viewedPage}
-                  isActivePage={viewedPage.id === state.activePageId}
-                  onRetry={(pageId) => queue.retry(pageId)}
-                />
+                {/* A typed page's "transcription" is already done the moment
+                    its text is non-blank (K33), and it's already visible in
+                    the editor above - showing this too would either duplicate
+                    it or, while it's the active page, wrongly say "Transcribed
+                    when the page is finished". */}
+                {!isTypedPage(viewedPage) && (
+                  <TranscriptPanel
+                    // Remounts per page, so a "Already queued." notice from one
+                    // page's Retry never shows up against another page.
+                    key={viewedPage.id}
+                    page={viewedPage}
+                    isActivePage={viewedPage.id === state.activePageId}
+                    onRetry={(pageId) => queue.retry(pageId)}
+                  />
+                )}
                 {/* P1's only mount point (docs/architecture.md §6.7). The note
                     id comes off the page itself, so it is never out of step with
                     the page being shown. Keyed per page for the same reason as
