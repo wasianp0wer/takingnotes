@@ -5,16 +5,22 @@ import { createNote, deleteNote } from '@/storage/notes';
 import {
   countPoints,
   createPage,
+  createTypedPage,
   finalizePage,
   getPage,
   getPageRender,
+  isTypedPage,
   listPages,
+  pageEndedAt,
   setPageRender,
   setPageGapAnalysis,
   setPageStrokes,
+  setPageText,
   setPageTranscript,
+  TYPED_MODEL,
+  TYPED_PROMPT_VERSION,
 } from '@/storage/pages';
-import type { GapAnalysisMeta, PageStroke } from '@/storage/types';
+import type { GapAnalysisMeta, PageRecord, PageStroke } from '@/storage/types';
 import { resetDatabase } from '@/test/resetDb';
 
 const STROKES: PageStroke[] = [
@@ -367,6 +373,63 @@ describe('pages repository', () => {
 
     expect(await getPageRender(doomedPage.id)).toBeNull();
     expect(await getPageRender(keptPage.id)).not.toBeNull();
+  });
+});
+
+describe('typed pages', () => {
+  it('creates a typed page with no strokes and no transcript', async () => {
+    const page = await createTypedPage({ noteId: 'note-1', pageIndex: 2 });
+    expect(page.source).toBe('typed');
+    expect(page.strokes).toEqual([]);
+    expect(page.pointCount).toBe(0);
+    expect(page.devicePageNum).toBeNull();
+    expect(page.text).toBe('');
+    expect(page.transcript).toBeNull();
+    expect(page.finalizedAt).toBeNull();
+    expect(isTypedPage(page)).toBe(true);
+  });
+
+  it('writing text mirrors it into the transcript as already done', async () => {
+    const page = await createTypedPage({ noteId: 'note-1', pageIndex: 0 });
+    const updated = await setPageText(page.id, '  Leviathan ch. 13  ');
+    expect(updated.text).toBe('  Leviathan ch. 13  ');
+    expect(updated.transcript).toMatchObject({
+      markdown: 'Leviathan ch. 13',
+      model: TYPED_MODEL,
+      promptVersion: TYPED_PROMPT_VERSION,
+      status: 'done',
+      error: null,
+    });
+  });
+
+  it('leaves a blank typed page without a transcript', async () => {
+    const page = await createTypedPage({ noteId: 'note-1', pageIndex: 0 });
+    await setPageText(page.id, 'something');
+    const cleared = await setPageText(page.id, '   \n  ');
+    expect(cleared.text).toBe('   \n  ');
+    expect(cleared.transcript).toBeNull();
+  });
+
+  it('refuses to write text onto an ink page', async () => {
+    const ink = await createPage({
+      noteId: 'note-1', pageIndex: 0, devicePageNum: null, source: 'live', strokes: [],
+    });
+    await expect(setPageText(ink.id, 'typed')).rejects.toThrow(/typed/i);
+  });
+});
+
+describe('pageEndedAt', () => {
+  it('uses the latest stroke end when there is one', () => {
+    const page = {
+      capturedAt: 1_000,
+      strokes: [{ points: [], endedAt: 5_000 }, { points: [], endedAt: 9_000 }],
+    } as unknown as PageRecord;
+    expect(pageEndedAt(page)).toBe(9_000);
+  });
+
+  it('falls back to capturedAt for a page with no timestamped strokes', () => {
+    const page = { capturedAt: 1_000, strokes: [{ points: [] }] } as unknown as PageRecord;
+    expect(pageEndedAt(page)).toBe(1_000);
   });
 });
 

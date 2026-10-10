@@ -8,6 +8,7 @@ import {
   finalizePage,
   isPageFinalized,
   listPages,
+  pageEndedAt,
   setPageStrokes,
 } from '@/storage/pages';
 import { createSession, listSessions, updateSession } from '@/storage/sessions';
@@ -312,10 +313,8 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
           const pages = await listPages(note.id);
           let endedAt = 0;
           for (const page of pages) {
-            for (const stroke of page.strokes) {
-              if (stroke.endedAt !== undefined && stroke.endedAt > endedAt) endedAt = stroke.endedAt;
-            }
-            if (page.capturedAt > endedAt) endedAt = page.capturedAt;
+            const at = pageEndedAt(page);
+            if (at > endedAt) endedAt = at;
           }
           for (const page of pages) {
             if (isPageFinalized(page)) continue;

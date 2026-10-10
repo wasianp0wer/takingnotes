@@ -186,3 +186,94 @@ export async function finalizePage(id: string, at: number): Promise<PageRecord> 
   await tx.done;
   return merged;
 }
+
+/** K33: a typed page's "transcription" is the typing itself. */
+export const TYPED_MODEL = 'typed';
+export const TYPED_PROMPT_VERSION = 'typed/1';
+
+export function isTypedPage(page: PageRecord): boolean {
+  return page.source === 'typed';
+}
+
+export interface CreateTypedPageInput {
+  noteId: string;
+  pageIndex: number;
+  /** Defaults to empty - the editor opens blank and autosaves. */
+  text?: string;
+  capturedAt?: number;
+}
+
+/**
+ * A typed page (K32): no strokes, no device page number, and its text mirrored
+ * into `transcript` by `setPageText` so every existing consumer of page text -
+ * search, gap analysis - reads the one field it already knows about (K33).
+ */
+export async function createTypedPage(input: CreateTypedPageInput): Promise<PageRecord> {
+  const page = await createPage({
+    noteId: input.noteId,
+    pageIndex: input.pageIndex,
+    devicePageNum: null,
+    source: 'typed',
+    strokes: [],
+    capturedAt: input.capturedAt,
+  });
+  return setPageText(page.id, input.text ?? '');
+}
+
+/**
+ * Writes a typed page's text and mirrors it into the transcript.
+ *
+ * Blank text leaves `transcript: null` rather than writing a `'done'`
+ * transcript with empty markdown: a contentless "finished" transcript would
+ * reach smart search as a real document and gap analysis as a page worth
+ * comparing, when A22 already says a contentless page is skipped.
+ */
+export async function setPageText(id: string, text: string): Promise<PageRecord> {
+  const db = await openNotesDb();
+  const tx = db.transaction('pages', 'readwrite');
+  const existing = await tx.store.get(id);
+  if (!existing) {
+    tx.abort();
+    await tx.done.catch(() => undefined);
+    throw new Error(`Page not found: ${id}`);
+  }
+  if (!isTypedPage(existing)) {
+    tx.abort();
+    await tx.done.catch(() => undefined);
+    throw new Error(`Page ${id} is not a typed page`);
+  }
+
+  const markdown = text.trim();
+  const transcript: TranscriptRecord | null =
+    markdown === ''
+      ? null
+      : {
+          markdown,
+          model: TYPED_MODEL,
+          promptVersion: TYPED_PROMPT_VERSION,
+          status: 'done',
+          error: null,
+          updatedAt: Date.now(),
+        };
+
+  const merged: PageRecord = { ...existing, text, transcript };
+  await tx.store.put(merged);
+  await tx.done;
+  return merged;
+}
+
+/**
+ * When a page last received writing: the latest stroke end, falling back to
+ * `capturedAt` for a page whose strokes carry no timestamps (ROM, legacy, or a
+ * typed page). Shared by startup recovery and by `resumeNote`, both of which
+ * must finalize an interrupted page at the time the writing stopped rather than
+ * at the time the app noticed - a `finalizedAt` of "now", days later, would
+ * stretch that page's gap-analysis speech window across the whole gap.
+ */
+export function pageEndedAt(page: PageRecord): number {
+  let latest = 0;
+  for (const stroke of page.strokes) {
+    if (stroke.endedAt !== undefined && stroke.endedAt > latest) latest = stroke.endedAt;
+  }
+  return latest > 0 ? latest : page.capturedAt;
+}
