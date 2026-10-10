@@ -168,6 +168,12 @@ describe('note tags, titles and summaries', () => {
     expect((await getNote(created.id))?.title).toBe('Note 1');
   });
 
+  it('throws when summarizing an unknown note', async () => {
+    await expect(
+      setNoteSummary('missing', { summary: 's', model: 'm', promptVersion: 'v' }),
+    ).rejects.toThrow(/not found/i);
+  });
+
   it('a summary writes the title when the title is still the default', async () => {
     const created = await note();
     const summarized = await setNoteSummary(created.id, {

@@ -416,6 +416,10 @@ describe('typed pages', () => {
     });
     await expect(setPageText(ink.id, 'typed')).rejects.toThrow(/typed/i);
   });
+
+  it('throws when writing text to an unknown page', async () => {
+    await expect(setPageText('missing', 'x')).rejects.toThrow(/not found/i);
+  });
 });
 
 describe('pageEndedAt', () => {
