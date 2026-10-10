@@ -216,4 +216,26 @@ describe('note tags, titles and summaries', () => {
     await setNoteTags(b.id, ['Seminar', 'lecture']);
     expect(await listTagVocabulary()).toEqual(['lecture', 'seminar', 'week-3']);
   });
+
+  it('a rename racing a summary keeps the manual title', async () => {
+    const created = await note();
+
+    // Deliberately not awaited in sequence: both open readwrite transactions on
+    // 'notes', so this is the only arrangement where the two can overlap at all.
+    const summary = setNoteSummary(created.id, {
+      summary: 'Sovereignty and the state of nature.',
+      model: 'gemma4:12b',
+      promptVersion: 'summary/1',
+      title: 'Hobbes on sovereignty',
+    });
+    const rename = renameNote(created.id, 'My own title');
+    await Promise.all([summary, rename]);
+
+    const after = await getNote(created.id);
+    // Whichever transaction won, the manual rename is what survives, and the
+    // summary lands either way.
+    expect(after?.title).toBe('My own title');
+    expect(titleSourceOf(after!)).toBe('manual');
+    expect(after?.summary).toBe('Sovereignty and the state of nature.');
+  });
 });
