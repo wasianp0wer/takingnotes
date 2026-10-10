@@ -807,6 +807,15 @@ function chunk(text: string): Blob {
   return new Blob([text], { type: TYPE });
 }
 
+/**
+ * `Blob.text()` is not used anywhere in this repo, so it is not known to work
+ * under happy-dom; `arrayBuffer()` is (see `pages.test.ts:99`,
+ * `recordings.test.ts:56`). Decode through that instead.
+ */
+async function textOf(blob: Blob): Promise<string> {
+  return new TextDecoder().decode(await blob.arrayBuffer());
+}
+
 describe('recording chunks', () => {
   it('appends and lists in seq order', async () => {
     await appendRecordingChunk('rec-1', 0, chunk('a'));
@@ -829,7 +838,7 @@ describe('recording chunks', () => {
     await appendRecordingChunk('rec-1', 1, chunk('b'));
     const blob = await stitchRecordingChunks('rec-1');
     expect(blob).not.toBeNull();
-    expect(await blob!.text()).toBe('abc');
+    expect(await textOf(blob!)).toBe('abc');
     expect(blob!.type).toBe(TYPE);
   });
 
@@ -839,7 +848,7 @@ describe('recording chunks', () => {
     await appendRecordingChunk('rec-1', 0, chunk('a'));
     await appendRecordingChunk('rec-1', 2, chunk('c'));
     const blob = await stitchRecordingChunks('rec-1');
-    expect(await blob!.text()).toBe('ac');
+    expect(await textOf(blob!)).toBe('ac');
   });
 
   it('stitches nothing to null', async () => {
