@@ -395,7 +395,8 @@ describe('capture engine', () => {
 
     expect(await getNote(note.id)).toMatchObject({ status: 'interrupted', endedAt: 1000 });
     expect(await getSession(session.id)).toMatchObject({ status: 'ended', endedAt: 1000 });
-    expect((await getPage(page.id))!.finalizedAt).toBeTypeOf('number');
+    // The stroke's own endedAt (1000), not whenever recovery happened to run.
+    expect((await getPage(page.id))!.finalizedAt).toBe(1000);
     expect(finalized).toEqual([page.id]);
 
     expect(await getNote(doneNote.id)).toMatchObject({ status: 'complete', endedAt: 2000 });

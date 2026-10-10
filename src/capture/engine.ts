@@ -327,7 +327,9 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
           }
           for (const page of pages) {
             if (isPageFinalized(page)) continue;
-            await finalizePage(page.id, now());
+            // At the time writing stopped, not at the time recovery noticed:
+            // see `pageEndedAt`.
+            await finalizePage(page.id, pageEndedAt(page));
             finalized.push(page.id);
           }
           const at = endedAt > 0 ? endedAt : now();
