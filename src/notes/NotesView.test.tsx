@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine } from '@/capture/engine';
 import type { LiveCaptureEngine } from '@/capture/engine';
+import type { NamingQueue } from '@/notes/naming/queue';
+import { resetNamingQueueForTests } from '@/notes/naming/startNaming';
 import { NotesView } from '@/notes/NotesView';
 import { resetResumeLockForTests } from '@/notes/resumeLock';
 import { createNote, getNote } from '@/storage/notes';
@@ -64,10 +66,27 @@ function createFakeQueue(): FakeQueue {
   } as FakeQueue;
 }
 
+/**
+ * A no-op naming queue. Every NotesView mount here must pass one: without
+ * it, NotesView would build the real one via `ensureNamingQueue`, which
+ * calls `fetch` against Ollama the moment any note in a test happens to be
+ * eligible - the same reasoning the existing `queue` prop already follows
+ * for the transcription queue.
+ */
+function createFakeNamingQueue(): NamingQueue {
+  return {
+    start: vi.fn(async () => {}),
+    subscribe: () => () => {},
+    idle: vi.fn(async () => {}),
+    stop: vi.fn(),
+  };
+}
+
 beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   await resetDatabase();
   resetResumeLockForTests();
+  resetNamingQueueForTests();
   ink = { calls: [] };
   // happy-dom has no canvas backend; a recording context lets the real
   // `drawStrokes` run so a bad stroke shape would still throw here.
@@ -91,7 +110,7 @@ async function render(): Promise<void> {
   await act(async () => {
     root.render(
       <CaptureProvider engine={engine}>
-        <NotesView queue={queue} />
+        <NotesView queue={queue} namingQueue={createFakeNamingQueue()} />
       </CaptureProvider>,
     );
   });
@@ -466,7 +485,7 @@ describe('NotesView', () => {
     await act(async () => {
       root.render(
         <CaptureProvider engine={bareEngine}>
-          <NotesView queue={queue} />
+          <NotesView queue={queue} namingQueue={createFakeNamingQueue()} />
         </CaptureProvider>,
       );
     });

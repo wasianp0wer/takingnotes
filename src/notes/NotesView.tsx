@@ -6,6 +6,8 @@ import { ensureTranscriptionQueue } from '@/transcription/startTranscription';
 import type { TranscriptionQueue } from '@/transcription/queue';
 import { GapPanel } from '@/notes/GapPanel';
 import { InkCanvas } from '@/notes/InkCanvas';
+import type { NamingQueue } from '@/notes/naming/queue';
+import { ensureNamingQueue } from '@/notes/naming/startNaming';
 import { NoteList } from '@/notes/NoteList';
 import { NoteTitle } from '@/notes/NoteTitle';
 import { NoteToolbar } from '@/notes/NoteToolbar';
@@ -16,6 +18,8 @@ import { useNotesData } from '@/notes/useNotesData';
 export interface NotesViewProps {
   /** Tests only - a real mount builds its own via `ensureTranscriptionQueue`. */
   queue?: TranscriptionQueue;
+  /** Tests only - a real mount builds its own via `ensureNamingQueue`. */
+  namingQueue?: NamingQueue;
 }
 
 /**
@@ -31,6 +35,10 @@ export function NotesView(props?: NotesViewProps) {
   const [queue] = useState<TranscriptionQueue>(
     () => props?.queue ?? ensureTranscriptionQueue(engine),
   );
+  // Also a module singleton, built once here alongside the transcription
+  // queue it subscribes to (K17's second trigger). Its return value is never
+  // read - starting it is a side effect, not a value this component uses.
+  useState(() => props?.namingQueue ?? ensureNamingQueue(engine, queue));
 
   // `null` means "no explicit choice yet" - resolved below to the active
   // note, and failing that the newest one, as soon as we know what those
