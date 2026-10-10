@@ -10,8 +10,9 @@ import type { CaptureEngine } from '@/capture/types';
 import { Button } from '@/components/ui/button';
 import type { DeviceController } from '@/device/controller';
 import { useHuionDevice } from '@/device/TabletProvider';
+import { ResumeButton } from '@/notes/ResumeButton';
+import { getResumeLock } from '@/notes/resumeLock';
 import { listNotes } from '@/storage/notes';
-import { listRecordingsBySession } from '@/storage/recordings';
 import type { NoteRecord } from '@/storage/types';
 
 function messageOf(error: unknown): string {
@@ -78,15 +79,15 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
   const capture = useSyncExternalStore(engine.subscribe, engine.getState);
   const device = useSyncExternalStore(controller.subscribeState, controller.getState);
   const audio = useSyncExternalStore(recorder.subscribe, recorder.getState);
+  const resumeLock = getResumeLock();
+  const resumeLockState = useSyncExternalStore(resumeLock.subscribe, resumeLock.getState);
 
   const [phase, setPhase] = useState<Phase>('idle');
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [deviceError, setDeviceError] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [, setTick] = useState(0);
-  const [interrupted, setInterrupted] = useState<{ note: NoteRecord; hadAudio: boolean } | null>(
-    null,
-  );
+  const [interrupted, setInterrupted] = useState<{ note: NoteRecord } | null>(null);
   const [dismissedNoteId, setDismissedNoteId] = useState<string | null>(null);
 
   const startedAt = sessionStartedAtOf(capture);
@@ -117,20 +118,9 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
   useEffect(() => {
     let alive = true;
     void listNotes()
-      .then(async (notes) => {
+      .then((notes) => {
         const note = interruptedNoteOf(notes, capture.activeNoteId);
-        if (!note) {
-          if (alive) setInterrupted(null);
-          return;
-        }
-        // A bare note the pen auto-started never had a recording at all -
-        // telling someone they lost audio that never existed is exactly the
-        // dishonesty A11's wording is meant to avoid. Only claim it when this
-        // note's session actually has a recording on record.
-        const hadAudio = note.sessionId
-          ? (await listRecordingsBySession(note.sessionId)).length > 0
-          : false;
-        if (alive) setInterrupted({ note, hadAudio });
+        if (alive) setInterrupted(note ? { note } : null);
       })
       .catch((error: unknown) => {
         // Degrades the same way the `listNotes()` failure does: log and show
@@ -150,7 +140,10 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
 
     let ids: { sessionId: string; noteId: string };
     try {
-      ids = await engine.startSession();
+      // Fix round 1, Important 1 (mirror): held only around this call, not
+      // the pad/audio sequence that follows - the §8.3 hazard is specific
+      // to the window before this op publishes state, same as a resume's.
+      ids = await resumeLock.run(() => engine.startSession());
     } catch (error) {
       console.error('[session] starting the session failed', error);
       if (mounted.current) {
@@ -226,7 +219,7 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
     }
 
     if (mounted.current) setPhase('idle');
-  }, [controller, engine, recorder]);
+  }, [controller, engine, recorder, resumeLock]);
 
   const end = useCallback(async () => {
     setPhase('ending');
@@ -270,7 +263,16 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
           {phase === 'ending' ? 'Ending...' : 'End session'}
         </Button>
       ) : (
-        <Button variant="default" size="sm" disabled={phase !== 'idle'} onClick={() => void start()}>
+        <Button
+          variant="default"
+          size="sm"
+          // The second half of the architecture.md §8.3 hazard: while a
+          // resume's op has not yet published state, sessionStartedAt still
+          // reads null, so Start session would otherwise be clickable and
+          // fall through to closeNote() against the half-opened resume.
+          disabled={phase !== 'idle' || resumeLockState.pending}
+          onClick={() => void start()}
+        >
           <Play />
           {phase === 'starting' ? 'Starting...' : 'Start session'}
         </Button>
@@ -303,9 +305,16 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
 
       {interrupted && interrupted.note.id !== dismissedNoteId && (
         <span role="status" className="flex items-center gap-1 text-xs text-amber-600">
-          {interrupted.hadAudio
-            ? `"${interrupted.note.title}" was interrupted; its audio recording was lost.`
-            : `"${interrupted.note.title}" was interrupted.`}
+          {`"${interrupted.note.title}" was interrupted.`}
+          {/* K14: Resume on the interrupted note itself, right beside the
+              notice - the same ResumeButton the sidebar uses, so both share
+              the one in-flight lock and the one disabled-while-locked rule. */}
+          <ResumeButton
+            note={interrupted.note}
+            engine={engine}
+            activeNoteId={capture.activeNoteId}
+            sessionLocked={isActive}
+          />
           <button
             type="button"
             className="underline"

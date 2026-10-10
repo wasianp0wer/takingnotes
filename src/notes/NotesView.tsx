@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 import { useCaptureEngine, useCaptureState } from '@/capture/CaptureContext';
 import { sessionStartedAtOf } from '@/capture/engine';
@@ -7,8 +7,13 @@ import type { TranscriptionQueue } from '@/transcription/queue';
 import { Button } from '@/components/ui/button';
 import { GapPanel } from '@/notes/GapPanel';
 import { InkCanvas } from '@/notes/InkCanvas';
+import type { NamingQueue } from '@/notes/naming/queue';
+import { ensureNamingQueue } from '@/notes/naming/startNaming';
 import { NoteList } from '@/notes/NoteList';
+import { NoteTitle } from '@/notes/NoteTitle';
 import { NoteToolbar } from '@/notes/NoteToolbar';
+import { getResumeLock } from '@/notes/resumeLock';
+import { ResumeButton } from '@/notes/ResumeButton';
 import { TagEditor } from '@/notes/TagEditor';
 import { TagFilterBar } from '@/notes/TagFilterBar';
 import { TranscriptPanel } from '@/notes/TranscriptPanel';
@@ -20,6 +25,8 @@ import { isTypedPage } from '@/storage/pages';
 export interface NotesViewProps {
   /** Tests only - a real mount builds its own via `ensureTranscriptionQueue`. */
   queue?: TranscriptionQueue;
+  /** Tests only - a real mount builds its own via `ensureNamingQueue`. */
+  namingQueue?: NamingQueue;
 }
 
 /**
@@ -30,10 +37,17 @@ export interface NotesViewProps {
 export function NotesView(props?: NotesViewProps) {
   const engine = useCaptureEngine();
   const state = useCaptureState();
+  const resumeLock = getResumeLock();
+  const resumeLockState = useSyncExternalStore(resumeLock.subscribe, resumeLock.getState);
   // A module singleton (F1-A7): built once, never rebuilt on re-render and
   // never stopped when this view unmounts.
   const [queue] = useState<TranscriptionQueue>(
     () => props?.queue ?? ensureTranscriptionQueue(engine),
+  );
+  // Also a module singleton, built once here alongside the transcription
+  // queue it subscribes to (K17's second trigger).
+  const [namingQueue] = useState<NamingQueue>(
+    () => props?.namingQueue ?? ensureNamingQueue(engine, queue),
   );
 
   // `null` means "no explicit choice yet" - resolved below to the active
@@ -45,7 +59,19 @@ export function NotesView(props?: NotesViewProps) {
   // independently otherwise.
   const [pageIndex, setPageIndex] = useState(0);
 
-  const { notes, visibleNotes, pages, tagFilter, refresh } = useNotesData(selectedNoteId, queue);
+  const { notes, visibleNotes, pages, tagFilter, reloadNotes } = useNotesData(
+    selectedNoteId,
+    queue,
+  );
+
+  // Fix round 1, Important 5: a generated title/summary (K17-K18) touches
+  // neither capture state nor the transcription queue - useNotesData's own
+  // two reload triggers - so without this the sidebar and toolbar kept
+  // showing the timestamp title until something unrelated (a page turn, a
+  // later transcript change) happened to re-trigger a read. This is the
+  // naming queue's `subscribe` declared for exactly this; nothing consumed
+  // it before.
+  useEffect(() => namingQueue.subscribe(() => reloadNotes()), [namingQueue, reloadNotes]);
 
   // Resolves the default selection and follows the active note. Both are
   // done here, during render (comparing against state, not a ref - refs
@@ -123,6 +149,14 @@ export function NotesView(props?: NotesViewProps) {
   // while one is running.
   const sessionLocked = sessionStartedAtOf(state) !== null;
 
+  // K16: viewing anything other than the active note while a session is
+  // locked still shows that writing is going somewhere - chosen over a hard
+  // lock so a lecture can be checked against an older note without ending
+  // the session. Names the *active* note, not the one being viewed.
+  const activeNoteTitle = notes.find((n) => n.id === state.activeNoteId)?.title ?? null;
+  const showsWritingDestination =
+    sessionLocked && state.activeNoteId !== null && selectedNoteId !== state.activeNoteId;
+
   return (
     <div className="flex h-full">
       <NoteList
@@ -142,19 +176,46 @@ export function NotesView(props?: NotesViewProps) {
             onClear={tagFilter.clear}
           />
         }
+        rowActions={(note) => (
+          <ResumeButton
+            note={note}
+            engine={engine}
+            activeNoteId={state.activeNoteId}
+            sessionLocked={sessionLocked}
+          />
+        )}
       />
 
       <div className="flex flex-1 flex-col">
         <NoteToolbar
           noteTitle={selectedNote?.title ?? null}
-          meta={
+          title={
             selectedNote ? (
-              <TagEditor noteId={selectedNote.id} tags={tagsOf(selectedNote)} onChanged={refresh} />
+              <NoteTitle
+                key={selectedNote.id}
+                noteId={selectedNote.id}
+                title={selectedNote.title}
+                onRenamed={reloadNotes}
+              />
             ) : undefined
           }
-          sessionLocked={sessionLocked}
+          meta={
+            selectedNote ? (
+              <TagEditor
+                noteId={selectedNote.id}
+                tags={tagsOf(selectedNote)}
+                onChanged={reloadNotes}
+              />
+            ) : undefined
+          }
+          // Fix round 1, Important 1: §8.3's hazard applies to New note too
+          // - sessionStartedAtOf(state) reads null during a pending resume
+          // just as much as during a pending startSession(), so New note
+          // must be disabled for that window too, not only while a session
+          // it already opened is locked.
+          sessionLocked={sessionLocked || resumeLockState.pending}
           hasActiveNote={state.activeNoteId !== null}
-          onNewNote={() => void engine.startNote()}
+          onNewNote={() => void resumeLock.run(() => engine.startNote())}
           onEndNote={() => void engine.endNote()}
           actions={
             <Button
@@ -174,6 +235,16 @@ export function NotesView(props?: NotesViewProps) {
           pageCount={pages.length}
           viewedIndex={viewedIndex}
           onGoToPage={goToPage}
+          banner={
+            showsWritingDestination && activeNoteTitle !== null ? (
+              <p
+                role="status"
+                className="px-4 py-1 text-xs text-muted-foreground"
+              >
+                {`Writing still goes to "${activeNoteTitle}"`}
+              </p>
+            ) : undefined
+          }
         />
 
         <div className="flex flex-1 overflow-hidden">

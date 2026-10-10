@@ -5,8 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine } from '@/capture/engine';
 import type { LiveCaptureEngine } from '@/capture/engine';
+import type { NamingQueue } from '@/notes/naming/queue';
+import { resetNamingQueueForTests } from '@/notes/naming/startNaming';
 import { NotesView } from '@/notes/NotesView';
-import { createNote, setNoteTags } from '@/storage/notes';
+import { resetResumeLockForTests } from '@/notes/resumeLock';
+import { createNote, getNote, setNoteSummary, setNoteTags } from '@/storage/notes';
 import { createPage, getPage, setPageTranscript } from '@/storage/pages';
 import type { NoteRecord, PageRecord, TranscriptStatus } from '@/storage/types';
 import { createFakeDeviceController } from '@/test/fakeDeviceController';
@@ -63,9 +66,39 @@ function createFakeQueue(): FakeQueue {
   } as FakeQueue;
 }
 
+/**
+ * A no-op naming queue. Every NotesView mount here must pass one: without
+ * it, NotesView would build the real one via `ensureNamingQueue`, which
+ * calls `fetch` against Ollama the moment any note in a test happens to be
+ * eligible - the same reasoning the existing `queue` prop already follows
+ * for the transcription queue.
+ */
+interface FakeNamingQueue extends NamingQueue {
+  /** Lets a test fire the same event a real queue's `subscribe` would, after writing to storage itself. */
+  emit: (noteId: string) => void;
+}
+
+function createFakeNamingQueue(): FakeNamingQueue {
+  const listeners = new Set<(noteId: string) => void>();
+  return {
+    start: vi.fn(async () => {}),
+    subscribe: (fn) => {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
+    idle: vi.fn(async () => {}),
+    stop: vi.fn(),
+    emit: (noteId) => {
+      for (const fn of listeners) fn(noteId);
+    },
+  };
+}
+
 beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   await resetDatabase();
+  resetResumeLockForTests();
+  resetNamingQueueForTests();
   ink = { calls: [] };
   // happy-dom has no canvas backend; a recording context lets the real
   // `drawStrokes` run so a bad stroke shape would still throw here.
@@ -89,7 +122,7 @@ async function render(): Promise<void> {
   await act(async () => {
     root.render(
       <CaptureProvider engine={engine}>
-        <NotesView queue={queue} />
+        <NotesView queue={queue} namingQueue={createFakeNamingQueue()} />
       </CaptureProvider>,
     );
   });
@@ -122,6 +155,14 @@ function buttonByText(text: string): HTMLButtonElement {
 
 function findButtonByText(text: string): HTMLButtonElement | undefined {
   return buttons().find((b) => b.textContent?.trim() === text);
+}
+
+/** The Resume button inside the sidebar row whose title is `noteTitle`. */
+function resumeButtonForNote(noteTitle: string): HTMLButtonElement | undefined {
+  const row = [...container.querySelectorAll('li')].find((li) =>
+    li.textContent?.includes(noteTitle),
+  );
+  return [...(row?.querySelectorAll('button') ?? [])].find((b) => b.textContent?.trim() === 'Resume');
 }
 
 function buttonByLabel(label: string): HTMLButtonElement {
@@ -239,6 +280,32 @@ describe('NotesView', () => {
     expect(engine.getState().activeNoteId).not.toBeNull();
     // The engine's default title is `Note <local date time>`.
     expect(container.textContent).toContain('Note ');
+  });
+
+  it("holds the shared resume lock around New note's own startNote() call, disabling Resume elsewhere meanwhile (fix round 1, Important 1, mirror)", async () => {
+    await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    let release: (() => void) | null = null;
+    const held = new Promise<string>((resolve) => {
+      release = () => resolve('note-id');
+    });
+    const wrapped = { ...engine, startNote: () => held } as unknown as LiveCaptureEngine;
+    await act(async () => {
+      root.render(
+        <CaptureProvider engine={wrapped}>
+          <NotesView queue={queue} namingQueue={createFakeNamingQueue()} />
+        </CaptureProvider>,
+      );
+    });
+    await settle();
+
+    await click(buttonByText('New note'));
+
+    const resumeButton = resumeButtonForNote('Last week');
+    expect(resumeButton).toBeDefined();
+    expect(resumeButton!.disabled).toBe(true);
+
+    (release as (() => void) | null)?.();
+    await settle();
   });
 
   it('shows a done transcript, navigates pages and retries a failed one', async () => {
@@ -416,5 +483,221 @@ describe('NotesView', () => {
     await click(buttonByText('Type page'));
 
     expect(container.textContent).not.toContain('Transcribed when the page is finished');
+  });
+
+  it('offers Resume on a finished note and makes it active (K14)', async () => {
+    await seedNote({ title: 'This week', status: 'complete', startedAt: 2_000 });
+    const lastWeek = await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    await render();
+    expect(engine.getState().activeNoteId).toBeNull();
+
+    const resumeButton = resumeButtonForNote('Last week');
+    expect(resumeButton).toBeDefined();
+    expect(resumeButton!.disabled).toBe(false);
+
+    await click(resumeButton!);
+    await act(async () => {
+      await engine.flush();
+    });
+
+    expect(engine.getState().activeNoteId).toBe(lastWeek.id);
+  });
+
+  it('disables Resume on another note while a session is locked (K15)', async () => {
+    const other = await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    await render();
+
+    await act(async () => {
+      await engine.startSession();
+    });
+    await settle();
+    const activeId = engine.getState().activeNoteId;
+    expect(activeId).not.toBeNull();
+    expect(activeId).not.toBe(other.id);
+
+    const resumeButton = resumeButtonForNote('Last week');
+    expect(resumeButton).toBeDefined();
+    expect(resumeButton!.disabled).toBe(true);
+
+    await click(resumeButton!);
+    await act(async () => {
+      await engine.flush();
+    });
+
+    // Disabled, so the click was a no-op: the session's own note is still active.
+    expect(engine.getState().activeNoteId).toBe(activeId);
+  });
+
+  it('disables New note while a resume elsewhere is pending (fix round 1, Important 1)', async () => {
+    await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    let release: (() => void) | null = null;
+    const held = new Promise<never>((_resolve, reject) => {
+      release = () => reject(new Error('boom'));
+    });
+    const wrapped = { ...engine, resumeNote: () => held } as unknown as LiveCaptureEngine;
+    await act(async () => {
+      root.render(
+        <CaptureProvider engine={wrapped}>
+          <NotesView queue={queue} namingQueue={createFakeNamingQueue()} />
+        </CaptureProvider>,
+      );
+    });
+    await settle();
+
+    const resumeButton = resumeButtonForNote('Last week');
+    expect(resumeButton).toBeDefined();
+    await click(resumeButton!);
+
+    // sessionStartedAtOf(state) still reads null here (the wrapped
+    // resumeNote never resolved, so no op has published state) - exactly
+    // the architecture.md §8.3 window. Without the fix, New note would
+    // still read enabled and could fall through to closeNote() against
+    // the half-opened resume.
+    expect(buttonByText('New note').disabled).toBe(true);
+
+    (release as (() => void) | null)?.();
+    await settle();
+
+    expect(buttonByText('New note').disabled).toBe(false);
+  });
+
+  it('does not offer Resume on the active note itself', async () => {
+    await render();
+    await click(buttonByText('New note'));
+
+    expect(findButtonByText('Resume')).toBeUndefined();
+  });
+
+  it('shows "Writing still goes to" naming the active note when viewing a different one (K16)', async () => {
+    await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    await render();
+
+    await act(async () => {
+      await engine.startSession();
+    });
+    await settle();
+    const active = engine.getState().activeNoteId;
+    expect(active).not.toBeNull();
+    const activeNote = await getNote(active!);
+
+    await click(buttonByText('Last week'));
+
+    expect(container.textContent).toContain(`Writing still goes to "${activeNote!.title}"`);
+    // Names the *active* note, not "Last week" (the one being viewed).
+    expect(container.textContent).not.toContain('Writing still goes to "Last week"');
+  });
+
+  it('does not show the banner while viewing the active note itself', async () => {
+    await render();
+    await click(buttonByText('New note'));
+
+    expect(container.textContent).not.toContain('Writing still goes to');
+  });
+
+  it('does not show the banner when no session is open', async () => {
+    await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    await render();
+    await click(buttonByText('Last week'));
+
+    expect(container.textContent).not.toContain('Writing still goes to');
+  });
+
+  it('editing the title in the toolbar updates what the sidebar row shows (K20)', async () => {
+    await seedNote({ title: 'Lecture 3' });
+    await render();
+
+    // Two "Lecture 3" buttons exist once K20 is wired - the sidebar's
+    // select button (inside <aside>) and the toolbar's title editor.
+    const titleButton = [...container.querySelectorAll('button')].find(
+      (b) => b.textContent?.trim() === 'Lecture 3' && !b.closest('aside'),
+    );
+    expect(titleButton).toBeDefined();
+
+    await click(titleButton!);
+    const titleInput = container.querySelector('input')!;
+    expect(titleInput).not.toBeNull();
+
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!
+        .set!;
+      setter.call(titleInput, 'The French Revolution');
+      titleInput.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      titleInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await settle();
+
+    expect(container.textContent).toContain('The French Revolution');
+    expect(
+      [...container.querySelectorAll('li')].some((li) =>
+        li.textContent?.includes('The French Revolution'),
+      ),
+    ).toBe(true);
+  });
+
+  it('refreshes the sidebar and toolbar when the naming queue announces a change (fix round 1, Important 5)', async () => {
+    // Before the fix, nothing subscribed to NamingQueue.subscribe, so the
+    // owner's third complaint (the timestamp title never changes) stayed
+    // true even once naming worked - the sidebar only refreshed on capture
+    // state or a transcript-status change, and naming finishes seconds
+    // after whichever of those triggered it.
+    const note = await seedNote({ title: 'Note 1', status: 'complete' });
+    const namingQueue = createFakeNamingQueue();
+    await act(async () => {
+      root.render(
+        <CaptureProvider engine={engine}>
+          <NotesView queue={queue} namingQueue={namingQueue} />
+        </CaptureProvider>,
+      );
+    });
+    await settle();
+    expect(container.textContent).toContain('Note 1');
+
+    // What the real naming queue does to storage, then the one signal it
+    // gives the rest of the app that something changed.
+    await setNoteSummary(note.id, {
+      summary: 'Covers the three laws of motion.',
+      model: 'gemma4:12b',
+      promptVersion: 'naming-v1',
+      title: 'Newton on motion',
+    });
+    await act(async () => {
+      namingQueue.emit(note.id);
+    });
+    await settle();
+
+    expect(container.textContent).toContain('Newton on motion');
+    expect(container.textContent).not.toContain('Note 1');
+  });
+
+  it('does not show the banner for a bare, pen-started note (an active note with no locked session)', async () => {
+    // Isolates the `sessionLocked` term from `activeNoteId !== null`: a pen
+    // stroke with no session running makes a note active without ever
+    // setting `sessionStartedAt` (A6), so the banner must still stay off even
+    // though an active note now exists and a different one is being viewed.
+    await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    const fake = createFakeDeviceController();
+    const bareEngine = createCaptureEngine({ controller: fake });
+    await act(async () => {
+      root.render(
+        <CaptureProvider engine={bareEngine}>
+          <NotesView queue={queue} namingQueue={createFakeNamingQueue()} />
+        </CaptureProvider>,
+      );
+    });
+    await settle();
+
+    fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
+    fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+    await settle();
+    expect(bareEngine.getState().activeNoteId).not.toBeNull();
+
+    await click(buttonByText('Last week'));
+
+    expect(container.textContent).not.toContain('Writing still goes to');
+    bareEngine.dispose();
   });
 });

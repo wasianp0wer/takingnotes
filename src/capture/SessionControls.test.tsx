@@ -7,6 +7,7 @@ import { RecorderControl } from '@/audio/RecorderControl';
 import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine, type LiveCaptureEngine } from '@/capture/engine';
 import { interruptedNoteOf, SessionPanel } from '@/capture/SessionControls';
+import { resetResumeLockForTests } from '@/notes/resumeLock';
 import { createNote, listNotes } from '@/storage/notes';
 import { countPoints, listPages } from '@/storage/pages';
 import { createRecording } from '@/storage/recordings';
@@ -84,6 +85,7 @@ let clock = 1_000_000;
 beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   await resetDatabase();
+  resetResumeLockForTests();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -629,7 +631,11 @@ describe('SessionPanel', () => {
     expect(panel().textContent).toContain('0:00');
   });
 
-  it('says a session was interrupted and its recording lost', async () => {
+  it('says only that the note was interrupted, whether or not its session had a recording (K9)', async () => {
+    // K9: since audio persists incrementally (K4-K7), an interruption no
+    // longer loses a recording outright, so the old "its audio recording was
+    // lost" wording would be false. The sentence is gone regardless of
+    // whether the interrupted session actually had a recording.
     const session = await createSession({ title: 'Interrupted seminar', startedAt: 5_000 });
     await createNote({
       title: 'Interrupted seminar',
@@ -639,7 +645,6 @@ describe('SessionPanel', () => {
       startedAt: 5_000,
       sessionId: session.id,
     });
-    // Only claim the audio is lost when the session actually has a recording.
     await createRecording(
       { title: 'Interrupted seminar', durationMs: 1000, sessionId: session.id, startedAt: 5_000 },
       new Blob(['audio'], { type: 'audio/webm' }),
@@ -647,17 +652,16 @@ describe('SessionPanel', () => {
     render();
     await settle();
 
-    expect(panel().textContent).toContain('interrupted');
-    expect(panel().textContent).toContain('recording was lost');
+    expect(panel().textContent).toContain('"Interrupted seminar" was interrupted.');
+    expect(panel().textContent).not.toContain('recording was lost');
 
     await click(button('Dismiss'));
-    expect(panel().textContent).not.toContain('recording was lost');
+    expect(panel().textContent).not.toContain('was interrupted');
   });
 
-  it('says only that the note was interrupted when its session has no recording', async () => {
+  it('says the note was interrupted even with no recording at all', async () => {
     // A bare note the pen auto-started still gets its own session (A10), but
-    // never had a recording at all - claiming its audio was lost would be
-    // exactly the dishonesty A11's wording is meant to avoid.
+    // never had a recording at all. Same wording either way after K9.
     const session = await createSession({ title: 'Bare note', startedAt: 5_000 });
     await createNote({
       title: 'Bare note',
@@ -670,8 +674,102 @@ describe('SessionPanel', () => {
     render();
     await settle();
 
-    expect(panel().textContent).toContain('interrupted');
+    expect(panel().textContent).toContain('"Bare note" was interrupted.');
     expect(panel().textContent).not.toContain('recording was lost');
+  });
+
+  it('offers Resume in the interrupted banner, and resuming it makes the note active (K14)', async () => {
+    const session = await createSession({ title: 'Interrupted seminar', startedAt: 5_000 });
+    const interrupted = await createNote({
+      title: 'Interrupted seminar',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      startedAt: 5_000,
+      sessionId: session.id,
+    });
+    render();
+    await settle();
+
+    await click(button('Resume'));
+    await settle();
+
+    expect(engine.getState().activeNoteId).toBe(interrupted.id);
+  });
+
+  it('disables every Resume button and Start session for as long as a resume is in flight (architecture.md §8.3)', async () => {
+    const session = await createSession({ title: 'Interrupted seminar', startedAt: 5_000 });
+    await createNote({
+      title: 'Interrupted seminar',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      startedAt: 5_000,
+      sessionId: session.id,
+    });
+
+    // Rejects rather than resolves, deliberately: a *successful* resume
+    // itself sets `sessionStartedAt` (K13), which would replace "Start
+    // session" with "End session" regardless of the lock, confounding what
+    // this test checks. A rejection keeps `isActive` false throughout, so
+    // "Start session" stays the button to inspect.
+    let release: (() => void) | null = null;
+    const held = new Promise<never>((_resolve, reject) => {
+      release = () => reject(new Error('Note not found'));
+    });
+    const wrapped = { ...engine, resumeNote: () => held } as unknown as LiveCaptureEngine;
+    render({ engine: wrapped });
+    await settle();
+
+    const resumeButton = button('Resume');
+    await act(async () => {
+      resumeButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(resumeButton.disabled).toBe(true);
+    expect(button('Start session').disabled).toBe(true);
+
+    (release as (() => void) | null)?.();
+    await settle();
+
+    expect(button('Start session').disabled).toBe(false);
+    expect(button('Resume').disabled).toBe(false);
+  });
+
+  it('disables every Resume button while Start session itself is in flight (mirror of the hazard above, fix round 1, Important 1)', async () => {
+    const session = await createSession({ title: 'Interrupted seminar', startedAt: 5_000 });
+    await createNote({
+      title: 'Interrupted seminar',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      startedAt: 5_000,
+      sessionId: session.id,
+    });
+
+    let release: (() => void) | null = null;
+    const held = new Promise<{ sessionId: string; noteId: string }>((resolve) => {
+      release = () => resolve({ sessionId: 's', noteId: 'n' });
+    });
+    const wrapped = { ...engine, startSession: () => held } as unknown as LiveCaptureEngine;
+    render({ engine: wrapped });
+    await settle();
+
+    expect(button('Resume').disabled).toBe(false);
+
+    await act(async () => {
+      button('Start session').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    // sessionStartedAtOf(state) still reads null here - startSession's op
+    // has not published state yet - the exact §8.3 window, with the clicks
+    // swapped from the test above. Without holding the lock around this
+    // call too, Resume would still read enabled and could fall through to
+    // closeNote() against the half-opened startSession.
+    expect(button('Resume').disabled).toBe(true);
+
+    (release as (() => void) | null)?.();
+    await settle();
   });
 
   it('says nothing when the newest note finished cleanly', async () => {
@@ -704,7 +802,7 @@ describe('SessionPanel', () => {
     );
     render();
     await settle();
-    expect(panel().textContent).toContain('recording was lost');
+    expect(panel().textContent).toContain('was interrupted');
 
     // Starting a session changes `activeNoteId`: the effect must re-read the
     // notes list off that change, not just on mount. The new session's note
@@ -714,7 +812,7 @@ describe('SessionPanel', () => {
     await click(button('Start session'));
     await settle();
 
-    expect(panel().textContent).not.toContain('recording was lost');
+    expect(panel().textContent).not.toContain('was interrupted');
   });
 
   it('reads an interrupted session from the newest note only', () => {

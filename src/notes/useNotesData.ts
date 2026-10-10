@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { useCaptureState } from '@/capture/CaptureContext';
 import { matchesTagFilter, type TagFilterMode } from '@/notes/tagFilter';
@@ -50,8 +50,16 @@ export interface NotesData {
   /** Pages of the selected note, by `pageIndex`; empty when nothing is selected. */
   pages: PageRecord[];
   tagFilter: TagFilterState;
-  /** Forces a reload outside the four existing triggers - used after a tag write. */
-  refresh: () => void;
+  /**
+   * Forces an immediate reload of `notes`, for a write this hook has no other
+   * signal for. Three land here: a tag write (S5), a title rename (K20), and a
+   * generated name arriving from the naming queue (K17-K18). None of them
+   * touches capture state or the transcription queue - this hook's own two
+   * triggers - so without this the sidebar would keep showing stale text until
+   * something unrelated (a page turn, a later transcript change) happened to
+   * re-trigger a read.
+   */
+  reloadNotes: () => void;
 }
 
 /**
@@ -79,12 +87,8 @@ export function useNotesData(
   );
   /** Bumped by the queue; the reload effects list it as a dependency. */
   const [revision, setRevision] = useState(0);
-  /**
-   * Bumped by `refresh()`. A tag write is not one of the capture-state
-   * signals above (no new note, no new page) - this is the only trigger that
-   * would otherwise pick it up.
-   */
-  const [refreshNonce, setRefreshNonce] = useState(0);
+  /** Bumped by `reloadNotes()`, for writes with no other signal. See above. */
+  const [notesRevision, setNotesRevision] = useState(0);
 
   useEffect(() => queue.subscribe(() => setRevision((n) => n + 1)), [queue]);
 
@@ -107,7 +111,7 @@ export function useNotesData(
     return () => {
       live = false;
     };
-  }, [activeNoteId, activePageId, pageIndex, revision, refreshNonce]);
+  }, [activeNoteId, activePageId, pageIndex, revision, notesRevision]);
 
   useEffect(() => {
     // No selection means nothing to load - the "no rows" case is derived
@@ -127,7 +131,7 @@ export function useNotesData(
     return () => {
       live = false;
     };
-  }, [selectedNoteId, activeNoteId, activePageId, pageIndex, revision, refreshNonce]);
+  }, [selectedNoteId, activeNoteId, activePageId, pageIndex, revision, notesRevision]);
 
   // Derived each render, not stored: `visibleNotes` is a view of `notes`
   // filtered by the current selection, with the active note's row never
@@ -151,6 +155,11 @@ export function useNotesData(
     setMode('or');
   }
 
+  // Stable identity (fix round 1, Important 5): NotesView subscribes to the
+  // naming queue with this as its callback, and a new function every render
+  // would mean resubscribing every render.
+  const reloadNotes = useCallback(() => setNotesRevision((n) => n + 1), []);
+
   return {
     notes,
     visibleNotes,
@@ -165,6 +174,6 @@ export function useNotesData(
       setMode,
       clear,
     },
-    refresh: () => setRefreshNonce((n) => n + 1),
+    reloadNotes,
   };
 }

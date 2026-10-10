@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 
 import type { GapAnalyzer } from '@/gaps/analyzer';
-import { recordingForNote } from '@/gaps/analyzer';
+import { noteHasRecording, recordingForPage } from '@/gaps/analyzer';
+import { GAP_LEAD_MS, GAP_TRAIL_MS } from '@/gaps/constants';
 import { describeGapSkip, gapEligibility } from '@/gaps/eligibility';
 import { createConfiguredGapAnalyzer } from '@/gaps/startGaps';
 import { segmentsInWindow, speechTextOf, speechWindowForPage } from '@/gaps/window';
 import { Button } from '@/components/ui/button';
 import { listGapsByPage, updateGap } from '@/storage/gaps';
 import { getPage } from '@/storage/pages';
+import { getSettingValue } from '@/storage/settingKeys';
 import type {
   GapKind,
   GapStatus,
@@ -83,6 +85,21 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
   const [page, setPage] = useState<PageRecord | null>(null);
   const [gaps, setGaps] = useState<GapSuggestionRecord[]>([]);
   const [recording, setRecording] = useState<RecordingRecord | null>(null);
+  // Whether the *note* has any finished recording at all - separate from
+  // `recording` (this page's own, K45): "Find gaps in note" may still find a
+  // usable recording for some other page even when this one has none.
+  const [noteRecorded, setNoteRecorded] = useState(false);
+  // Fix round 1, Important 3: the window used for eligibility and for
+  // picking a recording (K45) must use the same gaps.leadMs/gaps.trailMs a
+  // real analyzer run would (createConfiguredGapAnalyzer reads them too) -
+  // otherwise, with a non-default margin configured, "Find gaps" could read
+  // available while the analyzer would actually skip the page (P1-A4).
+  // Defaults match speechWindowForPage's own fallback, so nothing changes
+  // for the common case where neither setting has been overridden.
+  const [margins, setMargins] = useState<{ leadMs: number; trailMs: number }>({
+    leadMs: GAP_LEAD_MS,
+    trailMs: GAP_TRAIL_MS,
+  });
   const [loadError, setLoadError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [running, setRunning] = useState<null | 'page' | 'note'>(null);
@@ -108,17 +125,33 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
 
   useEffect(() => {
     let live = true;
-    void Promise.all([getPage(pageId), listGapsByPage(pageId), recordingForNote(noteId)])
-      .then(([loadedPage, loadedGaps, loadedRecording]) => {
+    void (async () => {
+      try {
+        const [loadedPage, leadMs, trailMs] = await Promise.all([
+          getPage(pageId),
+          getSettingValue('gaps.leadMs'),
+          getSettingValue('gaps.trailMs'),
+        ]);
+        // K45: the recording to show now depends on this page's own speech
+        // window, so the page (and the configured margins) have to be read
+        // before `recordingForPage` can be called.
+        const window = loadedPage ? speechWindowForPage(loadedPage, { leadMs, trailMs }) : null;
+        const [loadedGaps, loadedRecording, hasAnyRecording] = await Promise.all([
+          listGapsByPage(pageId),
+          recordingForPage(noteId, window),
+          noteHasRecording(noteId),
+        ]);
         if (!live) return;
         setPage(loadedPage ?? null);
         setGaps(loadedGaps);
         setRecording(loadedRecording);
-      })
-      .catch((error: unknown) => {
+        setNoteRecorded(hasAnyRecording);
+        setMargins({ leadMs, trailMs });
+      } catch (error) {
         if (!live) return;
         setLoadError(error instanceof Error ? error.message : String(error));
-      });
+      }
+    })();
     return () => {
       live = false;
     };
@@ -165,10 +198,10 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
   const accepted = gaps.filter((g) => g.status === 'accepted');
   const rejected = gaps.filter((g) => g.status === 'rejected');
 
-  const speechWindow = page ? speechWindowForPage(page) : null;
+  const speechWindow = page ? speechWindowForPage(page, margins) : null;
   const eligible = page ? gapEligibility(page, recording, speechWindow) : null;
   const findGapsDisabled = running !== null || eligible?.ok !== true;
-  const findGapsInNoteDisabled = running !== null || recording === null;
+  const findGapsInNoteDisabled = running !== null || !noteRecorded;
 
   // Only a page that is genuinely comparable may claim a recording comparison.
   // A page with a stroke window but no recording (or one still transcribing)

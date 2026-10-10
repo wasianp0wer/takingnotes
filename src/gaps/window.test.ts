@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { GAP_LEAD_MS, GAP_TRAIL_MS } from '@/gaps/constants';
-import { segmentsInWindow, speechTextOf, speechWindowForPage } from '@/gaps/window';
+import { overlapMs, segmentsInWindow, speechTextOf, speechWindowForPage } from '@/gaps/window';
 import type {
   AudioTranscriptRecord,
   PageRecord,
@@ -178,6 +178,35 @@ describe('segmentsInWindow', () => {
       'first',
       'second',
     ]);
+  });
+});
+
+describe('overlapMs', () => {
+  it('is the full window when a recording fully contains it', () => {
+    expect(overlapMs({ fromMs: 10_000, toMs: 20_000 }, { startedAt: 0, endedAt: 100_000 })).toBe(
+      10_000,
+    );
+  });
+
+  it('is the partial overlap when the recording starts inside the window', () => {
+    expect(overlapMs({ fromMs: 10_000, toMs: 20_000 }, { startedAt: 15_000, endedAt: 100_000 })).toBe(
+      5_000,
+    );
+    expect(overlapMs({ fromMs: 10_000, toMs: 20_000 }, { startedAt: 0, endedAt: 15_000 })).toBe(5_000);
+  });
+
+  it('is zero for a recording entirely before or after the window', () => {
+    expect(overlapMs({ fromMs: 10_000, toMs: 20_000 }, { startedAt: 0, endedAt: 5_000 })).toBe(0);
+    expect(overlapMs({ fromMs: 10_000, toMs: 20_000 }, { startedAt: 25_000, endedAt: 30_000 })).toBe(
+      0,
+    );
+  });
+
+  it('is zero, not negative, for a recording that only touches the window boundary', () => {
+    expect(overlapMs({ fromMs: 10_000, toMs: 20_000 }, { startedAt: 20_000, endedAt: 30_000 })).toBe(
+      0,
+    );
+    expect(overlapMs({ fromMs: 10_000, toMs: 20_000 }, { startedAt: 0, endedAt: 10_000 })).toBe(0);
   });
 });
 

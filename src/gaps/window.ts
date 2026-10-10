@@ -70,6 +70,22 @@ export function speechWindowForPage(
 }
 
 /**
+ * Overlap, in ms, between a speech window and a finished recording's time
+ * span (K45). `0` when they do not overlap at all, including a mere boundary
+ * touch - the margins in `speechWindowForPage` are already an estimate, so a
+ * zero-width touch is not real overlap the way a touching transcript segment
+ * is treated as one in `segmentsInWindow`.
+ */
+export function overlapMs(
+  window: SpeechWindow,
+  recording: { startedAt: number; endedAt: number },
+): number {
+  const from = Math.max(window.fromMs, recording.startedAt);
+  const to = Math.min(window.toMs, recording.endedAt);
+  return Math.max(0, to - from);
+}
+
+/**
  * The recording's segments overlapping an absolute-time window, in order.
  * Segment times are offsets from `recording.startedAt` (see `TranscriptSegment`).
  *
