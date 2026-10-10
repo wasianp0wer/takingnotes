@@ -5,7 +5,7 @@ import type { AudioTranscriber, TranscribeStage } from '@/audio/types';
 import {
   getRecording,
   getRecordingAudio,
-  listRecordings,
+  listFinishedRecordings,
   setRecordingTranscript,
 } from '@/storage/recordings';
 import type { AudioTranscriptRecord } from '@/storage/types';
@@ -312,8 +312,17 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
   }
 
   async function resume(): Promise<void> {
-    const recordings = await listRecordings();
-    // `listRecordings` is newest first; transcribe the oldest backlog first.
+    // listFinishedRecordings(), not listRecordings(): since K5 a
+    // RecordingRecord exists from the moment recording starts, with
+    // transcript: null and a zero-byte recordingAudio row. Enqueuing one of
+    // those (⚑ Wave 1 review finding #2) would hand this job a 0-byte Blob,
+    // the decode would throw, and the job would be written `failed` -
+    // permanently, since resume() never re-enqueues a failed transcript. The
+    // audio survives (once K4-K7's recovery runs) but its transcript would
+    // be silently destroyed on the exact reload this feature exists to
+    // survive.
+    const recordings = await listFinishedRecordings();
+    // Newest first; transcribe the oldest backlog first.
     for (const recording of [...recordings].reverse()) {
       const status = recording.transcript?.status;
       if (recording.transcript === null || status === 'pending' || status === 'running') {

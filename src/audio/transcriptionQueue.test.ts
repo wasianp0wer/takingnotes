@@ -37,8 +37,30 @@ function deferred<T = void>(): Deferred<T> {
 
 const audio = () => new Blob([new Uint8Array([1])], { type: 'audio/webm' });
 
+/**
+ * A *finished* recording (`endedAt` set) - which is what every one of these
+ * tests means by "a recording", since they're about the transcript queue's
+ * handling of transcript status, not about K5's in-progress rows. Since K5,
+ * `createRecording` with no `endedAt` leaves it `null` ("still recording"),
+ * which `listFinishedRecordings()` (what `resume()` now reads, ⚑ Wave 1
+ * review finding #2) would never pick up - so this helper sets it explicitly
+ * rather than relying on a default that would silently make every recording
+ * in this file invisible to `resume()`.
+ */
 async function makeRecording(startedAt = 1, title = 't'): Promise<string> {
-  const recording = await createRecording({ title, durationMs: 1_000, startedAt }, audio());
+  const recording = await createRecording(
+    { title, durationMs: 1_000, startedAt, endedAt: startedAt + 1_000 },
+    audio(),
+  );
+  return recording.id;
+}
+
+/** The K5 in-progress shape: `endedAt: null`, still being recorded. */
+async function makeUnfinishedRecording(startedAt = 1, title = 't'): Promise<string> {
+  const recording = await createRecording(
+    { title, durationMs: 0, startedAt, endedAt: null },
+    new Blob([], { type: 'audio/webm' }),
+  );
   return recording.id;
 }
 
@@ -624,6 +646,28 @@ describe('transcription queue', () => {
     expect(await statusOf(done)).toBe('done');
     expect((await getRecording(done))!.transcript!.text).toBe('old');
     expect(await statusOf(failed)).toBe('failed');
+  });
+
+  it('⚑ Wave 1 review finding #2: resume() never enqueues an unfinished (endedAt: null) recording', async () => {
+    // Without this, a reload mid-recording would have resume() enqueue the
+    // very row K4-K7 are protecting: getRecordingAudio() hands the queue a
+    // 0-byte Blob (the row exists, so it is not null), the decode throws,
+    // and the job is written `failed` - permanently, since resume() never
+    // re-queues a failed transcript. The audio would survive (once K4-K7
+    // land) but its transcript would be silently destroyed on the exact
+    // reload the feature exists to survive.
+    const unfinished = await makeUnfinishedRecording(1, 'still recording');
+    const finished = await makeRecording(2, 'finished');
+
+    const { queue, transcribe } = makeQueue();
+    await queue.resume();
+    await queue.whenIdle();
+
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect(await statusOf(finished)).toBe('done');
+    // The unfinished recording's transcript is untouched - still absent,
+    // never poisoned to `failed`.
+    expect((await getRecording(unfinished))?.transcript).toBeNull();
   });
 
   it('retry transcribes a failed recording again', async () => {

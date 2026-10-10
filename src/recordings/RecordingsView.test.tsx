@@ -4,18 +4,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { TranscriptionQueue, TranscriptionQueueState } from '@/audio/transcriptionQueue';
 import { RecordingsView } from '@/recordings/RecordingsView';
-import { createRecording, listRecordings, setRecordingTranscript } from '@/storage/recordings';
+import { createRecording, listFinishedRecordings, setRecordingTranscript } from '@/storage/recordings';
 import type { RecordingRecord } from '@/storage/types';
 import { resetDatabase } from '@/test/resetDb';
 
-// Wraps (rather than replaces) `listRecordings` so every test still reads the
-// real store by default; only the reload-ordering test below overrides its
-// next calls to control resolution order.
+// Wraps (rather than replaces) `listFinishedRecordings` so every test still
+// reads the real store by default; only the reload-ordering test below
+// overrides its next calls to control resolution order.
 vi.mock('@/storage/recordings', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/storage/recordings')>();
   return {
     ...actual,
-    listRecordings: vi.fn(actual.listRecordings),
+    listFinishedRecordings: vi.fn(actual.listFinishedRecordings),
     deleteRecording: vi.fn(actual.deleteRecording),
   };
 });
@@ -111,12 +111,19 @@ function blob(): Blob {
   return new Blob(['audio-bytes'], { type: 'audio/webm' });
 }
 
+// endedAt defaults to a real finished timestamp - not the createRecording
+// default of null (K5's "still recording" shape) - since every test here
+// means "a recording that's done" unless it explicitly overrides endedAt to
+// null to test the opposite.
 async function seed(overrides: Partial<Parameters<typeof createRecording>[0]> = {}): Promise<RecordingRecord> {
+  const startedAt = overrides.startedAt ?? 1000;
+  const durationMs = overrides.durationMs ?? 65_000;
   return createRecording(
     {
       title: 'Recording',
-      durationMs: 65_000,
-      startedAt: 1000,
+      durationMs,
+      startedAt,
+      endedAt: startedAt + durationMs,
       ...overrides,
     },
     blob(),
@@ -345,13 +352,14 @@ describe('RecordingsView', () => {
 
     // Only the next two calls (the mount load, then the reload triggered by
     // `fireChange` below) are deferred; any later call falls back to the
-    // real `listRecordings` via the module mock's default implementation.
+    // real `listFinishedRecordings` via the module mock's default
+    // implementation.
     const resolvers: ((list: RecordingRecord[]) => void)[] = [];
     const deferred = () =>
       new Promise<RecordingRecord[]>((resolve) => {
         resolvers.push(resolve);
       });
-    vi.mocked(listRecordings).mockImplementationOnce(deferred).mockImplementationOnce(deferred);
+    vi.mocked(listFinishedRecordings).mockImplementationOnce(deferred).mockImplementationOnce(deferred);
 
     render(queue);
     await flushAll();
@@ -389,6 +397,18 @@ describe('RecordingsView', () => {
 
     expect(container.textContent).toContain('fresh text');
     expect(container.textContent).not.toContain('Not transcribed');
+  });
+
+  it('⚑ Wave 1 review finding #2: an unfinished (endedAt: null) recording is hidden; a finished one still shows', async () => {
+    await seed({ title: 'Still recording', startedAt: 1000, endedAt: null, durationMs: 0 });
+    await seed({ title: 'Done recording', startedAt: 2000 });
+    const queue = createFakeQueue();
+
+    render(queue);
+    await flushAll();
+
+    expect(container.textContent).toContain('Done recording');
+    expect(container.textContent).not.toContain('Still recording');
   });
 
   it('shows an empty state with no recordings', async () => {

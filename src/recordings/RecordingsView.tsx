@@ -4,7 +4,7 @@ import { getAudioRuntime } from '@/audio/audioRuntime';
 import { formatClock } from '@/audio/format';
 import type { TranscriptionQueue } from '@/audio/transcriptionQueue';
 import { RecordingDetail } from '@/recordings/RecordingDetail';
-import { listRecordings } from '@/storage/recordings';
+import { listFinishedRecordings } from '@/storage/recordings';
 import type { RecordingRecord } from '@/storage/types';
 
 function statusWord(recording: RecordingRecord): string {
@@ -54,7 +54,11 @@ export function RecordingsView(props?: { queue?: TranscriptionQueue }) {
 
   const load = useCallback(async () => {
     const seq = ++seqRef.current;
-    const list = await listRecordings();
+    // listFinishedRecordings(), not listRecordings(): since K5 a
+    // RecordingRecord exists from the moment recording starts, with a
+    // zero-byte recordingAudio row. Listing that here would show a player
+    // with nothing to play and a "Not transcribed" label that looks stuck.
+    const list = await listFinishedRecordings();
     if (seq !== seqRef.current) return;
     setRecordings(list);
     setSelectedId((current) =>

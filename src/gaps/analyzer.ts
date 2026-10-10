@@ -14,7 +14,7 @@ import type { TextGenerator } from '@/llm/ollamaText';
 import { createGaps, deleteGapsByPage, listGapsByPage } from '@/storage/gaps';
 import { getNote } from '@/storage/notes';
 import { getPage, listPages, setPageGapAnalysis } from '@/storage/pages';
-import { listRecordings, listRecordingsBySession } from '@/storage/recordings';
+import { listFinishedRecordings, listRecordingsBySession } from '@/storage/recordings';
 import type {
   GapAnalysisMeta,
   GapAnalysisStatus,
@@ -69,12 +69,21 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * `recordings` has no `by-note` index, so the direct link is found by filtering
  * the metadata listing - which is cheap, the audio bytes living in their own
  * store.
+ *
+ * Only *finished* recordings are candidates (⚑ Wave 1 review finding #2):
+ * since K5 a `RecordingRecord` exists from the moment recording starts, with
+ * `endedAt: null` and a zero-byte `recordingAudio` row, so gap analysis must
+ * never be handed a recording that is still being written. `listRecordings()`
+ * becomes `listFinishedRecordings()` for the direct link; `listRecordingsBySession`
+ * has no "finished" variant in storage, so its result is filtered here
+ * instead of inventing a new storage function for one predicate.
  */
 export async function recordingForNote(noteId: string): Promise<RecordingRecord | null> {
   const note = await getNote(noteId);
-  const linked = (await listRecordings()).filter((recording) => recording.noteId === noteId);
-  const viaSession =
+  const linked = (await listFinishedRecordings()).filter((recording) => recording.noteId === noteId);
+  const viaSessionAll =
     typeof note?.sessionId === 'string' ? await listRecordingsBySession(note.sessionId) : [];
+  const viaSession = viaSessionAll.filter((recording) => recording.endedAt !== null);
 
   // De-duplicated by id: a recording linked both ways appears in both listings.
   const candidates = new Map<string, RecordingRecord>();
