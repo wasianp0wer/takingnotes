@@ -90,11 +90,15 @@ export interface SearchNote {
   note: NoteRecord;
   /** This note's pages, `pageIndex` order, from `listAllPageText()`. */
   pages: SearchPage[];
+  /** Fix round 3, C1/S6-A9: owned, done-transcribed recordings' text, joined oldest first. `''` when none. */
+  audioText: string;
+  /** Fix round 3, C1/S6-A9: the recording `audioText` came from (earliest contributing), or `null`. */
+  primaryRecordingId: string | null;
 }
 export interface SearchCorpus {
   notes: SearchNote[];
   recordings: RecordingRecord[];
-  /** recordingId -> noteId, built from `recordingsForNote` (one definition — §8.5). */
+  /** recordingId -> noteId, built from `recordingOwnersByNote` (one definition — §8.5, extended S6-A1). */
   recordingOwner: Map<string, string>;
 }
 export async function loadSearchCorpus(): Promise<SearchCorpus>;
@@ -103,12 +107,12 @@ export async function loadSearchCorpus(): Promise<SearchCorpus>;
 - One `listNotes()`, one `listAllPageText()`, one `listFinishedRecordings()`,
   grouped and sorted in memory — `listAllPageText()` exists exactly so this
   is one bulk read instead of one `listPages` per note (§8.5).
-- `recordingOwner` is built by calling `recordingsForNote(note.id)` once per
-  note and recording the reverse mapping. This is `recordingsForNote`'s
-  stated purpose (§8.5: "S6 uses this … to attribute an audio-transcript hit
-  back to a note") and the brief is explicit that the two-path check must not
-  be re-derived by hand, so this is the one way to build the map even though
-  it costs one `listFinishedRecordings()` scan per note (S6-A1).
+- `recordingOwner` is built by `recordingOwnersByNote(notes, recordings)`
+  (fix round 3, I5/S6-A1, superseding a per-note `recordingsForNote` loop)
+  in one pass over data already loaded. `audioText`/`primaryRecordingId`
+  (fix round 3, C1/S6-A9) are derived from the same pass: every recording
+  whose `recordingOwner` entry names a note, filtered to `status: 'done'`
+  transcripts with non-blank text, sorted oldest-first per note.
 - Loaded once per `SearchView` mount (or explicit reload), not on every
   keystroke: Find's own match function is pure and run against the already-
   loaded corpus, which is what makes Find "immediate" without re-reading
@@ -134,8 +138,9 @@ export function snippetAround(text: string, query: string, radius?: number): str
 ```
 
 - Case-insensitive substring match (K40 — no model, so no fuzziness). A
-  blank/whitespace-only query returns `[]` rather than every page in the
-  library.
+  query shorter than `MIN_QUERY_LENGTH` (2, fix round 3, I4/S6-A13) returns
+  `[]`, not just a blank/whitespace-only one — matches too broadly to be
+  useful on a real library otherwise.
 - Searches, per note: `note.title`, `note.summary` (skipped when `null`),
   and each page's `text` (one hit per matching page, not per occurrence —
   K41's "links to note + page" is page-granular). Searches, per recording:
@@ -170,23 +175,38 @@ export function getBandPrompt(): { promptVersion: string; system: string; build(
 ```
 
 - **Screen** (stage 1): given the query and a numbered list of
-  `{ title, text }` (`text` is the note's summary, or — K46 — its page text
-  when the summary is `null`), return the JSON array of numbers that *might*
-  be relevant. The prompt explicitly asks the model to **err toward
-  inclusion** — "a closer check will narrow this down afterward" — because
-  K42's whole case against a keyword prefilter is that a strict first pass
-  finds nothing to rerank when the query shares no words with the note; a
-  strict screening stage would quietly reproduce that same failure one layer
-  up. Stage 2 is what enforces precision.
-- **Band** (stage 2): given the query and one candidate note's text, return
+  `{ title, text }` (`text` is the note's summary plus its recording text,
+  or — K46 — its page text plus recording text when the summary is `null`;
+  fix round 3, C1 added the recording half of both), return the JSON array
+  of numbers that *might* be relevant. The prompt explicitly asks the model
+  to **err toward inclusion** — "a closer check will narrow this down
+  afterward" — because K42's whole case against a keyword prefilter is that
+  a strict first pass finds nothing to rerank when the query shares no
+  words with the note; a strict screening stage would quietly reproduce
+  that same failure one layer up. Stage 2 is what enforces precision. Fix
+  round 3, I2: the candidate list is batched (`screenBatch.ts`) against the
+  project's own un-chunked-prompt ceiling, so one call per batch rather
+  than one call over the whole library.
+- **Band** (stage 2): given the query and one candidate note's full page
+  text plus full recording transcript (fix round 3, C1), return
   `{ "band": "strong"|"moderate"|"weak"|"none", "reason": string }`, where
   `band` says how well the note answers the query and `reason` is a short
   span **copied from the text**, never invented — the same "never invent a
   quote" rule `gaps/prompts.ts`'s compare prompt already uses, because a
-  fabricated snippet is worse than no snippet.
+  fabricated snippet is worse than no snippet. Fix round 3, I3: the four
+  quoted band labels are built from `BAND_LABELS` (`SMART_SEARCH_BANDS`
+  plus `'none'`), the same array `validate.ts`'s accepted set is built
+  from, so a retuned/renamed/added band cannot drift between the prompt's
+  wording and what the validator will accept — mirroring `gaps/prompts.ts`'s
+  `GAP_KINDS` pattern.
 - Both prompts are round-tripped through their own validator by a dedicated
   test (see Tests) — the brief's own warning about a prompt that asks for
-  one shape while its validator accepts another.
+  one shape while its validator accepts another. Fix round 3 extended this:
+  the screen prompt's worked example (`SCREEN_EXAMPLE_INDICES`) and every
+  label the band prompt quotes (`BAND_LABELS`, via `it.each`) are now
+  imported into their tests rather than hand-retyped, so the round-trip
+  exercises the prompt's literal, current wording rather than a stand-in
+  that could silently diverge from it.
 
 ### `src/search/validate.ts` — the untrusted JSON (pure)
 
@@ -223,17 +243,27 @@ export function validateBandResult(value: unknown): BandResult;
 ### `src/search/smartSearch.ts` — `runSmartSearch` (K42, K43, K44, K46)
 
 ```ts
-export interface SmartSearchHit { noteId: string; noteTitle: string; band: SmartSearchBand; reason: string; }
+export interface SmartSearchHit {
+  noteId: string;
+  noteTitle: string;
+  band: SmartSearchBand;
+  reason: string;
+  /** Fix round 3, C1/S6-A9: set instead of a page when the note has no page text - the recording the hit came from. */
+  recordingId?: string;
+}
 export interface SmartSearchResult {
   strong: SmartSearchHit[];
   moderate: SmartSearchHit[];
   weak: SmartSearchHit[];
-  /** Notes with `summary === null`, screened by title + page text instead (K44/K46). */
+  /** Notes with `summary === null`, screened by title + page text/recording instead (K44/K46). */
   unsummarizedCount: number;
+  /** Fix round 3, I1/S6-A10: the honest subset of the above with *no* page text and *no* recording text either. */
+  titleOnlyCount: number;
   /**
-   * Fix round 1, Finding 2: a screened candidate whose band call then
-   * failed — dropped from every section, but *not* folded into an
-   * indistinguishable "no match". See point 6 below.
+   * A screened candidate whose screen batch (fix round 3, I2) or band call
+   * (fix round 1, Finding 2) then failed — dropped from every section, but
+   * *not* folded into an indistinguishable "no match". See points 4 and 6
+   * below.
    */
   uncheckedCount: number;
 }
@@ -246,49 +276,59 @@ export async function runSmartSearch(
 ): Promise<SmartSearchResult>;
 ```
 
-1. `unsummarizedCount` is computed from the whole corpus
-   (`note.summary === null`) regardless of what follows — K44's reporting,
+1. `unsummarizedCount` and `titleOnlyCount` are computed from the whole
+   corpus (`note.summary === null`; and, for the latter, no page text and
+   no `audioText` either) regardless of what follows — K44's reporting,
    "extended to cover the fallback path too, not narrowed by it" (K46), so
-   it is never conditioned on how many candidates the model happens to pick.
+   neither is ever conditioned on how many candidates the model happens to
+   pick.
 2. An empty corpus, or a blank query, returns the all-empty result
    immediately — **no Ollama call is made.** This is what makes "smart
    search over an empty library … fails with a plain message rather than a
    stack trace" true by construction: there is no call that could produce a
    stack trace, and the view (not this function) renders the plain "nothing
    to search yet" message for a zero-note corpus.
-3. Build one `ScreenCandidate` per note: `text` is `note.summary` when it is
-   not `null` (capped, `SCREEN_TEXT_MAX`), else the note's page text joined
-   in `pageIndex` order (K46's fallback, capped tighter, `SCREEN_FALLBACK_TEXT_MAX`
-   — stage 1 only needs enough to judge topic, stage 2 reads the full text).
-4. One `generateJson` call with the screen prompt, `validate:
-   validateScreenIndices`. **This call is not caught here** — it is the
-   first Ollama call this function makes, so an unreachable host surfaces
-   through this one rejection, and the caller (the view) is what turns that
-   into a plain message (K44's other named failure).
+3. Build one `ScreenCandidate` per note: `text` is `note.summary` (capped,
+   `SCREEN_TEXT_MAX`) or — K46 — the note's page text joined in `pageIndex`
+   order (capped tighter, `SCREEN_FALLBACK_TEXT_MAX`), with `note.audioText`
+   (capped, `SCREEN_AUDIO_TEXT_MAX`) appended regardless (fix round 3, C1) —
+   stage 1 only needs enough to judge topic, stage 2 reads the full text.
+4. The candidate list is split into batches (fix round 3, I2,
+   `screenBatch.ts`'s `batchScreenCandidates`) within
+   `SCREEN_BATCH_CHAR_BUDGET`. One `generateJson` call per batch, `validate:
+   validateScreenIndices` (now given the *exact* index set that batch
+   offered, not a `1..count` range). Chosen indices are unioned across
+   batches. **A failed batch is caught**, logged, and its candidates'
+   count is added to `uncheckedCount` — batching means "the screen stage"
+   is no longer one atomic call whose single failure can be cleanly
+   surfaced as *the* K44 error; see point 6 and S6-A4/S6-A11.
 5. For each chosen candidate, serially (Ollama serves one model at a time —
    the same reasoning `gaps/analyzer.ts`'s `summarizeChunks` already states):
-   build its full page text (joined, capped `DETAIL_TEXT_MAX_CHARS`), call
-   the band prompt, and push the result into `strong`/`moderate`/`weak`
-   unless `band === 'none'`. **A per-candidate failure is caught, logged,
-   counted in `uncheckedCount`, and the candidate is dropped** — one
-   candidate's bad answer must not cost every other candidate's
-   already-screened result (the same "one bad page must not stop the rest
-   of the note" principle as `gaps/analyzer.ts`'s `analyzeNote`) — except
-   an abort (`signal.aborted`/`AbortError`), which is the user cancelling
-   and ends the loop by rethrowing.
-6. If Ollama goes unreachable *between* the screen call and the band calls,
-   every band call fails. The run still ends with zero hits, but (fix
-   round 1, Finding 2) `uncheckedCount` equals however many candidates were
-   screened, so the view reports "could not be checked" rather than
+   build its full page text joined with its full `audioText` (fix round 3,
+   C1; capped, `DETAIL_TEXT_MAX_CHARS`), call the band prompt, and push the
+   result into `strong`/`moderate`/`weak` unless `band === 'none'`. When the
+   note has no page text, the pushed hit also carries `recordingId:
+   note.primaryRecordingId` (C1's band-granularity ruling). **A
+   per-candidate failure is caught, logged, counted in `uncheckedCount`,
+   and the candidate is dropped** — one candidate's bad answer must not
+   cost every other candidate's already-screened result (the same "one bad
+   page must not stop the rest of the note" principle as
+   `gaps/analyzer.ts`'s `analyzeNote`) — except an abort
+   (`signal.aborted`/`AbortError`), which is the user cancelling and ends
+   the loop by rethrowing.
+6. If Ollama goes unreachable at any point *after* the first screen batch,
+   every subsequent call fails and is caught (point 4 or point 5). The run
+   still ends with zero hits for those candidates, but `uncheckedCount`
+   reflects it, so the view reports "could not be checked" rather than
    letting a confidently empty result read as "no matches" — the exact
    silent-wrong-answer class this phase has been digging out elsewhere.
    `SearchView` renders this as its own line, separate from each band's
    "No matches.". This still does not make K44's "fails with a plain
-   message" airtight for every call in a run — only the *first* one (the
-   screen call) can propagate as a thrown error; everything after that
+   message" airtight for every call in a run — only the very *first*
+   screen batch can propagate as a thrown error; everything after that
    degrades to a counted, reported omission instead. Both halves are a
-   deliberate, documented trade-off (S6-A4), not an oversight — see
-   Assumptions.
+   deliberate, documented trade-off (S6-A4, extended S6-A11), not an
+   oversight — see Assumptions.
 
 ### `src/search/startSearch.ts` — settings-wired deps
 
@@ -320,36 +360,56 @@ export interface SearchViewProps {
 export function SearchView(props?: SearchViewProps): JSX.Element;
 ```
 
-- Loads the corpus on mount (`loadSearchCorpus`); a corpus with zero notes
-  and zero recordings renders "Nothing to search yet — write a note or make
-  a recording first." in place of the controls (K44's empty-library case,
-  handled here rather than inside `runSmartSearch` per its own doc above).
-- A query `Input`. **Find** results recompute from the already-loaded corpus
-  on every keystroke (`findInCorpus`, pure, synchronous — no debounce
-  needed) and render grouped by source, each row showing the snippet and a
-  button that calls `onOpenNotes(hit.noteId, hit.pageIndex ?? 0)` or
-  `onOpenRecordings(hit.recordingId, hit.startMs)` by hit kind (S6-A6).
+- Loads the corpus on mount (`loadSearchCorpus`); while it is still
+  loading, renders a "Loading…" state with the `aria-label="Search"`
+  landmark already present (fix round 3, I5 — previously rendered `null`,
+  nothing at all). A corpus with zero notes and zero recordings renders
+  "Nothing to search yet — write a note or make a recording first." in
+  place of the controls (K44's empty-library case, handled here rather
+  than inside `runSmartSearch` per its own doc above).
+- A query `Input`, bound to the raw `query` state so typing feels
+  immediate. **Find** recomputes/renders from a separate `debouncedQuery`
+  (150ms, fix round 3, I4) rather than every raw keystroke; rendered hits
+  are capped at `FIND_RESULTS_CAP` (50) with a "Showing first 50 of N
+  matches." line naming the true total when there are more. Each row
+  shows the snippet and a button that calls `onOpenNotes(hit.noteId,
+  hit.pageIndex ?? 0)` or `onOpenRecordings(hit.recordingId, hit.startMs)`
+  by hit kind (S6-A6). Changing the query also clears any prior smart-
+  search result and error (fix round 3, I6) — without this, an old
+  Strong/Moderate/Weak result for a previous query kept reading as an
+  answer to the new one.
 - A **Smart search** button: disabled while a run is in flight, while the
-  query is blank, or while the corpus has no notes. On click, runs
-  `runSmartSearch` (via `props.smartSearchDeps ?? await getSmartSearchDeps()`,
-  the same tests-only-override shape as `GapPanel`'s `analyzer` prop and
-  `NotesView`'s `queue` prop) inside a `try/catch`; a rejection sets an error
-  string shown in destructive text — **the error never escapes the handler**,
-  so it can never reach React as an uncaught rejection or a stack trace
-  (same pattern as `GapPanel.run`).
+  query is blank, or while the corpus has no notes. On click, builds an
+  `AbortController` (fix round 3, M2), passes its `signal` to
+  `runSmartSearch` (via `props.smartSearchDeps ?? await
+  getSmartSearchDeps()`, the same tests-only-override shape as
+  `GapPanel`'s `analyzer` prop and `NotesView`'s `queue` prop) inside a
+  `try/catch`; a rejection sets an error string shown in destructive text
+  — **the error never escapes the handler**, so it can never reach React
+  as an uncaught rejection or a stack trace (same pattern as
+  `GapPanel.run`). The view's unmount cleanup aborts the controller and a
+  `liveRef` guards the three post-`await` `setState` calls against firing
+  after unmount — a run abandoned by a tab switch (the view remounts
+  fresh on the next visit; S6-A6) no longer keeps making serial model
+  calls for a result nothing will read.
 - Results render as three headed sections, **Strong / Moderate / Weak**
-  (K42), each hit showing the note title and its `reason`, plus an `onOpenNotes(hit.noteId, 0)`
-  button (a smart-search hit names a note, not a page). A line states
-  `unsummarizedCount` when it is `> 0`: "N notes have no summary yet and
-  were screened by title and page text instead." (K44/K46) — shown
-  whenever a search has run, not only when it found something, so a
-  library that is mostly unsummarized still visibly says so even if
-  nothing matched. A second, separately-styled line states
-  `uncheckedCount` when it is `> 0` (fix round 1, Finding 2): a candidate
-  the screen stage chose whose band call then failed, reported distinctly
-  from "No matches." so a run where every band call fails does not read as
-  a confidently empty result.
-- No result section render as "No matches." rather than being omitted
+  (K42, labels from `SMART_SEARCH_BANDS`, fix round 3, I3 — not a fourth
+  hand-copy of the band list), each hit showing the note title and its
+  `reason`, plus an Open button that calls `onOpenRecordings(hit.recordingId)`
+  when set, `onOpenNotes(hit.noteId, 0)` otherwise (fix round 3, C1's
+  band-granularity ruling). Two lines report what couldn't be fully
+  screened: `unsummarizedCount - titleOnlyCount` notes "have no summary
+  yet and were screened by title and page text or recording content
+  instead." (K44/K46, now including the recording half C1 added), and
+  `titleOnlyCount` (fix round 3, I1) "have neither page text nor a
+  recording, and were screened by title alone." — a plainly different,
+  and honest, sentence for the notes the first line cannot truthfully
+  cover. A third, separately-styled line states `uncheckedCount` when it
+  is `> 0` (fix round 1, Finding 2; extended fix round 3, I2 to cover a
+  failed screen batch too): a candidate that could not be checked,
+  reported distinctly from "No matches." so a run where every batch or
+  band call fails does not read as a confidently empty result.
+- No result section renders as "No matches." rather than being omitted
   entirely, so "ran and found nothing" is distinguishable from "hasn't run
   yet" (no smart-search section is rendered at all before the first run).
 
@@ -496,14 +556,23 @@ for the full shape and its one named residual gap (segment auto-seek).
 
 ## Assumptions
 
-- **S6-A1** `SearchCorpus.recordingOwner` is built by calling
+- **S6-A1** ⚑ **Superseded by fix round 3, I5 — recorded for history.**
+  Originally: `SearchCorpus.recordingOwner` was built by calling
   `recordingsForNote(note.id)` once per note, costing one
   `listFinishedRecordings()` scan per note rather than one overall. The
-  brief requires using the one correct link-path definition rather than
-  re-deriving it, and this is the only way to call it that does so; accepted
-  at today's note counts (same reasoning `storage/notes.ts`'s
-  `listTagVocabulary` already gives for A35's "acceptable at this note
-  count").
+  brief required using the one correct link-path definition rather than
+  re-deriving it, and that was the only way to call it that did so without
+  a storage-layer change. **As shipped after fix round 3:** the
+  coordinator authorised a boundary extension - `src/storage/recordings.ts`
+  gained `recordingOwnersByNote(notes, finishedRecordings)`, a batch form
+  of the same two-link-path check that takes data already loaded and
+  builds the whole map in one pass, with no further storage reads.
+  `loadSearchCorpus` calls it once. The "one correct definition" property
+  this assumption worried about giving up is preserved: both the single-
+  note and batch forms live in the same file, checked against each other
+  by a dedicated equivalence test
+  (`src/storage/recordings.test.ts`'s "matches recordingsForNote looped
+  per note...").
 - **S6-A2** Find is page-granular for notes (one hit per matching page) and
   segment-granular for recordings (one hit per matching segment), matching
   K41's two link grandularities ("note + page", "recording + segment
@@ -581,14 +650,89 @@ for the full shape and its one named residual gap (segment auto-seek).
   `ollama.baseUrl` (A30/A36).
 - **S6-A8** Screen-stage candidate text is capped (`SCREEN_TEXT_MAX` for a
   real summary, a tighter `SCREEN_FALLBACK_TEXT_MAX` for K46's title+page-text
-  fallback — stage 1 only needs enough to judge topic) and detail-stage text
-  is capped at a much larger `DETAIL_TEXT_MAX_CHARS` with no chunking.
-  Unlike `gaps/analyzer.ts`'s speech (which can be an hour of transcribed
-  lecture), a note's own page text is "a few kilobytes" at most
-  (`architecture.md` §8.5's own description of what `listAllPageText` exists
-  to search cheaply), so a hard cap rather than `gaps/chunk.ts`'s
-  summarize-then-compare pipeline is treated as sufficient; an unusually
-  long note's tail is simply not read by the band stage. Matches K43's own
-  framing — prompt and threshold tuning is expected after first contact with
-  real summaries, and this is one of the thresholds that may need revisiting
-  before then.
+  fallback, and (fix round 3, C1) `SCREEN_AUDIO_TEXT_MAX` for the recording
+  gist appended to either — stage 1 only needs enough to judge topic) and
+  detail-stage text is capped at a much larger `DETAIL_TEXT_MAX_CHARS`
+  (now covering page text *and* the full recording transcript, C1) with no
+  per-note chunking. Unlike `gaps/analyzer.ts`'s speech (which can be an
+  hour of transcribed lecture), a note's own page text is "a few kilobytes"
+  at most (`architecture.md` §8.5's own description of what
+  `listAllPageText` exists to search cheaply) — a recording's transcript
+  can be longer, but still bounded by one lecture's length, not a whole
+  library's — so a hard cap rather than `gaps/chunk.ts`'s per-note
+  summarize-then-compare pipeline is treated as sufficient for a single
+  note's text; an unusually long note's tail is simply not read by the
+  band stage. (This is a different budget from fix round 3 I2's
+  *library-wide* screen batching below — this one bounds one note's own
+  text, that one bounds how many notes' candidates ride in one prompt.)
+  Matches K43's own framing — prompt and threshold tuning is expected
+  after first contact with real summaries, and this is one of the
+  thresholds that may need revisiting before then.
+- **S6-A9** ⚑ **Fix round 3, C1 (Critical).** Smart search originally
+  never read `corpus.recordings`/`corpus.recordingOwner` at all - both
+  stages screened on `note.summary` and page text only, four of K41's five
+  sources. Fixed: `SearchNote.audioText` (corpus.ts) is appended to the
+  screen candidate's text and joined into the band stage's detail text
+  alongside page text. The coordinator's band-granularity ruling: a
+  smart-search hit stays note-granular (banding a note is inherent to
+  K42's two-stage design), but when a note has no page text at all, its
+  hit carries `recordingId: note.primaryRecordingId` instead of implying a
+  page that was never the source - `SearchView`'s smart-hit "Open" opens
+  that recording in that case, the note otherwise.
+- **S6-A10** Fix round 3, I1. `titleOnlyCount` (the subset of
+  `unsummarizedCount` with *no* page text and *no* recording text) exists
+  because C1 widened K46's fallback to include recording text, which
+  dissolved most of the original overclaim ("screened by title and page
+  text" for a note that had neither) but not all of it — a note with none
+  of the three populations (no summary, no page text, no recording) still
+  exists, and the view now says so in a separate, honest sentence rather
+  than folding it into the wider "screened by title and page text or
+  recording content" line.
+- **S6-A11** Fix round 3, I2. The screen call is batched against
+  `SCREEN_BATCH_CHAR_BUDGET` (= `gaps/constants.ts`'s
+  `GAP_DIRECT_CHAR_BUDGET`, imported rather than re-declared at a
+  different value) via `src/search/screenBatch.ts`'s
+  `batchScreenCandidates`, mirroring `gaps/chunk.ts`'s precedent but
+  without overlap - a candidate is a complete, atomic record, not
+  continuous text with a mid-sentence-split risk. `validateScreenIndices`
+  now takes the exact `Set` of indices a given call offered rather than a
+  `1..count` range, since under batching a count-based range would wrongly
+  accept an index belonging to a different batch's own prompt. A failed
+  batch's candidates count into `uncheckedCount` (extending S6-A4's
+  per-candidate resilience to the screen stage, now that it is no longer
+  one atomic call) rather than rejecting the whole run - see S6-A4's own
+  text for the K44 nuance this implies.
+- **S6-A12** Fix round 3, I3. `SMART_SEARCH_BANDS`/`BAND_LABELS`
+  (`src/search/prompts.ts`) are the one list the band prompt's wording,
+  `validate.ts`'s accepted values, and `SearchView.tsx`'s section labels
+  are all built from (mirroring `gaps/prompts.ts`'s `GAP_KINDS` pattern).
+  This closes drift between the *prompt wording* and the *validator*
+  specifically - it does not make a full band rename a one-array-edit
+  change throughout the codebase: `SmartSearchResult`/`SmartSearchHit`'s
+  `strong`/`moderate`/`weak` fields are a hand-written TypeScript
+  interface, not generated from the array, and a real rename still
+  correctly requires touching them (caught by the compiler, not silently)
+  — confirmed by actually attempting a full rename during this fix round's
+  mutation-checking rather than assumed.
+- **S6-A13** Fix round 3, I4. `MIN_QUERY_LENGTH` (2) and the 150ms
+  `FIND_DEBOUNCE_MS` are both chosen, not measured against real usage -
+  K43-style tuning candidates, not load-bearing values. `FIND_RESULTS_CAP`
+  (50) caps *rendered* hits only; `findInCorpus` itself still computes the
+  full match set so the view can report the true total ("Showing first 50
+  of N matches.").
+- **S6-A14** Fix round 3, M2. `runSmartSearch`'s `signal` support (added
+  and tested in fix round 1, before `SearchView` ever passed one) is now
+  actually wired from `SearchView`: an `AbortController` per run, aborted
+  from the view's unmount cleanup. A `liveRef` (not component state, to
+  avoid an extra render) guards the three post-`await` `setState` calls
+  in `handleSmartSearch` against firing after unmount.
+- **S6-A15** ⚑ **M5 (lift `query`/`smart` into `AppShell` so a tab
+  round-trip does not lose them) was not attempted this round.** Given the
+  number of other items already closed and mutation-checked, and that
+  this one is structurally larger (either making `SearchView`'s relevant
+  props required - breaking its ~24-test file's existing direct-render
+  call sites - or adding a dual controlled/uncontrolled mode), it was
+  judged lower value for the risk of destabilising a large, already-
+  tested surface than finishing the rest of the round carefully. Recorded
+  as a deliberate stop, not a silent omission - see `s6-report.md`'s fix
+  round 3 section for the reasoning in full.
