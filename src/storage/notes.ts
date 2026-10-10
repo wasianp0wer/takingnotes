@@ -1,6 +1,6 @@
 import { openNotesDb } from '@/storage/db';
 import { newId } from '@/storage/id';
-import type { DeviceType, NoteRecord, NoteStatus } from '@/storage/types';
+import type { DeviceType, NoteRecord, NoteStatus, TitleSource } from '@/storage/types';
 
 export interface CreateNoteInput {
   title: string;
@@ -117,4 +117,99 @@ export async function deleteNote(id: string): Promise<void> {
   }
 
   await tx.done;
+}
+
+/**
+ * K3: trimmed, lowercased, deduplicated, blanks dropped. First-seen order is
+ * preserved rather than sorted, so writing a note's tags back does not
+ * reshuffle them under the user's cursor.
+ */
+export function normalizeTags(input: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of input) {
+    const tag = raw.trim().toLowerCase();
+    if (tag === '' || seen.has(tag)) continue;
+    seen.add(tag);
+    out.push(tag);
+  }
+  return out;
+}
+
+/** Absent on pre-v4 rows, which reads as no tags. */
+export function tagsOf(note: NoteRecord): string[] {
+  return note.tags ?? [];
+}
+
+/** Absent on pre-v4 rows, which reads as the `Note <timestamp>` placeholder. */
+export function titleSourceOf(note: NoteRecord): TitleSource {
+  return note.titleSource ?? 'default';
+}
+
+export function setNoteTags(id: string, tags: readonly string[]): Promise<NoteRecord> {
+  return updateNote(id, { tags: normalizeTags(tags) });
+}
+
+/**
+ * A manual rename. Sets `titleSource: 'manual'`, which permanently opts this
+ * note out of auto-titling (K20, A34) - the sticky flag is the whole point, so
+ * this is the only path that writes a title by hand.
+ */
+// `async` deliberately, though nothing here awaits: a plain function that
+// throws synchronously while declaring `Promise<NoteRecord>` rejects its
+// *caller* rather than its promise, so `await expect(...).rejects` never
+// sees it and every caller needs a try/catch around the call itself as
+// well as around the await. `async` makes the throw a rejection.
+export async function renameNote(id: string, title: string): Promise<NoteRecord> {
+  const trimmed = title.trim();
+  // A blank title would leave the note unidentifiable in the list, with no way
+  // back except editing it again from a row that no longer names anything.
+  if (trimmed === '') throw new Error('A note title cannot be blank');
+  return updateNote(id, { title: trimmed, titleSource: 'manual' });
+}
+
+export interface NoteSummaryInput {
+  summary: string;
+  model: string;
+  promptVersion: string;
+  /** Written only when the title has not been set by hand (K18). */
+  title?: string;
+}
+
+/**
+ * K18: the summary always lands; the title lands only when the user has not
+ * renamed the note. Read-modify-write in one transaction via `updateNote`,
+ * after reading the existing row to decide about the title - two separate
+ * transactions would let a rename land in between and be overwritten.
+ */
+export async function setNoteSummary(id: string, input: NoteSummaryInput): Promise<NoteRecord> {
+  const existing = await getNote(id);
+  if (!existing) throw new Error(`Note not found: ${id}`);
+
+  const patch: Partial<Omit<NoteRecord, 'id'>> = {
+    summary: input.summary,
+    summaryModel: input.model,
+    summaryPromptVersion: input.promptVersion,
+  };
+
+  const title = input.title?.trim() ?? '';
+  // A blank generated title is a failed generation, not an instruction to
+  // clear the title.
+  if (title !== '' && titleSourceOf(existing) !== 'manual') {
+    patch.title = title;
+    patch.titleSource = 'auto';
+  }
+  return updateNote(id, patch);
+}
+
+/**
+ * A35: derived by scanning rather than stored. A stored vocabulary would be a
+ * cache to invalidate on every tag write, and the note count here is in the
+ * hundreds.
+ */
+export async function listTagVocabulary(): Promise<string[]> {
+  const notes = await listNotes();
+  const all = new Set<string>();
+  for (const note of notes) for (const tag of tagsOf(note)) all.add(tag);
+  return [...all].sort();
 }
