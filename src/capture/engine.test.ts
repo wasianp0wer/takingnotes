@@ -868,11 +868,18 @@ describe('resumeNote', () => {
       noteId: note.id, pageIndex: 0, devicePageNum: null, source: 'live',
       strokes: [{ points: [], endedAt: 7_000 }], capturedAt: 1_000,
     });
+    const finalized: string[] = [];
+    engine.subscribePageFinalized((id) => finalized.push(id));
 
     await engine.resumeNote(note.id);
     await engine.flush();
 
     expect((await getPage(open.id))?.finalizedAt).toBe(7_000);
+    // The resumed page is owed its transcription trigger just as much on this
+    // success path as on the failure path (round 1's fix): dropping this emit
+    // would leave the page correctly finalized in storage but silently never
+    // queued for transcription.
+    expect(finalized).toContain(open.id);
   });
 
   it('rejects an unknown note and releases noteOpen for the next pen point', async () => {
