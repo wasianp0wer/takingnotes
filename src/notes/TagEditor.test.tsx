@@ -87,10 +87,20 @@ async function type(el: HTMLInputElement, value: string): Promise<void> {
     el.dispatchEvent(new Event('input', { bubbles: true }));
   });
 }
-async function settle(): Promise<void> {
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
+/**
+ * Lets queued microtasks and timers run. Several rounds, not one: a tag write
+ * is an IndexedDB round trip and fake-indexeddb resolves on timers, so a
+ * single tick is marginal - enough when this file runs alone, not enough
+ * under full-suite contention, where it produced an intermittent failure in
+ * the two tests that await a write. Matches `NotesView.test.tsx`'s own
+ * `settle(rounds = 4)` for the same reason.
+ */
+async function settle(rounds = 4): Promise<void> {
+  for (let i = 0; i < rounds; i++) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
 }
 
 describe('TagEditor', () => {
