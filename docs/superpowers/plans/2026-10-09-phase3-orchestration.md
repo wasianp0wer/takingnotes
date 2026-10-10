@@ -64,6 +64,8 @@ Each orchestrator is dispatched with the brief below as its entire context, plus
 
 **Consumes from Wave 1:** `engine.resumeNote(noteId)`; `renameNote`, `setNoteSummary`, `titleSourceOf` from `@/storage/notes`; the `NoteToolbar` `title`/`banner` slots and the `NoteList` `rowActions` slot.
 
+⚑ **Disable the Resume button while its call is in flight.** Wave 1 made two concurrent resumes of the *same* note safe — they share one promise. Resuming note A and then note B before A's operation has run is a different matter: it opens a page in A and immediately finalizes it, leaving a stray empty page. That is the engine's long-standing queuing behaviour for any two overlapping openers, not something Wave 1 introduced, and the cheap fix lives in your UI rather than in the engine. Gate the button on the pending call, the way `PageTurnControls` gates "New page" with its `inFlight` ref.
+
 **Done when:** Resume works from the sidebar and the interrupted banner, on interrupted and completed notes alike; Start session and New note are both disabled during a session while End stays enabled; viewing a non-active note during a session shows the "writing still goes to «title»" banner (K16); a note that ends gets a generated title and summary unless renamed by hand; and a resumed note's second-sitting pages are gap-analysed against the second sitting's recording.
 
 ### S2 — Triage: score colours and a configurable horizon
