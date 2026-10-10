@@ -139,7 +139,7 @@ describe('noteReadyForNaming', () => {
 
 interface Deps {
   engine: { subscribePageFinalized: ReturnType<typeof vi.fn>; subscribeNoteEnded: ReturnType<typeof vi.fn> };
-  transcriptionQueue: { subscribe: ReturnType<typeof vi.fn> };
+  transcriptionQueue: { subscribe: ReturnType<typeof vi.fn>; idle: ReturnType<typeof vi.fn> };
   generator: FakeTextGenerator;
   queue: NamingQueue;
   /**
@@ -154,6 +154,14 @@ interface Deps {
   fireTranscriptChange: (pageId: string) => Promise<void>;
   /** Fires the engine's `subscribeNoteEnded` trigger (fix round 2, Important 1). */
   fireNoteEnded: (noteId: string) => Promise<void>;
+  /**
+   * Fix 2 (Important 2): toggles the fake transcription queue between busy
+   * and idle, mirroring the real `TranscriptionQueue.idle()`'s own contract
+   * - a call made while busy resolves only once `setTranscriptionBusy(false)`
+   * runs. Starts idle, matching every other test's "transcription isn't
+   * doing anything" default.
+   */
+  setTranscriptionBusy: (busy: boolean) => void;
 }
 
 function setup(): Deps {
@@ -178,6 +186,18 @@ function setup(): Deps {
       };
     }),
   };
+
+  let transcriptionBusy = false;
+  let transcriptionIdleWaiters: Array<() => void> = [];
+  function setTranscriptionBusy(busy: boolean): void {
+    transcriptionBusy = busy;
+    if (!busy) {
+      const waiters = transcriptionIdleWaiters;
+      transcriptionIdleWaiters = [];
+      for (const waiter of waiters) waiter();
+    }
+  }
+
   const transcriptionQueue = {
     subscribe: vi.fn((fn: (pageId: string) => Promise<void>) => {
       transcriptChangeHandlers.push(fn);
@@ -186,6 +206,12 @@ function setup(): Deps {
         if (i >= 0) transcriptChangeHandlers.splice(i, 1);
       };
     }),
+    idle: vi.fn(
+      () =>
+        transcriptionBusy
+          ? new Promise<void>((resolve) => transcriptionIdleWaiters.push(resolve))
+          : Promise.resolve(),
+    ),
   };
 
   const queue = createNamingQueue({
@@ -197,6 +223,7 @@ function setup(): Deps {
 
   return {
     engine,
+    setTranscriptionBusy,
     transcriptionQueue,
     generator,
     queue,
@@ -541,5 +568,79 @@ describe('createNamingQueue', () => {
     updated = await getNote(created.id);
     expect(updated?.title).toBe('Newton on motion');
     logged.mockRestore();
+  });
+
+  describe('gating on the transcription queue (fix round 2, Important 2)', () => {
+    it('does not start a naming job while the transcription queue is busy, and drains once it goes idle', async () => {
+      const created = await createNote({ title: 'Note A', deviceId: 'huion', pageBaseline: 0, status: 'complete' });
+      const page = await createPage({ noteId: created.id, pageIndex: 0, devicePageNum: 1, source: 'live', strokes: [] });
+      await setPageTranscript(page.id, {
+        markdown: 'Notes about Newton.',
+        model: MODEL,
+        promptVersion: 'gemma-v1',
+        status: 'done',
+        error: null,
+        updatedAt: 0,
+      });
+
+      const d = setup();
+      d.setTranscriptionBusy(true);
+      await d.queue.start();
+      await d.firePageFinalized(page.id);
+
+      // Several real microtask/timer turns - every chance the queue could
+      // wrongly take to run the job anyway while transcription is busy.
+      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(d.generator.calls).toEqual([]);
+      expect(d.transcriptionQueue.idle).toHaveBeenCalled();
+
+      d.setTranscriptionBusy(false);
+      await d.queue.idle();
+
+      expect(d.generator.calls).toHaveLength(1);
+      const updated = await getNote(created.id);
+      expect(updated?.title).toBe('Newton on motion');
+    });
+
+    it('is not permanently starved: notes queued while transcription is busy are all eventually named', async () => {
+      const noteA = await createNote({ title: 'Note A', deviceId: 'huion', pageBaseline: 0, status: 'complete' });
+      const pageA = await createPage({ noteId: noteA.id, pageIndex: 0, devicePageNum: 1, source: 'live', strokes: [] });
+      await setPageTranscript(pageA.id, {
+        markdown: 'A notes.',
+        model: MODEL,
+        promptVersion: 'gemma-v1',
+        status: 'done',
+        error: null,
+        updatedAt: 0,
+      });
+      const noteB = await createNote({ title: 'Note B', deviceId: 'huion', pageBaseline: 0, status: 'complete' });
+      const pageB = await createPage({ noteId: noteB.id, pageIndex: 0, devicePageNum: 1, source: 'live', strokes: [] });
+      await setPageTranscript(pageB.id, {
+        markdown: 'B notes.',
+        model: MODEL,
+        promptVersion: 'gemma-v1',
+        status: 'done',
+        error: null,
+        updatedAt: 0,
+      });
+
+      const d = setup();
+      d.setTranscriptionBusy(true);
+      await d.queue.start();
+      await d.firePageFinalized(pageA.id);
+      await d.firePageFinalized(pageB.id);
+
+      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(d.generator.calls).toEqual([]);
+
+      // Transcription goes idle once - not forever busy - and both notes
+      // that piled up behind the gate get their turn, not just the first.
+      d.setTranscriptionBusy(false);
+      await d.queue.idle();
+
+      expect(d.generator.calls).toHaveLength(2);
+      expect((await getNote(noteA.id))?.title).toBe('Newton on motion');
+      expect((await getNote(noteB.id))?.title).toBe('Newton on motion');
+    });
   });
 });

@@ -18,7 +18,7 @@ let queue: NamingQueue | null = null;
  */
 export function ensureNamingQueue(
   engine: Pick<CaptureEngine, 'subscribePageFinalized' | 'subscribeNoteEnded'>,
-  transcriptionQueue: Pick<TranscriptionQueue, 'subscribe'>,
+  transcriptionQueue: Pick<TranscriptionQueue, 'subscribe' | 'idle'>,
 ): NamingQueue {
   if (queue) return queue;
 

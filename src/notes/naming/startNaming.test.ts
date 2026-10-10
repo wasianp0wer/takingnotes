@@ -11,8 +11,10 @@ function fakeEngine() {
   };
 }
 
-function fakeTranscriptionQueue(): Pick<TranscriptionQueue, 'subscribe'> {
-  return { subscribe: vi.fn(() => () => {}) };
+function fakeTranscriptionQueue(): Pick<TranscriptionQueue, 'subscribe' | 'idle'> {
+  // Always idle: these tests exercise `ensureNamingQueue`'s own wiring, not
+  // Fix 2's gate (covered in `queue.test.ts`).
+  return { subscribe: vi.fn(() => () => {}), idle: vi.fn(() => Promise.resolve()) };
 }
 
 describe('ensureNamingQueue', () => {

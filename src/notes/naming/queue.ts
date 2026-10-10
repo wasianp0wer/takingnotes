@@ -10,7 +10,14 @@ import type { TranscriptionQueue } from '@/transcription/queue';
 
 export interface NamingQueueDeps {
   engine: Pick<CaptureEngine, 'subscribePageFinalized' | 'subscribeNoteEnded'>;
-  transcriptionQueue: Pick<TranscriptionQueue, 'subscribe'>;
+  /**
+   * `idle` is Fix 2's gate (fix round 2, Important 2): naming's `drain` waits
+   * on it before starting each job, so page transcription - the vision model
+   * call the owner is actively waiting on - never shares the one local
+   * model slot with a naming call. See `drain`'s own comment for why this
+   * cannot deadlock or starve naming forever.
+   */
+  transcriptionQueue: Pick<TranscriptionQueue, 'subscribe' | 'idle'>;
   getSettings(): Promise<{ baseUrl: string; model: string }>;
   createGenerator(baseUrl: string): TextGenerator;
 }
@@ -151,11 +158,42 @@ export function createNamingQueue(deps: NamingQueueDeps): NamingQueue {
     }
   }
 
+  /**
+   * Fix 2 (Important): both this queue and the transcription queue issue
+   * at most one local Ollama call at a time *within* themselves, but with
+   * no shared token between them two concurrent 180 s calls became the
+   * normal case - worst on this branch's first launch, where naming's own
+   * startup scan enqueues the owner's whole back catalogue right as
+   * transcription resumes whatever page backlog survived a reload. Gating
+   * on the transcription queue's own `idle()` (it already exposes this)
+   * keeps page transcription - what the owner is actively watching -
+   * ahead of naming, which only ever fills the gaps.
+   *
+   * Cannot deadlock: `idle()` only resolves from the transcription queue's
+   * own internal `running`/`queued` bookkeeping, which nothing in this
+   * function ever blocks or holds a lock on - this loop takes no lock
+   * transcription could be waiting on, and the transcription queue's drain
+   * loop runs entirely independently of this one; there is no cycle for
+   * either side to wait on.
+   *
+   * Cannot stall naming forever: `idle()` resolves the moment transcription
+   * has nothing left queued or running - including "it never started
+   * anything at all" - so there is no reachable state where transcription
+   * holds this gate shut while genuinely idle. `stopped` is re-checked
+   * after the await too, so `stop()` called while this is waiting still
+   * breaks the loop instead of running one more job.
+   */
   async function drain(): Promise<void> {
     if (draining) return;
     draining = true;
     try {
       while (!stopped && queued.length > 0) {
+        await deps.transcriptionQueue.idle();
+        if (stopped) break;
+        // The queue may have been emptied (or `stop()`ped) while the above
+        // was pending - re-read rather than assume it's still non-empty.
+        if (queued.length === 0) break;
+
         const noteId = queued.shift();
         if (noteId === undefined) break;
         running = noteId;
