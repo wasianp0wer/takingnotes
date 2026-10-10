@@ -740,6 +740,16 @@ recovery looks for. The id is `<recordingId>:<seq>` (not random), so a retried
 write of the same chunk overwrites itself instead of duplicating audio into
 the stitched file.
 
+`stitchRecordingChunks` reads `by-recording` (keyed on `recordingId` alone)
+and sorts the result by `seq` in memory, since the index cannot order by
+`seq` for it. This is a **deliberate accepted cost**, not an oversight: at the
+default 1-second timeslice, a 90-minute lecture is on the order of 5,400 chunk
+rows, which sorts in memory without being noticeable, and the sort is correct
+and mutation-tested. A compound `['recordingId', 'seq']` index was considered
+for this wave and rejected - an unused index is cruft, and the v1–v4 upgrade
+blocks are frozen besides. A later phase can add one in a v5 block if
+streaming audio ever makes the in-memory sort a real cost.
+
 ```ts
 export interface RecordingChunkRecord {
   id: string;
@@ -833,8 +843,13 @@ must not invent its own writer, since several of these do more than a plain
 - `pageEndedAt(page: PageRecord): number` - when a page last received
   writing: the latest stroke `endedAt`, falling back to `capturedAt` for a
   page whose strokes carry no timestamps (ROM, legacy, or typed). Shared by
-  startup recovery and `resumeNote` (§8.3): both must finalize an interrupted
-  page at the time writing stopped, not at the time the app noticed.
+  startup recovery and `resumeNote` (§8.3): both finalize an interrupted
+  page at the time writing stopped, not at the time the app noticed - true of
+  both call sites as of this wave; `engine.recover()` previously finalized
+  with `now()`, which (now that incremental audio survives a crash, Wave 1
+  task 4) stretched that page's gap-analysis speech window
+  (`speechWindowForPage`, `src/gaps/window.ts`) across however long the note
+  sat interrupted before the next launch.
 
 `finalizePage(id, at)` and `isPageFinalized(page)` are unchanged from Phase 1
 (§2.4) and are what `resumeNote` calls to close a page it finds open.
@@ -857,6 +872,45 @@ chunks and unfinished-recording lookup:
   K5: a recording row is created at record-start, before any chunk exists, so
   recovery can find it this way and already knows its session/note link,
   title and start time.
+- `listFinishedRecordings(): Promise<RecordingRecord[]>` (in
+  `recordings.ts`) - the exact complement: every recording with
+  `endedAt !== null`, newest first. **`listRecordings()`'s meaning changed
+  under K5**: a `RecordingRecord` now exists from the moment recording
+  starts, so `listRecordings()` includes rows that are not finished work.
+  Anything that treats a row as finished - transcription (the resume queue),
+  playback lists (`RecordingsView`), gap-analysis recording selection
+  (`recordingForNote`) - must call `listFinishedRecordings()`, not
+  `listRecordings()`, or it will try to use a recording that is still being
+  written. Startup ordering is load-bearing here: recovery (K7, owned by the
+  audio runtime) must stitch and patch `endedAt` on every unfinished
+  recording *before* the transcription queue's own startup resume runs, or
+  the queue will see `endedAt === null` rows and skip them as still-open
+  rather than as recordings recovery already finished.
+- `finalizeRecording(id, audio, patch): Promise<RecordingRecord>` (in
+  `recordings.ts`) - K6's `stop()` in one atomic write: puts the stitched
+  `audio` into `recordingAudio`, patches the row (`endedAt`, `durationMs`,
+  `byteLength` derived from the blob, `mimeType` when given), and deletes
+  that recording's chunk rows, all inside one transaction over
+  `['recordings', 'recordingAudio', 'recordingChunks']`. **This is the one
+  correct way to close a recording** - doing the three writes as separate
+  transactions reopens the exact gap this function exists to close (next
+  bullet), so S3 must call this rather than composing
+  `stitchRecordingChunks` / `updateRecording` / `deleteRecordingChunks`
+  itself.
+- **Invariant: a recording with `endedAt === null` and no chunks may only be
+  deleted when its `recordingAudio` row is absent or zero-length.** The
+  alternative - a row with no chunks, `endedAt === null`, and a non-trivial
+  `recordingAudio` row - means its finalisation was interrupted between the
+  audio write and the `endedAt` patch; that recording's audio is complete and
+  durable, and deleting the row on the strength of "no chunks, not ended"
+  would discard a finished lecture. `finalizeRecording`'s single transaction
+  is what makes this invariant holdable in practice: there is no window
+  where the audio is written but `endedAt` isn't, because both are the same
+  transaction. Recovery (K7) must itself patch `endedAt` after stitching -
+  if it stitches into `recordingAudio` and deletes the chunks but leaves
+  `endedAt: null`, the *next* launch finds zero chunks and an unfinished row
+  and, by K7's own "no chunks at all is deleted" rule, deletes a recording
+  recovery just finished saving.
 - `deleteRecording(id)` was extended to also delete any chunks left over for
   that recording (a recording deleted while still open would otherwise leave
   orphaned chunk rows, since nothing else scans for them).
@@ -922,8 +976,15 @@ Implemented in `src/capture/engine.ts`. Behavioral rules Wave 2 relies on:
   call for the *same* `noteId`; a call for a different note falls through to
   `closeNote()` against whatever note/page was open before the first resume's
   op has had a chance to publish its own state. This is why the UI must
-  disable the Resume control while a call is in flight - S1's own
-  responsibility, not the engine's.
+  disable **Resume and Start session** while a call is in flight - S1's own
+  responsibility, not the engine's. Start session is not an obviously
+  related control, but it shares the same gap: during the window before a
+  resume's op publishes state, `sessionStartedAtOf(state)` is still `null`
+  (the resume hasn't set it yet), so the session lock reads as off and Start
+  session is clickable; clicking it there falls through to `closeNote()`
+  against the half-opened resume for exactly the same reason and produces
+  the same stray-empty-page outcome this bullet already documents for a
+  second Resume click.
 
 ### 8.4 Wave 2 mount points
 
@@ -991,3 +1052,10 @@ the whole toolbar row.
 note" is disabled (K15 - a session locks you into its note) while "End note"
 deliberately stays enabled, since ending must never be reachable only by
 reload.
+
+One line for S5: `NoteList`'s "No notes yet - write on the pad to start one"
+empty state is not S5's to change. A tag filter that matches nothing still
+renders an empty list, which would otherwise read to the user as "you have no
+notes" rather than "no notes match this filter" - that distinction belongs in
+the `filter` slot S5 already owns (e.g. "3 notes hidden by this filter"), not
+in a rewrite of `NoteList`'s own empty-state copy.
