@@ -4,8 +4,23 @@ export interface NamingResult {
   summary: string;
 }
 
+/**
+ * A title longer than this is not a title (fix round 1, Important 2): it
+ * would break the sidebar row and the toolbar, which both assume a short
+ * line. Same reasoning and same shape as `gaps/validate.ts`'s `GAP_TEXT_MAX`.
+ */
+export const NAMING_TITLE_MAX = 200;
+/**
+ * A summary longer than this is not "one to two sentences" (K18); it is also
+ * what Wave 3's smart search screens against, so an unbounded one would be
+ * the thing being searched rather than a short pointer to it.
+ */
+export const NAMING_SUMMARY_MAX = 1000;
+
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
+
+const cap = (text: string, max: number): string => text.trim().slice(0, max);
 
 /**
  * The `validate` for `generateJson` (docs/architecture.md §6.4): the model's
@@ -19,6 +34,10 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
  * failed generation" is `setNoteSummary`'s call to make, not this
  * validator's); a blank `summary` is not, since nothing downstream treats an
  * empty summary as meaningful and `setNoteSummary` always writes it verbatim.
+ * Both are length-capped (`NAMING_TITLE_MAX`/`NAMING_SUMMARY_MAX`) rather
+ * than rejected outright - a rambling answer is still usable once trimmed,
+ * and a title or summary this long is otherwise unbounded input landing
+ * directly in the sidebar row and in what Wave 3's smart search screens.
  */
 export function validateNamingResult(value: unknown): NamingResult {
   if (!isRecord(value)) {
@@ -31,5 +50,5 @@ export function validateNamingResult(value: unknown): NamingResult {
   if (typeof summary !== 'string' || summary.trim() === '') {
     throw new Error('The model\'s "summary" was missing or blank.');
   }
-  return { title: title.trim(), summary: summary.trim() };
+  return { title: cap(title, NAMING_TITLE_MAX), summary: cap(summary, NAMING_SUMMARY_MAX) };
 }
