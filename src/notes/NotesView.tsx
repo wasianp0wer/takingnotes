@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 
 import { useCaptureEngine, useCaptureState } from '@/capture/CaptureContext';
 import { sessionStartedAtOf } from '@/capture/engine';
@@ -11,6 +11,7 @@ import { ensureNamingQueue } from '@/notes/naming/startNaming';
 import { NoteList } from '@/notes/NoteList';
 import { NoteTitle } from '@/notes/NoteTitle';
 import { NoteToolbar } from '@/notes/NoteToolbar';
+import { getResumeLock } from '@/notes/resumeLock';
 import { ResumeButton } from '@/notes/ResumeButton';
 import { TranscriptPanel } from '@/notes/TranscriptPanel';
 import { useNotesData } from '@/notes/useNotesData';
@@ -30,6 +31,8 @@ export interface NotesViewProps {
 export function NotesView(props?: NotesViewProps) {
   const engine = useCaptureEngine();
   const state = useCaptureState();
+  const resumeLock = getResumeLock();
+  const resumeLockState = useSyncExternalStore(resumeLock.subscribe, resumeLock.getState);
   // A module singleton (F1-A7): built once, never rebuilt on re-render and
   // never stopped when this view unmounts.
   const [queue] = useState<TranscriptionQueue>(
@@ -146,9 +149,14 @@ export function NotesView(props?: NotesViewProps) {
               />
             ) : undefined
           }
-          sessionLocked={sessionLocked}
+          // Fix round 1, Important 1: §8.3's hazard applies to New note too
+          // - sessionStartedAtOf(state) reads null during a pending resume
+          // just as much as during a pending startSession(), so New note
+          // must be disabled for that window too, not only while a session
+          // it already opened is locked.
+          sessionLocked={sessionLocked || resumeLockState.pending}
           hasActiveNote={state.activeNoteId !== null}
-          onNewNote={() => void engine.startNote()}
+          onNewNote={() => void resumeLock.run(() => engine.startNote())}
           onEndNote={() => void engine.endNote()}
           pageCount={pages.length}
           viewedIndex={viewedIndex}

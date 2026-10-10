@@ -736,6 +736,42 @@ describe('SessionPanel', () => {
     expect(button('Resume').disabled).toBe(false);
   });
 
+  it('disables every Resume button while Start session itself is in flight (mirror of the hazard above, fix round 1, Important 1)', async () => {
+    const session = await createSession({ title: 'Interrupted seminar', startedAt: 5_000 });
+    await createNote({
+      title: 'Interrupted seminar',
+      deviceId: 'huion',
+      pageBaseline: 0,
+      status: 'interrupted',
+      startedAt: 5_000,
+      sessionId: session.id,
+    });
+
+    let release: (() => void) | null = null;
+    const held = new Promise<{ sessionId: string; noteId: string }>((resolve) => {
+      release = () => resolve({ sessionId: 's', noteId: 'n' });
+    });
+    const wrapped = { ...engine, startSession: () => held } as unknown as LiveCaptureEngine;
+    render({ engine: wrapped });
+    await settle();
+
+    expect(button('Resume').disabled).toBe(false);
+
+    await act(async () => {
+      button('Start session').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    // sessionStartedAtOf(state) still reads null here - startSession's op
+    // has not published state yet - the exact §8.3 window, with the clicks
+    // swapped from the test above. Without holding the lock around this
+    // call too, Resume would still read enabled and could fall through to
+    // closeNote() against the half-opened startSession.
+    expect(button('Resume').disabled).toBe(true);
+
+    (release as (() => void) | null)?.();
+    await settle();
+  });
+
   it('says nothing when the newest note finished cleanly', async () => {
     await createNote({
       title: 'Finished',

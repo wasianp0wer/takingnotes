@@ -253,6 +253,32 @@ describe('NotesView', () => {
     expect(container.textContent).toContain('Note ');
   });
 
+  it("holds the shared resume lock around New note's own startNote() call, disabling Resume elsewhere meanwhile (fix round 1, Important 1, mirror)", async () => {
+    await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    let release: (() => void) | null = null;
+    const held = new Promise<string>((resolve) => {
+      release = () => resolve('note-id');
+    });
+    const wrapped = { ...engine, startNote: () => held } as unknown as LiveCaptureEngine;
+    await act(async () => {
+      root.render(
+        <CaptureProvider engine={wrapped}>
+          <NotesView queue={queue} namingQueue={createFakeNamingQueue()} />
+        </CaptureProvider>,
+      );
+    });
+    await settle();
+
+    await click(buttonByText('New note'));
+
+    const resumeButton = resumeButtonForNote('Last week');
+    expect(resumeButton).toBeDefined();
+    expect(resumeButton!.disabled).toBe(true);
+
+    (release as (() => void) | null)?.();
+    await settle();
+  });
+
   it('shows a done transcript, navigates pages and retries a failed one', async () => {
     const note = await seedNote({ title: 'Lecture 3' });
     const page1 = await seedPage(note.id, 0);
@@ -395,6 +421,39 @@ describe('NotesView', () => {
 
     // Disabled, so the click was a no-op: the session's own note is still active.
     expect(engine.getState().activeNoteId).toBe(activeId);
+  });
+
+  it('disables New note while a resume elsewhere is pending (fix round 1, Important 1)', async () => {
+    await seedNote({ title: 'Last week', status: 'complete', startedAt: 1_000 });
+    let release: (() => void) | null = null;
+    const held = new Promise<never>((_resolve, reject) => {
+      release = () => reject(new Error('boom'));
+    });
+    const wrapped = { ...engine, resumeNote: () => held } as unknown as LiveCaptureEngine;
+    await act(async () => {
+      root.render(
+        <CaptureProvider engine={wrapped}>
+          <NotesView queue={queue} namingQueue={createFakeNamingQueue()} />
+        </CaptureProvider>,
+      );
+    });
+    await settle();
+
+    const resumeButton = resumeButtonForNote('Last week');
+    expect(resumeButton).toBeDefined();
+    await click(resumeButton!);
+
+    // sessionStartedAtOf(state) still reads null here (the wrapped
+    // resumeNote never resolved, so no op has published state) - exactly
+    // the architecture.md §8.3 window. Without the fix, New note would
+    // still read enabled and could fall through to closeNote() against
+    // the half-opened resume.
+    expect(buttonByText('New note').disabled).toBe(true);
+
+    (release as (() => void) | null)?.();
+    await settle();
+
+    expect(buttonByText('New note').disabled).toBe(false);
   });
 
   it('does not offer Resume on the active note itself', async () => {

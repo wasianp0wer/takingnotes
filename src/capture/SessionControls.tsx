@@ -140,7 +140,10 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
 
     let ids: { sessionId: string; noteId: string };
     try {
-      ids = await engine.startSession();
+      // Fix round 1, Important 1 (mirror): held only around this call, not
+      // the pad/audio sequence that follows - the §8.3 hazard is specific
+      // to the window before this op publishes state, same as a resume's.
+      ids = await resumeLock.run(() => engine.startSession());
     } catch (error) {
       console.error('[session] starting the session failed', error);
       if (mounted.current) {
@@ -216,7 +219,7 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
     }
 
     if (mounted.current) setPhase('idle');
-  }, [controller, engine, recorder]);
+  }, [controller, engine, recorder, resumeLock]);
 
   const end = useCallback(async () => {
     setPhase('ending');
