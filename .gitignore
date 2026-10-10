@@ -10,6 +10,11 @@ test-results/
 # twice - lint reported exactly double until this was added.
 .claude/
 
+# Subagent-driven-development scratch: per-plan ledgers, task briefs, reports
+# and review diffs. Working notes for a run in progress, not project history -
+# git log is the record once a plan is done.
+.superpowers/
+
 # APK files
 *.apk
 
