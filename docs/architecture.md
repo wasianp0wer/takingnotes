@@ -1140,3 +1140,147 @@ this fix round surfaced: a summary-less note (legacy, failed transcription, or
 - before fix round 2's Important 1 - a note that ended on a typed page) is
 screened by smart search on its title plus page text instead of being
 invisible to it.
+
+### 8.6 Chunked, resumable audio transcription
+
+Design: `docs/superpowers/specs/2026-10-18-chunked-resumable-transcription-design.md`.
+Plan: `docs/superpowers/plans/2026-10-18-chunked-resumable-transcription.md`.
+
+**Why.** A 2 hour 30 minute lecture never finished transcribing and nothing of
+the work survived. The diagnosis rules out the obvious fixes: the decode-pass
+counter kept climbing the whole time, so the decode completed, the model
+loaded, the pipeline ran, and the stall watchdog correctly never fired. The job
+was alive. It was simply going to take longer than anyone would wait, with no
+partial output, no knowable end, and no way to stop and pick it up again. This
+is therefore **not a performance feature** - Whisper inference over 2.5 hours
+of audio still takes hours. What changed is that those hours became
+survivable.
+
+**The window loop.** `runJob` no longer makes one `transcribe()` call per
+recording. `planWindows` (`src/audio/windows.ts`) slices the decoded PCM from
+the cursor to the end in `DEFAULT_WINDOW_MS` (5 min) windows, each reading
+`WINDOW_OVERLAP_MS` (5 s, matching `WHISPER_OPTIONS.stride_length_s`) of
+lead-in context before its own boundary. Each window's segments are offset onto
+the recording's clock by `TranscribeOptions.offsetMs`, which `whisperClient`
+passes to `chunksToSegments` - the queue never sees raw Whisper chunks, so the
+offset is applied one layer below it. `mergeWindowSegments` drops the lead-in's
+duplicate words by the one rule that matters: a segment starting before the
+boundary this window owns was already transcribed.
+
+**The cursor.** `AudioTranscriptRecord.completedMs` (absent reads as 0). After
+every window the queue writes the accumulated text, segments and cursor, so a
+`running` row now carries real content - the central data-model change here.
+Every exit carries it too: `failed` keeps it (so a stall no longer condemns a
+lecture to repeat the same work on every Retry and stall in the same place),
+and so does `paused`.
+
+**What discards the cursor: only a model change.** Applied in both
+`carryForward` (at enqueue) and `runJob` (at job start), because the setting can
+change before a recording is queued *and* again while it sits in a serial
+backlog that can be hours long. Appending model B's words to model A's under a
+single model id would misreport what the transcript is. **This is also the only
+way to force a clean re-run** - see Known limitations.
+
+**The PCM cache** (`src/storage/pcmCache.ts`, store `pcmCache`, db v5). Int16 at
+16 kHz, ~32 KB/s, keyed by recording id. Written once after the first decode and
+read on every resume, so a resumed job never re-decodes - decoding a lecture
+costs minutes and peaks above a gigabyte, since `decodeAudioData` allocates at
+the source rate before the 16 kHz render. Transient in the same way
+`recordingChunks` is, and deleted by `deleteRecording` alongside them.
+
+⚑ **Dropped on `done` only, not on `failed`** - deliberately against the
+design doc's own wording. A failed job keeps its cursor precisely so Retry
+resumes; making that retry re-decode first would give back most of what the
+cursor buys. A cache row ignored because it is shorter than the cursor already
+claims is re-decoded rather than used: a short row would silently truncate the
+lecture, since every window past its end would simply not exist and the job
+would write `done`.
+
+**`AudioTranscriptStatus`** is `TranscriptStatus | 'paused'`, declared
+separately. Widening the shared `TranscriptStatus` would force
+`src/transcription/queue.ts`, `src/notes/TranscriptPanel.tsx` and
+`src/notes/naming/queue.ts` to handle a state that cannot occur for a page.
+
+**Pause replaces cancel.** `queue.pause(id)` aborts the controller (terminating
+the Whisper worker, as cancel did) and writes `paused` with everything finished
+so far. It is immediate rather than deferred to the next boundary, so it costs
+the window in flight; a stop button that did nothing visible for five minutes
+would be worse. `resume()` skips `paused`, which is the property the old
+terminal cancel existed for, now served without discarding the partial.
+`CANCELLED_MESSAGE` is gone. Discarding a transcription outright is deleting
+the recording.
+
+**Two priority classes and window-boundary preemption.**
+`enqueue(id, priority?)` defaults to `'foreground'` - a just-finished
+recording, one startup recovery rescued, or a button press. Only `resume()`
+passes `'backlog'`. At each window boundary a backlog job checks whether
+anything foreground is waiting and, if so, steps aside; a cursor makes that
+free, which is why the order can be dynamic rather than a fixed policy. A
+yielded job returns to the **front of its own class** and stays `running` -
+no fourth state - so it is still in `queuedIds` (keeping `RecordingDetail`'s
+`stuck` heuristic from flagging it) and a tab closed mid-yield leaves exactly
+the row `resume()` already knows how to pick up.
+
+⚑ **Transcription does not hold for capture.** An earlier draft paused the
+queue while the recorder ran; at 2.5 hours that bought 2.5 hours of zero
+backlog progress, which is the regression this work exists to undo. The owner
+chose never to hold. Chunks persist every second, so contention costs at most
+a second of audio and startup recovery already handles that.
+
+**The lease.** `leaseOwner` + `leaseAt` on the transcript row, refreshed with
+every window write and released on every terminal write (`done`, `failed`,
+`paused`); a yielded job keeps its lease, since the same queue is coming back.
+A lease younger than `LEASE_STALE_MS` (= the stall timeout: a job that has not
+written in that long is dead by the watchdog's own definition) makes the
+recording untouchable by another queue, in `enqueue` as well as at job start -
+`carryForward` preserves the lease fields precisely because the `pending` write
+runs first and would otherwise erase the guard it depends on. Without this,
+two tabs' interleaved window writes would ratchet the cursor backwards and
+splice two runs into one transcript. The app is headed for Electron, where a
+second tab stops being possible; this is cheap safety until then.
+
+**Progress.** `TranscriptionQueueState` gains `completedMs` and `durationMs`,
+both null when idle. `RecordingDetail` shows windows finished against the
+recording's length - the first honest proportion this queue has had. The
+`passes` count stays as the within-window sign of life and is still
+deliberately **not** presented as a percentage: the pipeline decides how many
+decode passes the window in flight needs as it goes, so there is no total for
+it to be a fraction of.
+
+**Consumers of a partial transcript.**
+
+- **Search: yes, with a caveat in both modes.** `corpus.ts`'s
+  `hasSearchableTranscript` accepts `done`, `running` and `paused` with
+  non-blank text (`failed` stays out - its text is a stale attempt's leftovers).
+  ⚑ `find.ts` reads `transcript.segments` with **no status gate at all**, so it
+  began returning partial hits the moment `running` rows carried real segments,
+  with no code change - which is why the caveat is rendered once for the whole
+  view rather than only inside the smart block. `SearchCorpus.partialTranscriptCount`
+  counts finished recordings whose transcript is absent, `running` or `paused`.
+- **Gap analysis: no.** `gaps/eligibility.ts` already requires `done`, so
+  partials are excluded with no change. This matters: a page from the
+  untranscribed tail would be compared against silence and reported as a page
+  that missed everything.
+- **Auto-naming: no change.** It waits for `done` or `failed`, for the reason
+  it already did - titling a lecture from its first 40% is how a note gets a
+  confidently wrong name.
+
+**Known limitations.**
+
+- **No "start over" control.** A clean re-run is reachable only by changing the
+  model. If a partial is bad and the model is right, the only way out is
+  deleting the recording.
+- **A recording that fails and is never retried holds its cached decode** until
+  it is deleted (~288 MB for a 2.5-hour lecture). The same applies to several
+  half-transcribed lectures at once. Accepted.
+- **Background tab throttling is unverified.** The lost lecture was
+  transcribing while its owner worked in other tabs; a background tab may have
+  been deprioritised, particularly on WebGPU. Not addressed and not measured.
+- **Chunked *decode* was considered and dropped.** It would cut the decode peak
+  from ~1.7 GB to tens of MB, and the pieces exist (chunk boundaries are known
+  at `finalizeRecording` time, and an EBML cluster walker already lives in
+  `incrementalRecovery.decode.test.ts`). Dropped because the decode
+  demonstrably succeeded at 2.5 hours, and because it depends on a browser
+  accepting a synthetic WebM fragment - the risk §8.2 records as unproven. The
+  PCM cache removes the only recurring cost it would have avoided. If a longer
+  recording later fails in the decode itself, this is the named next step.
