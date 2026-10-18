@@ -113,6 +113,7 @@ describe('openNotesDb', () => {
       'notes',
       'pageRenders',
       'pages',
+      'pcmCache',
       'recordingAudio',
       'recordingChunks',
       'recordings',
@@ -191,15 +192,21 @@ describe('openNotesDb', () => {
     expect([...db.transaction('recordingChunks').store.indexNames]).toEqual(['by-recording']);
   });
 
-  it('upgrades a v3 database to v4 without losing its rows', async () => {
+  it('creates the v5 pcmCache store', async () => {
+    const db = await openNotesDb();
+    expect(db.objectStoreNames).toContain('pcmCache');
+  });
+
+  it('upgrades a v3 database to the current version without losing its rows', async () => {
     await createV3Database();
 
     const db = await openNotesDb();
-    expect(db.version).toBe(4);
+    expect(db.version).toBe(DB_VERSION);
     expect(await db.get('notes', 'note-3')).toMatchObject({ title: 'Phase 2' });
     expect(await db.get('pages', 'page-3')).toMatchObject({ noteId: 'note-3' });
     expect(await db.get('gaps', 'gap-3')).toMatchObject({ pageId: 'page-3' });
     expect(db.objectStoreNames).toContain('recordingChunks');
+    expect(db.objectStoreNames).toContain('pcmCache');
     // The v2 indexes survive the version change untouched.
     expect([...db.transaction('notes').store.indexNames].sort()).toEqual([
       'by-session',

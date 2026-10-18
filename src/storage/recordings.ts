@@ -276,10 +276,16 @@ export async function finalizeRecording(
   return merged;
 }
 
-/** Deletes the record, its bytes and any chunks left over, in one transaction. */
+/**
+ * Deletes the record, its bytes, any chunks left over and any cached decode,
+ * in one transaction.
+ */
 export async function deleteRecording(id: string): Promise<void> {
   const db = await openNotesDb();
-  const tx = db.transaction(['recordings', 'recordingAudio', 'recordingChunks'], 'readwrite');
+  const tx = db.transaction(
+    ['recordings', 'recordingAudio', 'recordingChunks', 'pcmCache'],
+    'readwrite',
+  );
   await tx.objectStore('recordings').delete(id);
   await tx.objectStore('recordingAudio').delete(id);
   // A recording deleted while still open would otherwise leave its chunks
@@ -287,5 +293,9 @@ export async function deleteRecording(id: string): Promise<void> {
   const chunkStore = tx.objectStore('recordingChunks');
   const keys = await chunkStore.index('by-recording').getAllKeys(IDBKeyRange.only(id));
   for (const key of keys) await chunkStore.delete(key);
+  // Same reasoning for a recording deleted mid-transcription: the cached
+  // decode is the largest row this app writes, and nothing else would ever
+  // come looking for it once its recording is gone.
+  await tx.objectStore('pcmCache').delete(id);
   await tx.done;
 }

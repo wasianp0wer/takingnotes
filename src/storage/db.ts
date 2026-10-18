@@ -6,6 +6,7 @@ import type {
   NoteRecord,
   PageRecord,
   PageRenderRecord,
+  PcmCacheRecord,
   RecordingAudioRecord,
   RecordingChunkRecord,
   RecordingRecord,
@@ -15,7 +16,7 @@ import type {
 } from '@/storage/types';
 
 export const DB_NAME = 'takingnotes';
-export const DB_VERSION = 4;
+export const DB_VERSION = 5;
 
 export interface NotesDb extends DBSchema {
   notes: {
@@ -75,6 +76,15 @@ export interface NotesDb extends DBSchema {
     key: string;
     value: RecordingChunkRecord;
     indexes: { 'by-recording': string };
+  };
+  /**
+   * In-line keys on `recordingId`. Transient decoded audio for a recording
+   * whose transcription is unfinished; see `PcmCacheRecord`. No index: every
+   * read is by primary key.
+   */
+  pcmCache: {
+    key: string;
+    value: PcmCacheRecord;
   };
 }
 
@@ -139,6 +149,15 @@ export function openNotesDb(): Promise<IDBPDatabase<NotesDb>> {
           chunks.createIndex('by-recording', 'recordingId');
           // No data migration: every v4 field is optional with a documented
           // absent-reading (K1), so existing rows are already valid v4 rows.
+        }
+        if (oldVersion < 5) {
+          // Chunked resumable transcription: the decoded-audio cache that
+          // keeps a resumed job from re-decoding. In-line keys on
+          // `recordingId`, no index - every read is by primary key.
+          db.createObjectStore('pcmCache', { keyPath: 'recordingId' });
+          // No data migration: `completedMs`, `leaseOwner` and `leaseAt` are
+          // all optional on `AudioTranscriptRecord` with documented
+          // absent-readings, so existing rows are already valid v5 rows.
         }
       },
       // Without these, a version bump with a second tab open hangs forever with

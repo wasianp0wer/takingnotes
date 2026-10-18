@@ -329,3 +329,26 @@ export interface RecordingChunkRecord {
   /** The `MediaRecorder` MIME type, carried so stitching needs no second read. */
   type: string;
 }
+
+/**
+ * A recording's decoded audio, held only while its transcription is unfinished
+ * (the chunked transcription design, architecture.md §8.6). Transient in
+ * exactly the way `RecordingChunkRecord` is: written once after the first
+ * decode and deleted when the transcript reaches a terminal status, so a row
+ * here means a transcription that is in progress, paused, or was interrupted.
+ *
+ * It exists so a resumed job never re-decodes. Decoding a lecture-length
+ * recording costs minutes and peaks above a gigabyte (`decodeAudioData`
+ * allocates at the source rate before the 16 kHz render), and a job that
+ * resumes on every app launch would pay that every time.
+ *
+ * Int16 rather than Float32: 32 KB/s instead of 64, at a quantization error
+ * far below what Whisper can hear.
+ */
+export interface PcmCacheRecord {
+  recordingId: string;
+  /** Always `TARGET_SAMPLE_RATE`; stored so a future rate change is detectable rather than silent. */
+  sampleRate: number;
+  /** Int16 samples. */
+  samples: ArrayBuffer;
+}
