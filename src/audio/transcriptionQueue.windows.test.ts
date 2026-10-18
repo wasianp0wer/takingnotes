@@ -478,3 +478,143 @@ describe('a model change', () => {
     expect(transcribe.mock.calls.map(([, opts]) => opts.offsetMs)).toEqual([100, 200]);
   });
 });
+
+describe('priority and window-boundary preemption', () => {
+  it('a foreground enqueue preempts a running backlog job at the next window boundary', async () => {
+    const backlog = await makeRecording();
+    const fresh = await makeRecording();
+    const order: string[] = [];
+    let enqueuedFresh = false;
+
+    const { queue } = makeQueue({
+      transcribe: async (pcm, opts) => {
+        const active = queue.getState().activeId;
+        if (active !== null && order.at(-1) !== active) order.push(active);
+        // Part way through the backlog job, the owner finishes a recording.
+        if (active === backlog && !enqueuedFresh) {
+          enqueuedFresh = true;
+          await queue.enqueue(fresh);
+        }
+        return perWindow(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(backlog, 'backlog');
+    await queue.whenIdle();
+
+    expect(order).toEqual([backlog, fresh, backlog]);
+  });
+
+  it('a yielded job keeps status running and stays queued', async () => {
+    const backlog = await makeRecording();
+    const fresh = await makeRecording();
+    let enqueuedFresh = false;
+    let queuedWhileYielded: readonly string[] = [];
+
+    const { queue } = makeQueue({
+      transcribe: async (pcm, opts) => {
+        const active = queue.getState().activeId;
+        if (active === backlog && !enqueuedFresh) {
+          enqueuedFresh = true;
+          await queue.enqueue(fresh);
+        }
+        if (active === fresh) queuedWhileYielded = queue.getState().queuedIds;
+        return perWindow(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(backlog, 'backlog');
+    await queue.whenIdle();
+
+    // While the fresh job runs, the yielded one is still queued - which is
+    // what keeps RecordingDetail's "stuck" heuristic from flagging it.
+    expect(queuedWhileYielded).toContain(backlog);
+    const yielded = writesFor(backlog).filter((r) => r.status === 'running');
+    expect(yielded.length).toBeGreaterThan(0);
+  });
+
+  it('a yielded job returns to the front of its own class', async () => {
+    const first = await makeRecording();
+    const second = await makeRecording();
+    const fresh = await makeRecording();
+    const order: string[] = [];
+    let enqueuedFresh = false;
+
+    const { queue } = makeQueue({
+      transcribe: async (pcm, opts) => {
+        const active = queue.getState().activeId;
+        if (active !== null && order.at(-1) !== active) order.push(active);
+        if (active === first && !enqueuedFresh) {
+          enqueuedFresh = true;
+          await queue.enqueue(fresh);
+        }
+        return perWindow(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(first, 'backlog');
+    await queue.enqueue(second, 'backlog');
+    await queue.whenIdle();
+
+    expect(order).toEqual([first, fresh, first, second]);
+  });
+
+  it('a foreground job is not preempted by another foreground job', async () => {
+    const running = await makeRecording();
+    const alsoFresh = await makeRecording();
+    const order: string[] = [];
+    let enqueued = false;
+
+    const { queue } = makeQueue({
+      transcribe: async (pcm, opts) => {
+        const active = queue.getState().activeId;
+        if (active !== null && order.at(-1) !== active) order.push(active);
+        if (active === running && !enqueued) {
+          enqueued = true;
+          await queue.enqueue(alsoFresh);
+        }
+        return perWindow(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(running);
+    await queue.whenIdle();
+
+    expect(order).toEqual([running, alsoFresh]);
+  });
+
+  it('enqueues the launch backlog as backlog, so a recording made during it goes first', async () => {
+    // The real shape of this: the app launches, starts chewing through a
+    // half-done lecture, and the owner records something new while it runs.
+    const old = await makeRecording();
+    await setRecordingTranscript(old, {
+      text: '',
+      segments: [],
+      model: MODEL,
+      language: null,
+      status: 'running',
+      error: null,
+      completedMs: 0,
+      updatedAt: 1,
+    });
+    const order: string[] = [];
+    let fresh: string | null = null;
+
+    const { queue } = makeQueue({
+      transcribe: async (pcm, opts) => {
+        const active = queue.getState().activeId;
+        if (active !== null && order.at(-1) !== active) order.push(active);
+        if (active === old && fresh === null) {
+          fresh = await makeRecording();
+          await queue.enqueue(fresh);
+        }
+        return perWindow(pcm, opts);
+      },
+    });
+
+    await queue.resume();
+    await queue.whenIdle();
+
+    expect(order).toEqual([old, fresh, old]);
+  });
+});

@@ -13,6 +13,20 @@ import {
 } from '@/storage/recordings';
 import type { AudioTranscriptRecord, TranscriptSegment } from '@/storage/types';
 
+/**
+ * How urgently a queued recording wants the one Whisper slot.
+ *
+ * `foreground` is work the owner is waiting on right now: a recording that
+ * just finished, one startup recovery just rescued, or one they pressed a
+ * button for. `backlog` is only the launch-time catch-up `resume()` queues.
+ *
+ * The distinction exists because a durable partial transcript makes a backlog
+ * durable too: before, nothing survived a reload so the queue was always
+ * empty at launch. Now a half-done lecture would otherwise sit in front of
+ * the one the owner just recorded, for however many hours it has left.
+ */
+export type TranscriptionPriority = 'foreground' | 'backlog';
+
 export interface TranscriptionQueueState {
   activeId: string | null;
   stage: TranscribeStage | null;
@@ -55,8 +69,12 @@ export interface TranscriptionQueueDeps {
 }
 
 export interface TranscriptionQueue {
-  /** Marks the recording pending (persisted) and queues it. Ignored if already queued or active. */
-  enqueue(id: string): Promise<void>;
+  /**
+   * Marks the recording pending (persisted) and queues it. Ignored if already
+   * queued or active. Defaults to `foreground`, which is what a just-finished
+   * recording, a recovered one and a button press all want.
+   */
+  enqueue(id: string, priority?: TranscriptionPriority): Promise<void>;
   /** Same as enqueue; for a failed (or done) recording. */
   retry(id: string): Promise<void>;
   /**
@@ -179,7 +197,16 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
   const readPcmCache = deps.readPcmCache ?? getPcmCache;
   const writePcmCache = deps.writePcmCache ?? putPcmCache;
   const dropPcmCache = deps.dropPcmCache ?? deletePcmCache;
-  const queued: string[] = [];
+  /**
+   * Waiting work, highest priority first within each class. Two classes
+   * rather than one sorted list, because a yielded job goes back to the front
+   * of *its own* class - ahead of the rest of the backlog, behind anything
+   * the owner is waiting on.
+   */
+  const waiting: Record<TranscriptionPriority, string[]> = { foreground: [], backlog: [] };
+  const queuedIds = (): string[] => [...waiting.foreground, ...waiting.backlog];
+  const isQueued = (id: string): boolean =>
+    waiting.foreground.includes(id) || waiting.backlog.includes(id);
   /**
    * Ids accepted by `enqueue` whose `pending` write has not landed yet. They are
    * deliberately not in `queued`: the drain loop must not be able to start a job
@@ -223,7 +250,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       stage,
       progress,
       passes,
-      queuedIds: [...queued],
+      queuedIds: queuedIds(),
     };
     if (sameState(state, next)) return;
     state = next;
@@ -231,7 +258,9 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
   }
 
   function isIdle(): boolean {
-    return !draining && activeId === null && queued.length === 0 && reserved.size === 0;
+    return (
+      !draining && activeId === null && queuedIds().length === 0 && reserved.size === 0
+    );
   }
 
   function notifyIdle(): void {
@@ -302,7 +331,18 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     };
   }
 
-  async function runJob(id: string): Promise<void> {
+  /**
+   * Whether the job holding the slot should step aside at this boundary.
+   * Only a backlog job yields, and only to work the owner is waiting on - two
+   * foreground jobs take turns in arrival order rather than interrupting each
+   * other mid-lecture.
+   */
+  function shouldYield(priority: TranscriptionPriority): boolean {
+    return priority === 'backlog' && waiting.foreground.length > 0;
+  }
+
+  /** Resolves true when the job stepped aside at a window boundary rather than finishing. */
+  async function runJob(id: string, priority: TranscriptionPriority): Promise<boolean> {
     // Before the first await: `cancel` is a button press and the window between
     // this job becoming active and its controller existing covers two storage
     // reads and a write, which is long enough for a click to land in.
@@ -315,7 +355,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
 
     // A recording deleted while it waited has nothing left to transcribe.
     const recording = await getRecording(id);
-    if (!recording) return;
+    if (!recording) return false;
 
     // Re-read rather than reuse the model from the pending write: the setting may
     // have changed while the recording sat in the queue.
@@ -524,10 +564,11 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       disarm();
       if (pausedByUser) await writePaused();
       else await fail(endedWith(error));
-      return;
+      return false;
     }
 
     step = 'transcribing';
+    let yielded = false;
     const onProgress = (p: number, reported: TranscribeStage, reportedPasses?: number): void => {
       if (finished) return;
       arm();
@@ -583,9 +624,19 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
         );
         if (last) await dropCache();
         step = 'transcribing';
+
+        // ⚑ The boundary is the only safe place to stop: the cursor was just
+        // persisted, so stepping aside here costs nothing and the job resumes
+        // at this exact point. This is what a durable cursor buys - before
+        // it, deferring a job meant losing its work, which is why the queue
+        // order had to be a fixed policy.
+        if (!last && shouldYield(priority)) {
+          yielded = true;
+          break;
+        }
       }
 
-      if (windows.length === 0) {
+      if (!yielded && windows.length === 0) {
         // Nothing left to transcribe - an empty recording, or a cursor already
         // at or past the end. Finishing is the honest outcome; looping or
         // failing would both be wrong.
@@ -613,18 +664,29 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       // Every exit path: a watchdog left armed here would abort a later job.
       disarm();
     }
+
+    // ⚑ A yielded job stays `running` with its cursor - deliberately not a
+    // state of its own. It is still in a waiting list, so `RecordingDetail`'s
+    // "stuck" heuristic reads it as queued rather than stranded, and if the
+    // tab closes before the queue gets back to it, `resume()` finds exactly
+    // the `running` row it already knows how to pick up.
+    return yielded;
   }
 
   async function drain(): Promise<void> {
-    while (queued.length > 0) {
-      const id = queued.shift()!;
+    while (queuedIds().length > 0) {
+      // Foreground first, always: that is the whole point of the two classes.
+      const priority: TranscriptionPriority =
+        waiting.foreground.length > 0 ? 'foreground' : 'backlog';
+      const id = waiting[priority].shift()!;
       activeId = id;
       stage = null;
       progress = null;
       passes = null;
       emit();
+      let yielded = false;
       try {
-        await runJob(id);
+        yielded = await runJob(id, priority);
       } catch (error) {
         // runJob handles its own failures; this is a last resort so one bad job
         // can never stop the queue.
@@ -635,24 +697,32 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
         stage = null;
         progress = null;
         passes = null;
+        // ⚑ Back to the FRONT of its own class, not the back: a job that
+        // stepped aside for something more urgent has already done work, and
+        // sending it behind the rest of the backlog would be a demotion for
+        // having been interrupted.
+        if (yielded) waiting[priority].unshift(id);
         emit();
       }
     }
   }
 
   function pump(): void {
-    if (draining || queued.length === 0) return;
+    if (draining || queuedIds().length === 0) return;
     draining = drain().finally(() => {
       draining = null;
       // Restart for anything enqueued as the last job wound down, so an id can
-      // never be left sitting in `queued` with no loop to pick it up.
+      // never be left sitting in a waiting list with no loop to pick it up.
       pump();
       notifyIdle();
     });
   }
 
-  async function enqueue(id: string): Promise<void> {
-    if (activeId === id || reserved.has(id) || queued.includes(id)) return;
+  async function enqueue(
+    id: string,
+    priority: TranscriptionPriority = 'foreground',
+  ): Promise<void> {
+    if (activeId === id || reserved.has(id) || isQueued(id)) return;
     reserved.add(id);
     try {
       const [model, existing] = await Promise.all([deps.getModel(), getRecording(id)]);
@@ -666,7 +736,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       throw error;
     }
     reserved.delete(id);
-    queued.push(id);
+    waiting[priority].push(id);
     emit();
     pump();
   }
@@ -676,11 +746,13 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       cancelActive?.();
       return;
     }
-    const waiting = queued.indexOf(id);
     // Not running and not queued - including an id still `reserved` while its
     // `pending` write lands, which the drain loop cannot have started either.
-    if (waiting === -1) return;
-    queued.splice(waiting, 1);
+    const klass = (['foreground', 'backlog'] as const).find((name) =>
+      waiting[name].includes(id),
+    );
+    if (!klass) return;
+    waiting[klass].splice(waiting[klass].indexOf(id), 1);
     emit();
     // Whatever the `pending` write already stored, rather than another
     // settings read that could fail and leave the id dropped but still marked
@@ -709,7 +781,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     for (const recording of [...recordings].reverse()) {
       const status = recording.transcript?.status;
       if (recording.transcript === null || status === 'pending' || status === 'running') {
-        await enqueue(recording.id);
+        await enqueue(recording.id, 'backlog');
       }
     }
   }
