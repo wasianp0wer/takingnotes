@@ -269,23 +269,35 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
    * ⚑ Not a blank row. Since a `running` transcript holds real content and a
    * cursor, writing blanks here would destroy the partial on the way *into*
    * the queue - on every retry, every resumed launch, and every re-enqueue of
-   * a paused job. The one thing that deliberately starts clean is a model
-   * change, which `runJob` handles by discarding the cursor itself.
+   * a paused job.
+   *
+   * ⚑ A partial is only carried forward when the *same* model produced it.
+   * `whisper.model` is the owner's own speed lever and can change while a
+   * recording waits, so this is an expected act rather than an edge case;
+   * appending model B's words to model A's and stamping the row with one
+   * model id would be a lie about what the transcript is. Changing the model
+   * is therefore also the only way to force a clean re-run.
+   *
+   * `runJob` applies the same rule again when it starts, and both are needed:
+   * this one covers a model changed before the recording was queued, and
+   * `runJob`'s covers one changed while it sat in the queue - a real window,
+   * since the queue is serial and a backlog can be hours long.
    */
   function carryForward(
     existing: AudioTranscriptRecord | null | undefined,
     model: string,
     status: 'pending' | 'running',
   ): AudioTranscriptRecord {
-    const segments = existing?.segments ?? [];
+    const continues = existing?.model === model ? existing : null;
+    const segments = continues?.segments ?? [];
     return {
       text: textOf(segments),
       segments,
       model,
-      language: existing?.language ?? null,
+      language: continues?.language ?? null,
       status,
       error: null,
-      completedMs: existing?.completedMs ?? 0,
+      completedMs: continues?.completedMs ?? 0,
       updatedAt: now(),
     };
   }
@@ -319,7 +331,19 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
      * Seeded from what is already stored, which is what makes this job a
      * continuation rather than a restart.
      */
-    const resumed = recording.transcript;
+    /**
+     * ⚑ A stored partial is only a continuation of *this* job if the same
+     * model produced it. `getModel()` is re-read at entry (see above) because
+     * the setting can change while a recording waits, and `whisper.model` is
+     * the owner's own speed lever - so this is an expected act, not an edge
+     * case. Appending model B's words to model A's and stamping the row with
+     * one model id would be a lie about what the transcript is.
+     *
+     * This is also the only way to force a clean re-run: change the model.
+     * The cached decode is kept either way - 16 kHz PCM is the same bytes
+     * whichever model reads it.
+     */
+    const resumed = recording.transcript?.model === model ? recording.transcript : null;
     let segments: TranscriptSegment[] = resumed?.segments ? [...resumed.segments] : [];
     let cursorMs = resumed?.completedMs ?? 0;
     let language: string | null = resumed?.language ?? null;

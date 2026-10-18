@@ -406,3 +406,75 @@ describe('resuming from the cursor, backed by the PCM cache', () => {
     expect(writesFor(id).at(-1)!.status).toBe('done');
   });
 });
+
+describe('a model change', () => {
+  const HALF_ON_TINY: AudioTranscriptRecord = {
+    text: 'window 1',
+    segments: [{ startMs: 0, endMs: 50, text: 'window 1' }],
+    model: 'Xenova/whisper-tiny.en',
+    language: 'en',
+    status: 'paused',
+    error: null,
+    completedMs: 100,
+    updatedAt: 1,
+  };
+
+  it('starts clean when the model differs from the stored transcript', async () => {
+    // ⚑ Resuming model B onto model A's output and stamping the row with one
+    // model id would be a lie about what the transcript is.
+    const id = await makeRecording();
+    await setRecordingTranscript(id, HALF_ON_TINY);
+    writeSpy.mockClear();
+    const { queue, transcribe } = makeQueue();
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe.mock.calls.map(([, opts]) => opts.offsetMs)).toEqual([0, 100, 200]);
+    const final = writesFor(id).at(-1)!;
+    expect(final.model).toBe(MODEL);
+    expect(final.segments).toHaveLength(3);
+  });
+
+  it('discards the old model’s words rather than appending to them', async () => {
+    const id = await makeRecording();
+    await setRecordingTranscript(id, {
+      ...HALF_ON_TINY,
+      segments: [{ startMs: 0, endMs: 50, text: 'heard by the old model' }],
+    });
+    writeSpy.mockClear();
+    const { queue } = makeQueue();
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(writesFor(id).at(-1)!.text).not.toContain('old model');
+  });
+
+  it('still reuses the cached decode, which does not depend on the model', async () => {
+    // Decoded 16 kHz PCM is the same bytes whichever Whisper model reads it,
+    // so a model change resets the cursor but has no reason to pay for a
+    // second decode.
+    const id = await makeRecording();
+    await setRecordingTranscript(id, HALF_ON_TINY);
+    const { queue, decode, cache } = makeQueue({ cachedMs: TOTAL_MS });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(cache.read).toHaveBeenCalledWith(id);
+    expect(decode).not.toHaveBeenCalled();
+  });
+
+  it('keeps the cursor when the model is unchanged', async () => {
+    const id = await makeRecording();
+    await setRecordingTranscript(id, { ...HALF_ON_TINY, model: MODEL });
+    writeSpy.mockClear();
+    const { queue, transcribe } = makeQueue();
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe.mock.calls.map(([, opts]) => opts.offsetMs)).toEqual([100, 200]);
+  });
+});
