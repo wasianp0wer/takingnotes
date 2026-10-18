@@ -1,4 +1,4 @@
-import type { SearchCorpus } from '@/search/corpus';
+import { hasSearchableTranscript, type SearchCorpus } from '@/search/corpus';
 
 /**
  * Fix round 3, I4: below this, a query matches so broadly (every note
@@ -91,6 +91,12 @@ export function findInCorpus(corpus: SearchCorpus, query: string): FindHit[] {
   }
 
   for (const recording of corpus.recordings) {
+    // ⚑ The same predicate smart search uses, rather than no gate at all.
+    // Reading `segments` unconditionally returned a *failed* transcript's
+    // leftovers - which `corpus.ts` deliberately withholds from smart search
+    // as a stale attempt's - so the two modes disagreed about whether that
+    // text was trustworthy, and the ungated one had no warning attached.
+    if (!hasSearchableTranscript(recording)) continue;
     const segments = recording.transcript?.segments ?? [];
     for (const segment of segments) {
       if (segment.text.toLowerCase().includes(q)) {

@@ -128,3 +128,19 @@ describe('mergeWindowSegments', () => {
     expect(existing).toHaveLength(1);
   });
 });
+
+describe('sliceStartMs', () => {
+  it('is where the slice really begins, not the boundary it owns', () => {
+    const [first, second] = planWindows(samplesFor(20 * 60_000), 0, 60_000);
+
+    expect(first.sliceStartMs).toBe(0);
+    expect(second.startMs).toBe(60_000);
+    expect(second.sliceStartMs).toBe(60_000 - WINDOW_OVERLAP_MS);
+  });
+
+  it('always agrees with startSample', () => {
+    for (const window of planWindows(samplesFor(20 * 60_000), 0, 60_000)) {
+      expect(window.startSample).toBe(samplesFor(window.sliceStartMs));
+    }
+  });
+});

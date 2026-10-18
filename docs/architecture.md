@@ -1167,6 +1167,17 @@ offset is applied one layer below it. `mergeWindowSegments` drops the lead-in's
 duplicate words by the one rule that matters: a segment starting before the
 boundary this window owns was already transcribed.
 
+⚑ The offset passed is `PcmWindow.sliceStartMs` - where the slice *actually*
+begins - not `startMs`, the boundary it owns. Whisper times its words from the
+first sample it was given, which is the lead-in, so offsetting by the boundary
+stamps every window after the first `WINDOW_OVERLAP_MS` late *and* lifts the
+repeated lead-in above the dedupe's threshold, so the repeat is persisted too.
+Both halves shipped briefly and were caught in review; the regression test
+(`transcriptionQueue.windows.test.ts`, "the absolute clock a window stamps on
+its words") feeds real PCM through the real `chunksToSegments` and asserts
+each segment against where its audio truly began, because the bug lives
+precisely in the composition of pieces that are each correct alone.
+
 **The cursor.** `AudioTranscriptRecord.completedMs` (absent reads as 0). After
 every window the queue writes the accumulated text, segments and cursor, so a
 `running` row now carries real content - the central data-model change here.
@@ -1227,17 +1238,33 @@ backlog progress, which is the regression this work exists to undo. The owner
 chose never to hold. Chunks persist every second, so contention costs at most
 a second of audio and startup recovery already handles that.
 
-**The lease.** `leaseOwner` + `leaseAt` on the transcript row, refreshed with
-every window write and released on every terminal write (`done`, `failed`,
-`paused`); a yielded job keeps its lease, since the same queue is coming back.
-A lease younger than `LEASE_STALE_MS` (= the stall timeout: a job that has not
-written in that long is dead by the watchdog's own definition) makes the
-recording untouchable by another queue, in `enqueue` as well as at job start -
-`carryForward` preserves the lease fields precisely because the `pending` write
-runs first and would otherwise erase the guard it depends on. Without this,
-two tabs' interleaved window writes would ratchet the cursor backwards and
-splice two runs into one transcript. The app is headed for Electron, where a
-second tab stops being possible; this is cheap safety until then.
+**The lease.** `leaseOwner` + `leaseAt` on the transcript row, released on
+every terminal write (`done`, `failed`, `paused`); a yielded job keeps its
+lease, since the same queue is coming back. Without it, two tabs' interleaved
+window writes would ratchet the cursor backwards and splice two runs into one
+transcript. The app is headed for Electron, where a second tab stops being
+possible; this is cheap safety until then. Three details are load-bearing:
+
+- ⚑ **The owner id lives in `sessionStorage`, not in the queue instance.** A
+  queue is built once per page load, so a per-instance id makes a reloaded tab
+  a *stranger* to its own in-flight job: it refuses to resume for a full
+  `LEASE_STALE_MS` while `RecordingDetail` offers a Retry button that silently
+  does nothing - in the exact crash-and-reload case this feature exists to
+  survive. `sessionStorage` is per-tab and survives reload, which is the
+  identity wanted. A browser that refuses it falls back to a per-queue id.
+- ⚑ **The heartbeat rides on progress reports** (throttled to
+  `LEASE_HEARTBEAT_MS`, 10 s), not on the per-window write, and
+  `LEASE_STALE_MS` is 60 s - sized against the heartbeat rather than against a
+  window. A 5-minute window on a machine running inference 3-4x slower than
+  real time takes 15-20 minutes of wall clock; a lease refreshed only at the
+  boundary would go stale in the middle of a healthy job and another tab would
+  take it, producing the very interleaving the lease prevents.
+- ⚑ **Acquisition is one transaction**, `takeTranscriptionLease` in
+  `src/storage/recordings.ts`. Reading the lease and then writing it leaves a
+  gap, and the gap is the scenario the lease is for: two tabs opening together
+  both read "unheld" before either writes. `carryForward` also preserves the
+  lease fields, because the `pending` write runs before `runJob` and would
+  otherwise erase the guard it depends on.
 
 **Progress.** `TranscriptionQueueState` gains `completedMs` and `durationMs`,
 both null when idle. `RecordingDetail` shows windows finished against the
@@ -1250,13 +1277,17 @@ it to be a fraction of.
 **Consumers of a partial transcript.**
 
 - **Search: yes, with a caveat in both modes.** `corpus.ts`'s
-  `hasSearchableTranscript` accepts `done`, `running` and `paused` with
-  non-blank text (`failed` stays out - its text is a stale attempt's leftovers).
-  ⚑ `find.ts` reads `transcript.segments` with **no status gate at all**, so it
-  began returning partial hits the moment `running` rows carried real segments,
-  with no code change - which is why the caveat is rendered once for the whole
-  view rather than only inside the smart block. `SearchCorpus.partialTranscriptCount`
-  counts finished recordings whose transcript is absent, `running` or `paused`.
+  `hasSearchableTranscript` accepts `done`, `running` and `paused`
+  (`failed` stays out - its text is a stale attempt's leftovers). Blank text
+  is filtered downstream, where `audioText` is assembled.
+  ⚑ `find.ts` used to read `transcript.segments` with **no status gate at
+  all**, so it began returning partial hits the moment `running` rows carried
+  real segments - and returned a *failed* transcript's leftovers too, which
+  smart search deliberately withholds. The two modes now share
+  `hasSearchableTranscript`. `SearchCorpus.partialTranscriptCount` counts every
+  finished recording whose transcript is not `done` - including `pending` and
+  `failed`, so searching a library before the queue has reached it says so
+  rather than saying nothing. The caveat renders once for the whole view.
 - **Gap analysis: no.** `gaps/eligibility.ts` already requires `done`, so
   partials are excluded with no change. This matters: a page from the
   untranscribed tail would be compared against silence and reported as a page
@@ -1273,6 +1304,16 @@ it to be a fraction of.
 - **A recording that fails and is never retried holds its cached decode** until
   it is deleted (~288 MB for a 2.5-hour lecture). The same applies to several
   half-transcribed lectures at once. Accepted.
+- ⚑ **The decoded PCM is held on the main thread for the whole job** -
+  ~576 MB of Float32 for a 2.5-hour lecture, for the hours it runs. Before
+  windowing, the single `transcribe()` call transferred the whole buffer and
+  the main thread's copy was detached at once; now the master must survive
+  every window, so it stays resident. The peak is unchanged from before this
+  branch (the decode always allocated it) but the duration is not, and this is
+  the machine F2-A11 already records as OOM-killing the worker. Holding the
+  master as Int16 would halve it, and was deliberately **not** done: it would
+  make the audio Whisper sees lossy on the *first* pass, trading transcription
+  quality on every recording for memory.
 - **Background tab throttling is unverified.** The lost lecture was
   transcribing while its owner worked in other tabs; a background tab may have
   been deprioritised, particularly on WebGPU. Not addressed and not measured.

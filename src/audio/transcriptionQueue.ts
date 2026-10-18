@@ -11,6 +11,7 @@ import {
   getRecordingAudio,
   listFinishedRecordings,
   setRecordingTranscript,
+  takeTranscriptionLease,
 } from '@/storage/recordings';
 import type { AudioTranscriptRecord, TranscriptSegment } from '@/storage/types';
 
@@ -73,8 +74,8 @@ export interface TranscriptionQueueDeps {
    * that every time.
    */
   /**
-   * Identifies this queue instance in the lease it writes. Default: a fresh
-   * random id per queue, which is per tab.
+   * Identifies this tab in the lease it writes. Default: an id held in
+   * `sessionStorage`, so a reloaded tab is still recognised as itself.
    */
   ownerId?: string;
   /** How long a lease survives without a heartbeat. Default: `LEASE_STALE_MS`. */
@@ -160,7 +161,58 @@ const DEFAULT_STALL_TIMEOUT_MS = 15 * 60 * 1000;
  * or about to abandon the job itself. Shorter would let a healthy slow tab be
  * robbed mid-window; longer would strand a lecture behind a crashed tab.
  */
-export const LEASE_STALE_MS = DEFAULT_STALL_TIMEOUT_MS;
+export const LEASE_STALE_MS = 60 * 1000;
+
+/**
+ * How often a running job refreshes its lease. Progress reports arrive far
+ * more often than this (once per decode step), so the heartbeat is throttled
+ * to keep it from turning every one of them into a storage write.
+ *
+ * ⚑ The heartbeat rides on progress, not on the per-window write, and
+ * `LEASE_STALE_MS` is sized against it rather than against a window. A
+ * 5-minute window on a machine running inference 3-4x slower than real time
+ * takes 15-20 minutes of wall clock; a lease refreshed only at the window
+ * boundary would go stale in the middle of a perfectly healthy job, and
+ * another tab would take it - producing exactly the interleaved writes the
+ * lease exists to prevent.
+ */
+const LEASE_HEARTBEAT_MS = 10 * 1000;
+
+/**
+ * How far a cached decode's length may differ from its recording's reported
+ * duration before it is distrusted and re-decoded.
+ *
+ * Generous on purpose: `durationMs` for a recording startup recovery stitched
+ * is estimated from its chunk count rather than measured, so a small
+ * disagreement is expected and is not evidence of a bad row. What this is
+ * guarding against is a row that is wrong by minutes.
+ */
+const CACHE_LENGTH_TOLERANCE_MS = 5 * 1000;
+
+/**
+ * This tab's identity for leasing, stable across reloads.
+ *
+ * ⚑ `sessionStorage` rather than a fresh id per queue. A queue is built once
+ * per page load, so a per-instance id makes a reloaded tab a *stranger* to
+ * its own in-flight job: it would refuse to resume for a full
+ * `LEASE_STALE_MS`, with a Retry button that silently does nothing, in the
+ * exact crash-and-reload case this feature exists to survive. `sessionStorage`
+ * is per-tab and survives reload, which is precisely the identity wanted.
+ */
+function tabOwnerId(): string {
+  const key = 'transcription.ownerId';
+  try {
+    const existing = sessionStorage.getItem(key);
+    if (existing) return existing;
+    const created = newId();
+    sessionStorage.setItem(key, created);
+    return created;
+  } catch {
+    // Private mode, blocked site data, or no DOM: a fresh id per queue is
+    // the old behaviour and still correct, just less forgiving of a reload.
+    return newId();
+  }
+}
 
 /** The step of a job a stall is reported against, named as the message reads it. */
 type JobStep = 'reading the audio' | 'decoding the audio' | 'transcribing' | 'saving the transcript';
@@ -224,7 +276,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
   // `window.setTimeout`, not the bare global, so the handle is a number here too.
   const setTimer = deps.setTimer ?? ((fn, ms) => window.setTimeout(fn, ms));
   const clearTimer = deps.clearTimer ?? ((handle) => window.clearTimeout(handle));
-  const ownerId = deps.ownerId ?? newId();
+  const ownerId = deps.ownerId ?? tabOwnerId();
   const leaseStaleMs = deps.leaseStaleMs ?? LEASE_STALE_MS;
   const readPcmCache = deps.readPcmCache ?? getPcmCache;
   const writePcmCache = deps.writePcmCache ?? putPcmCache;
@@ -384,19 +436,15 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
 
   /** Resolves true when the job stepped aside at a window boundary rather than finishing. */
   /**
-   * Whether another queue is actively working this recording right now.
+   * Claims this recording for this tab, atomically.
    *
-   * Two tabs each build their own queue and each run `resume()` at launch.
-   * Before a `running` row carried real content that only wasted CPU and the
-   * last write won; now their interleaved per-window writes would ratchet the
-   * cursor backwards and splice two runs into one transcript. A lease older
-   * than `leaseStaleMs` is taken over - the tab that wrote it is gone.
+   * ⚑ Delegated to storage rather than done here as a read-then-write: the
+   * decision and the write have to be one transaction, or two tabs opening
+   * together both read "unheld" before either writes and both go on to
+   * transcribe into the same row - the splice the lease exists to prevent.
    */
-  function heldByAnother(record: AudioTranscriptRecord | null | undefined): boolean {
-    const owner = record?.leaseOwner ?? null;
-    if (owner === null || owner === ownerId) return false;
-    const at = record?.leaseAt ?? null;
-    return at !== null && now() - at < leaseStaleMs;
+  function claim(id: string): Promise<boolean> {
+    return takeTranscriptionLease(id, ownerId, now(), leaseStaleMs);
   }
 
   /** The lease fields for a write made while this queue holds the job. */
@@ -424,7 +472,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
 
     // ⚑ Left untouched, not failed: the other tab is working on it, and
     // writing anything here is exactly the interleaving the lease prevents.
-    if (heldByAnother(recording.transcript)) return false;
+    if (!(await claim(id))) return false;
 
     // Re-read rather than reuse the model from the pending write: the setting may
     // have changed while the recording sat in the queue.
@@ -456,6 +504,11 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     let segments: TranscriptSegment[] = resumed?.segments ? [...resumed.segments] : [];
     let cursorMs = resumed?.completedMs ?? 0;
     let language: string | null = resumed?.language ?? null;
+
+    // Captured once, past the existence guard above: `cachedPcm` is a
+    // hoisted function declaration, so TypeScript cannot carry the narrowing
+    // of `recording` into it.
+    const recordedDurationMs = recording.durationMs;
 
     /** Publishes the cursor so a view can show a real proportion. */
     const publishCursor = (): void => {
@@ -579,6 +632,22 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     };
 
     /**
+     * Refreshes only the lease, leaving the transcript's content alone. A
+     * failure is swallowed: a missed heartbeat costs this job its lease at
+     * worst, and never its transcript.
+     */
+    const beat = async (): Promise<void> => {
+      try {
+        const current = (await getRecording(id))?.transcript;
+        // Someone else owns it now, or it is already finished: not ours to stamp.
+        if (!current || current.leaseOwner !== ownerId) return;
+        await setRecordingTranscript(id, { ...current, leaseAt: now() });
+      } catch {
+        // See above.
+      }
+    };
+
+    /**
      * A paused job: every window it finished, the cursor they reach, and no
      * error - being stopped on purpose is not a failure, and writing one here
      * would put a red message under a transcript that is simply waiting.
@@ -601,17 +670,27 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     /**
      * The cached decode, when there is one that can actually serve this job.
      *
-     * ⚑ A row shorter than the cursor already claims is not usable: every
-     * window past its end would simply not exist and the job would write
-     * `done`, silently truncating the lecture. A read that throws is a miss,
-     * not a failure - the audio is still there to decode.
+     * ⚑ The row has to match the *recording*, not merely clear the cursor.
+     * A row long enough to pass the cursor but short of the audio runs the
+     * job out of windows early and writes `done` on a lecture that was never
+     * finished - silent truncation, and indistinguishable afterwards from a
+     * recording that really did end there. A read that throws is a miss, not
+     * a failure: the audio is still there to decode.
      */
     async function cachedPcm(): Promise<Float32Array | null> {
       try {
         const cached = await guard(readPcmCache(id));
         if (!cached) return null;
         const cachedMs = (cached.length / TARGET_SAMPLE_RATE) * 1000;
-        return cachedMs >= cursorMs ? cached : null;
+        if (cachedMs < cursorMs) return null;
+        // A tolerance, not equality: `durationMs` for a recovered recording
+        // is estimated from its chunk count (one timeslice each), so it is
+        // honest to within a timeslice rather than exact.
+        const expectedMs = recordedDurationMs;
+        if (expectedMs > 0 && Math.abs(cachedMs - expectedMs) > CACHE_LENGTH_TOLERANCE_MS) {
+          return null;
+        }
+        return cached;
       } catch (error) {
         if (stalled || pausedByUser) throw error;
         console.warn(`Could not read the cached decode for recording ${id}:`, error);
@@ -650,6 +729,8 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
 
     step = 'transcribing';
     let yielded = false;
+    /** When the lease was last refreshed, so the heartbeat can be throttled. */
+    let lastBeat = now();
     const onProgress = (p: number, reported: TranscribeStage, reportedPasses?: number): void => {
       if (finished) return;
       arm();
@@ -658,6 +739,12 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       stage = reported;
       passes = reportedPasses ?? null;
       emit();
+      // The lease's heartbeat: a window can take far longer than the lease
+      // survives, so liveness has to be reported from inside one.
+      if (now() - lastBeat >= LEASE_HEARTBEAT_MS) {
+        lastBeat = now();
+        void beat();
+      }
     };
 
     try {
@@ -675,7 +762,10 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
           {
             model,
             signal: controller.signal,
-            offsetMs: window.startMs,
+            // ⚑ The slice's own start, not the boundary: the slice begins
+            // `WINDOW_OVERLAP_MS` earlier for lead-in context, and Whisper
+            // times its words from the first sample it was given.
+            offsetMs: window.sliceStartMs,
             onProgress,
           },
         );
@@ -820,7 +910,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       const [model, existing] = await Promise.all([deps.getModel(), getRecording(id)]);
       // Another tab is working this recording right now: not ours to queue,
       // and not ours to write a `pending` row over.
-      if (heldByAnother(existing?.transcript)) {
+      if (!(await claim(id))) {
         reserved.delete(id);
         notifyIdle();
         return;

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { openNotesDb } from '@/storage/db';
 import { deletePcmCache, getPcmCache, putPcmCache } from '@/storage/pcmCache';
 import { createRecording, deleteRecording } from '@/storage/recordings';
 import { resetDatabase } from '@/test/resetDb';
@@ -62,5 +63,21 @@ describe('the transient PCM cache', () => {
     await deleteRecording(recording.id);
 
     expect(await getPcmCache(recording.id)).toBeNull();
+  });
+});
+
+describe('a cache row written at another sample rate', () => {
+  it('is refused rather than returned at the wrong clock', async () => {
+    // ⚑ `PcmCacheRecord.sampleRate` exists so a rate change is detectable
+    // rather than silent. Returning such a row would put every transcript
+    // timestamp on the wrong clock, with nothing to show it had happened.
+    const db = await openNotesDb();
+    await db.put('pcmCache', {
+      recordingId: 'r1',
+      sampleRate: 44_100,
+      samples: new Int16Array([1, 2, 3]).buffer,
+    });
+
+    expect(await getPcmCache('r1')).toBeNull();
   });
 });

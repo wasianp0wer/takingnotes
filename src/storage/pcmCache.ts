@@ -45,6 +45,11 @@ export async function getPcmCache(recordingId: string): Promise<Float32Array | n
   const db = await openNotesDb();
   const record = await db.get('pcmCache', recordingId);
   if (!record) return null;
+  // ⚑ The reason `sampleRate` is stored at all. A row written at another
+  // rate would come back as audio of the wrong length, putting every
+  // transcript timestamp on the wrong clock with nothing to show it had
+  // happened. Treated as a miss, so the caller simply re-decodes.
+  if (record.sampleRate !== TARGET_SAMPLE_RATE) return null;
   const samples = new Int16Array(record.samples);
   const pcm = new Float32Array(samples.length);
   for (let i = 0; i < samples.length; i += 1) {

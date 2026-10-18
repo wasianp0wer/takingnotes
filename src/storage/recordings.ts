@@ -80,6 +80,56 @@ export async function updateRecording(
   return merged;
 }
 
+/**
+ * Claims this recording's transcription for `ownerId`, deciding and writing
+ * inside **one** transaction.
+ *
+ * ⚑ Atomic on purpose. Reading the lease and then writing it is two
+ * transactions with a gap between them, and the gap is exactly the scenario
+ * the lease exists for: two tabs opening together both read "unheld" before
+ * either writes, both believe they won, and both transcribe into the same
+ * row - interleaving their per-window writes, ratcheting the cursor backwards
+ * and splicing two runs into one transcript.
+ *
+ * Granted when nobody holds it, when the holder's lease is older than
+ * `staleMs` (that tab is gone), or when `ownerId` already holds it. A
+ * recording with no transcript row yet is unheld by definition; a recording
+ * that no longer exists is refused rather than treated as an error.
+ */
+export async function takeTranscriptionLease(
+  id: string,
+  ownerId: string,
+  now: number,
+  staleMs: number,
+): Promise<boolean> {
+  const db = await openNotesDb();
+  const tx = db.transaction('recordings', 'readwrite');
+  const existing = await tx.store.get(id);
+  if (!existing) {
+    await tx.done.catch(() => undefined);
+    return false;
+  }
+  const transcript = existing.transcript;
+  const owner = transcript?.leaseOwner ?? null;
+  const at = transcript?.leaseAt ?? null;
+  const heldByAnother = owner !== null && owner !== ownerId && at !== null && now - at < staleMs;
+  if (heldByAnother) {
+    await tx.done.catch(() => undefined);
+    return false;
+  }
+  // A recording with no transcript yet is left alone: `runJob`'s own first
+  // write creates it, stamped with this lease. Writing a bare row here would
+  // invent a status this function has no business choosing.
+  if (transcript) {
+    await tx.store.put({
+      ...existing,
+      transcript: { ...transcript, leaseOwner: ownerId, leaseAt: now },
+    });
+  }
+  await tx.done;
+  return true;
+}
+
 export function setRecordingTranscript(
   id: string,
   transcript: AudioTranscriptRecord,

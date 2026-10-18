@@ -7,11 +7,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TARGET_SAMPLE_RATE } from '@/audio/pcm';
 import { LEASE_STALE_MS, createTranscriptionQueue } from '@/audio/transcriptionQueue';
+import { WINDOW_OVERLAP_MS } from '@/audio/windows';
 import type {
   AudioTranscriber,
   AudioTranscriptionResult,
   TranscribeOptions,
 } from '@/audio/types';
+import { chunksToSegments } from '@/audio/whisperProtocol';
 import { createRecording } from '@/storage/recordings';
 import type { AudioTranscriptRecord } from '@/storage/types';
 import { resetDatabase } from '@/test/resetDb';
@@ -28,9 +30,13 @@ const { setRecordingTranscript } = await import('@/storage/recordings');
 const writeSpy = vi.mocked(setRecordingTranscript);
 
 const MODEL = 'Xenova/whisper-base.en';
-const WINDOW_MS = 100;
+// ⚑ Comfortably larger than `WINDOW_OVERLAP_MS`, as production is. With a
+// window smaller than the overlap every slice clamps to sample 0, the seam
+// stops existing, and tests that use the transcription offset to tell one
+// window from another silently stop distinguishing them.
+const WINDOW_MS = 20_000;
 /** Three windows of `WINDOW_MS` each. */
-const TOTAL_MS = 300;
+const TOTAL_MS = 60_000;
 
 beforeEach(async () => {
   await resetDatabase();
@@ -55,20 +61,30 @@ type TranscribeBody = (
   opts: TranscribeOptions,
 ) => Promise<AudioTranscriptionResult>;
 
+/**
+ * The boundary a call is responsible for, recovered from the offset it was
+ * given. The offset is where the *slice* starts, which is `WINDOW_OVERLAP_MS`
+ * earlier than the boundary for every window but the first.
+ */
+function boundaryOf(opts: TranscribeOptions): number {
+  const offsetMs = opts.offsetMs ?? 0;
+  return offsetMs === 0 ? 0 : offsetMs + WINDOW_OVERLAP_MS;
+}
+
 /** One segment per window, named for the window, placed on the recording's clock. */
 const perWindow: TranscribeBody = async (_pcm, opts) => {
-  const offsetMs = opts.offsetMs ?? 0;
-  const index = offsetMs / WINDOW_MS + 1;
+  const boundary = boundaryOf(opts);
+  const index = boundary / WINDOW_MS + 1;
   return {
     text: `window ${index}`,
-    segments: [{ startMs: offsetMs, endMs: offsetMs + 50, text: `window ${index}` }],
+    segments: [{ startMs: boundary, endMs: boundary + 50, text: `window ${index}` }],
     language: 'en',
   };
 };
 
 /** Rejects the second window, leaving a job half done. */
 const failSecondWindow: TranscribeBody = async (pcm, opts) => {
-  if (opts.offsetMs === 100) throw new Error('boom');
+  if (boundaryOf(opts) === WINDOW_MS) throw new Error('boom');
   return perWindow(pcm, opts);
 };
 
@@ -84,6 +100,7 @@ function makeQueue(
     cachedMs?: number;
     cacheReadError?: unknown;
     ownerId?: string;
+    now?: () => number;
     stallTimeoutMs?: number;
     setTimer?: (fn: () => void, ms: number) => number;
     clearTimer?: (handle: number) => void;
@@ -115,7 +132,7 @@ function makeQueue(
     transcriber,
     decode,
     getModel: async () => MODEL,
-    now: () => 1000,
+    now: overrides.now ?? (() => 1000),
     windowMs: WINDOW_MS,
     ownerId: overrides.ownerId,
     readPcmCache: read,
@@ -166,9 +183,9 @@ describe('the windowed transcribe loop', () => {
     const running = written.filter((r) => r.status === 'running');
     // The opening `running` write, then one per completed window except the
     // last - which is the terminal `done` write below.
-    expect(running.map((r) => r.completedMs)).toEqual([0, 100, 200]);
+    expect(running.map((r) => r.completedMs)).toEqual([0, 20_000, 40_000]);
     expect(written.at(-1)!.status).toBe('done');
-    expect(written.at(-1)!.completedMs).toBe(300);
+    expect(written.at(-1)!.completedMs).toBe(60_000);
   });
 
   it('accumulates text and segments across windows', async () => {
@@ -192,7 +209,7 @@ describe('the windowed transcribe loop', () => {
     await queue.whenIdle();
 
     expect(transcribe).toHaveBeenCalledTimes(3);
-    expect(transcribe.mock.calls.map(([, opts]) => opts.offsetMs)).toEqual([0, 100, 200]);
+    expect(transcribe.mock.calls.map(([, opts]) => boundaryOf(opts))).toEqual([0, 20_000, 40_000]);
   });
 
   it('advances the cursor past a window that produces no segments', async () => {
@@ -200,7 +217,7 @@ describe('the windowed transcribe loop', () => {
     // same quiet minute forever.
     const id = await makeRecording();
     const silentSecond: TranscribeBody = async (pcm, opts) =>
-      opts.offsetMs === 100
+      boundaryOf(opts) === WINDOW_MS
         ? { text: '', segments: [], language: 'en' }
         : perWindow(pcm, opts);
     const { queue } = makeQueue({ transcribe: silentSecond });
@@ -210,7 +227,7 @@ describe('the windowed transcribe loop', () => {
 
     const final = writesFor(id).at(-1)!;
     expect(final.status).toBe('done');
-    expect(final.completedMs).toBe(300);
+    expect(final.completedMs).toBe(60_000);
     expect(final.segments.map((s) => s.text)).toEqual(['window 1', 'window 3']);
   });
 
@@ -224,7 +241,7 @@ describe('the windowed transcribe loop', () => {
     const failed = writesFor(id).at(-1)!;
     expect(failed.status).toBe('failed');
     expect(failed.error).toContain('boom');
-    expect(failed.completedMs).toBe(100);
+    expect(failed.completedMs).toBe(20_000);
     expect(failed.segments.map((s) => s.text)).toEqual(['window 1']);
   });
 
@@ -235,7 +252,7 @@ describe('the windowed transcribe loop', () => {
     const id = await makeRecording();
     const timers = manualTimers();
     const stallSecond: TranscribeBody = (pcm, opts) => {
-      if (opts.offsetMs !== 100) return perWindow(pcm, opts);
+      if (boundaryOf(opts) !== WINDOW_MS) return perWindow(pcm, opts);
       return new Promise<AudioTranscriptionResult>((_resolve, reject) => {
         opts.signal?.addEventListener(
           'abort',
@@ -253,7 +270,7 @@ describe('the windowed transcribe loop', () => {
     const failed = writesFor(id).at(-1)!;
     expect(failed.status).toBe('failed');
     expect(failed.error).toContain('stalled');
-    expect(failed.completedMs).toBe(100);
+    expect(failed.completedMs).toBe(20_000);
     expect(failed.segments.map((s) => s.text)).toEqual(['window 1']);
     expect(timers.armed()).toEqual([]);
   });
@@ -281,7 +298,7 @@ describe('resuming from the cursor, backed by the PCM cache', () => {
     language: 'en',
     status: 'running',
     error: null,
-    completedMs: 100,
+    completedMs: 20_000,
     updatedAt: 1,
   };
 
@@ -294,7 +311,7 @@ describe('resuming from the cursor, backed by the PCM cache', () => {
     await queue.enqueue(id);
     await queue.whenIdle();
 
-    expect(transcribe.mock.calls.map(([, opts]) => opts.offsetMs)).toEqual([100, 200]);
+    expect(transcribe.mock.calls.map(([, opts]) => boundaryOf(opts))).toEqual([20_000, 40_000]);
     const final = writesFor(id).at(-1)!;
     expect(final.status).toBe('done');
     expect(final.segments.map((s) => s.text)).toEqual(['window 1', 'window 2', 'window 3']);
@@ -360,7 +377,7 @@ describe('resuming from the cursor, backed by the PCM cache', () => {
     const id = await makeRecording();
     await setRecordingTranscript(id, HALF);
     const { queue, decode, cache } = makeQueue({
-      cachedMs: 50, // shorter than the cursor at 100
+      cachedMs: 10_000, // shorter than the cursor at 20_000
     });
 
     await queue.enqueue(id);
@@ -417,7 +434,7 @@ describe('a model change', () => {
     language: 'en',
     status: 'paused',
     error: null,
-    completedMs: 100,
+    completedMs: 20_000,
     updatedAt: 1,
   };
 
@@ -432,7 +449,7 @@ describe('a model change', () => {
     await queue.enqueue(id);
     await queue.whenIdle();
 
-    expect(transcribe.mock.calls.map(([, opts]) => opts.offsetMs)).toEqual([0, 100, 200]);
+    expect(transcribe.mock.calls.map(([, opts]) => boundaryOf(opts))).toEqual([0, 20_000, 40_000]);
     const final = writesFor(id).at(-1)!;
     expect(final.model).toBe(MODEL);
     expect(final.segments).toHaveLength(3);
@@ -477,7 +494,7 @@ describe('a model change', () => {
     await queue.enqueue(id);
     await queue.whenIdle();
 
-    expect(transcribe.mock.calls.map(([, opts]) => opts.offsetMs)).toEqual([100, 200]);
+    expect(transcribe.mock.calls.map(([, opts]) => boundaryOf(opts))).toEqual([20_000, 40_000]);
   });
 });
 
@@ -742,7 +759,7 @@ describe('the single-writer lease', () => {
     const { queue } = makeQueue({
       ownerId: OWNER,
       transcribe: async (pcm, opts) => {
-        if (opts.offsetMs === 100) await queue.pause(id);
+        if (boundaryOf(opts) === WINDOW_MS) await queue.pause(id);
         return perWindow(pcm, opts);
       },
     });
@@ -772,8 +789,8 @@ describe('the queue state a view reads', () => {
 
     expect(seen).toEqual([
       { completedMs: 0, durationMs: TOTAL_MS },
-      { completedMs: 100, durationMs: TOTAL_MS },
-      { completedMs: 200, durationMs: TOTAL_MS },
+      { completedMs: 20_000, durationMs: TOTAL_MS },
+      { completedMs: 40_000, durationMs: TOTAL_MS },
     ]);
   });
 
@@ -786,5 +803,217 @@ describe('the queue state a view reads', () => {
 
     expect(queue.getState().completedMs).toBeNull();
     expect(queue.getState().durationMs).toBeNull();
+  });
+});
+
+describe('the absolute clock a window stamps on its words', () => {
+  /**
+   * ⚑ The composition test. `planWindows` hands the loop a slice that starts
+   * *before* the window's boundary (lead-in context), and `chunksToSegments`
+   * offsets times that are relative to the first sample of whatever slice it
+   * was given. If the loop passes the boundary rather than the slice's own
+   * start, every window after the first is stamped late by the overlap and
+   * the seam dedupe never fires - and neither half is visible to a test that
+   * fabricates segments from `opts.offsetMs` instead of from the audio.
+   *
+   * So: the decoded PCM carries each sample's own index as its value, and
+   * this transcriber reads the first sample to learn where its slice truly
+   * begins, then maps through the real `chunksToSegments` exactly as
+   * `whisperClient` does.
+   */
+  const honestAboutItsSlice: TranscribeBody = async (pcm, opts) => {
+    const trueStartMs = (Math.round(pcm[0]) / TARGET_SAMPLE_RATE) * 1000;
+    const durationMs = (pcm.length / TARGET_SAMPLE_RATE) * 1000;
+    // One utterance every 5 s across the whole slice, each naming where it
+    // really was. Spacing the lead-in exactly is what makes the seam's repeat
+    // observable: the same words are genuinely heard by two windows.
+    const chunks = [];
+    for (let atMs = 0; atMs < durationMs; atMs += 5_000) {
+      chunks.push({
+        timestamp: [atMs / 1000, atMs / 1000 + 1] as [number, number],
+        text: `truly at ${trueStartMs + atMs}`,
+      });
+    }
+    const segments = chunksToSegments(chunks, durationMs, opts.offsetMs ?? 0);
+    return { text: segments.map((s) => s.text).join(' '), segments, language: 'en' };
+  };
+
+  // ⚑ Realistic sizes here, unlike the rest of this file: with the shared
+  // 100 ms test window the 5 s overlap clamps to zero on every slice, so the
+  // seam never exists and half of what this block checks would pass
+  // vacuously. The window must be comfortably larger than the overlap, as it
+  // is in production.
+  const LONG_WINDOW_MS = 60_000;
+  const LONG_TOTAL_MS = 180_000;
+
+  /** PCM whose every sample value is its own index, so a slice knows where it starts. */
+  function indexedPcm(totalMs: number): Float32Array {
+    const pcm = new Float32Array(samplesFor(totalMs));
+    for (let i = 0; i < pcm.length; i += 1) pcm[i] = i;
+    return pcm;
+  }
+
+  it('stamps each window at the true start of the audio it was given', async () => {
+    const id = await makeRecording();
+    const transcribe = vi.fn(honestAboutItsSlice);
+    const queue = createTranscriptionQueue({
+      transcriber: { transcribe },
+      decode: async () => indexedPcm(LONG_TOTAL_MS),
+      getModel: async () => MODEL,
+      now: () => 1000,
+      windowMs: LONG_WINDOW_MS,
+      readPcmCache: async () => null,
+      writePcmCache: async () => {},
+      dropPcmCache: async () => {},
+    });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe).toHaveBeenCalledTimes(3);
+    // Every segment says where its audio really began; the stamped time must
+    // agree. A boundary-offset bug shows up as a fixed `WINDOW_OVERLAP_MS`
+    // gap on every window after the first.
+    for (const segment of writesFor(id).at(-1)!.segments) {
+      const claimed = Number(segment.text.replace('truly at ', ''));
+      expect(segment.startMs).toBe(claimed);
+    }
+  });
+
+  it('does not persist the lead-in twice at a seam', async () => {
+    const id = await makeRecording();
+    const queue = createTranscriptionQueue({
+      transcriber: { transcribe: honestAboutItsSlice },
+      decode: async () => indexedPcm(LONG_TOTAL_MS),
+      getModel: async () => MODEL,
+      now: () => 1000,
+      windowMs: LONG_WINDOW_MS,
+      readPcmCache: async () => null,
+      writePcmCache: async () => {},
+      dropPcmCache: async () => {},
+    });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    const segments = writesFor(id).at(-1)!.segments;
+    // The same words, heard once by the window that owns them and again as
+    // the next window's lead-in, must appear exactly once.
+    const texts = segments.map((s) => s.text);
+    expect(new Set(texts).size).toBe(texts.length);
+    const starts = segments.map((s) => s.startMs);
+    expect([...starts].sort((a, b) => a - b)).toEqual(starts);
+  });
+});
+
+describe('a reloaded tab reclaiming its own job', () => {
+  it('recognises itself across a reload and resumes immediately', async () => {
+    // ⚑ The exact scenario this feature exists for: a job is mid-flight, the
+    // tab reloads, and the new page builds a new queue. If that queue is a
+    // different lease owner it locks itself out of its own work until the
+    // lease goes stale - with a Retry button that silently does nothing.
+    const id = await makeRecording();
+    // Queue A runs, leaving a `running` row stamped with its own lease.
+    const first = makeQueue();
+    await first.queue.enqueue(id);
+    await first.queue.whenIdle();
+    const leaseOwner = writesFor(id).find((r) => r.leaseOwner !== null)!.leaseOwner!;
+    await setRecordingTranscript(id, {
+      ...writesFor(id).at(-1)!,
+      status: 'running',
+      completedMs: 20_000,
+      leaseOwner,
+      leaseAt: 1000,
+    });
+    writeSpy.mockClear();
+
+    // The reload: same tab, brand new queue instance.
+    const reloaded = makeQueue();
+    await reloaded.queue.resume();
+    await reloaded.queue.whenIdle();
+
+    expect(reloaded.transcribe).toHaveBeenCalled();
+  });
+
+  it('still refuses a job a genuinely different tab is holding', async () => {
+    const id = await makeRecording();
+    await setRecordingTranscript(id, {
+      text: '',
+      segments: [],
+      model: MODEL,
+      language: null,
+      status: 'running',
+      error: null,
+      completedMs: 0,
+      leaseOwner: 'a-different-tab',
+      leaseAt: 1000,
+      updatedAt: 1,
+    });
+    const { queue, transcribe } = makeQueue();
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe).not.toHaveBeenCalled();
+  });
+
+  it('refreshes the lease from progress reports, not only from window writes', async () => {
+    // ⚑ A 5-minute window on a slow machine is 15-20 minutes of wall clock.
+    // If the heartbeat only lands on the window write, a healthy job's lease
+    // goes stale mid-window and another tab can take it - the interleaved
+    // write the lease exists to prevent.
+    const id = await makeRecording();
+    let clock = 1000;
+    const { queue } = makeQueue({
+      now: () => clock,
+      transcribe: async (pcm, opts) => {
+        // Three progress reports well apart, as a slow window's decode steps
+        // would be - the window itself outlasts the lease several times over.
+        for (let i = 0; i < 3; i += 1) {
+          clock += 30_000;
+          opts.onProgress?.(0, 'transcribing', i + 1);
+          await Promise.resolve();
+        }
+        return perWindow(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    const beats = writeSpy.mock.calls
+      .filter(([recordingId]) => recordingId === id)
+      .map(([, record]) => record.leaseAt)
+      .filter((at): at is number => typeof at === 'number');
+    // Far more distinct heartbeats than the three window writes alone.
+    expect(new Set(beats).size).toBeGreaterThan(3);
+  });
+});
+
+
+describe('rejecting a cached decode that does not match its recording', () => {
+  it('re-decodes a cache row shorter than the audio, even when it clears the cursor', async () => {
+    // ⚑ The silent-truncation case. A row long enough to pass the cursor
+    // check but short of the recording runs out of windows early and writes
+    // `done` on a lecture that was never finished.
+    const id = await makeRecording();
+    const { queue, decode, cache } = makeQueue({ cachedMs: TOTAL_MS / 2 });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(cache.read).toHaveBeenCalledWith(id);
+    expect(decode).toHaveBeenCalledTimes(1);
+    expect(writesFor(id).at(-1)!.completedMs).toBe(TOTAL_MS);
+  });
+
+  it('accepts a cache row whose length matches the recording', async () => {
+    const id = await makeRecording();
+    const { queue, decode } = makeQueue({ cachedMs: TOTAL_MS });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(decode).not.toHaveBeenCalled();
   });
 });

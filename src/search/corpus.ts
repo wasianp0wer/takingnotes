@@ -77,15 +77,23 @@ export interface SearchCorpus {
  * `failed` is still excluded: its text is whatever a previous attempt left
  * behind, and nothing is coming to finish it without the owner asking.
  */
-function hasSearchableTranscript(recording: RecordingRecord): boolean {
+export function hasSearchableTranscript(recording: RecordingRecord): boolean {
   const status = recording.transcript?.status;
   return status === 'done' || status === 'running' || status === 'paused';
 }
 
-/** Not fully transcribed: nothing yet, or stopped partway. */
+/**
+ * Not fully transcribed: anything but `done`.
+ *
+ * ⚑ `pending` and `failed` count too. Record three lectures and search
+ * before the queue reaches them and the view would otherwise say nothing
+ * while reading none of them; and a `failed` recording's words are missing
+ * from the results just as surely as a queued one's. The spec's anti-goal is
+ * a partial transcript presented as though it were complete, and silence
+ * about either of these is exactly that.
+ */
 function isPartiallyTranscribed(recording: RecordingRecord): boolean {
-  const status = recording.transcript?.status;
-  return status === undefined || status === 'running' || status === 'paused';
+  return recording.transcript?.status !== 'done';
 }
 
 /**

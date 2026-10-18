@@ -10,6 +10,7 @@ const storage = vi.hoisted(() => ({
   getRecordingAudio: vi.fn(),
   listFinishedRecordings: vi.fn(),
   setRecordingTranscript: vi.fn(),
+  takeTranscriptionLease: vi.fn(async () => true),
 }));
 
 vi.mock('@/storage/recordings', () => storage);

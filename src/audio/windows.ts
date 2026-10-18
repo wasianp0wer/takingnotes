@@ -44,6 +44,18 @@ export interface PcmWindow {
    */
   startSample: number;
   endSample: number;
+  /**
+   * `startSample` as a time on the recording's clock - where the audio handed
+   * to the transcriber actually begins.
+   *
+   * ⚑ This, not `startMs`, is what a caller must pass as the transcription's
+   * offset. Whisper returns times relative to the first sample it was given,
+   * which is the lead-in, so offsetting by the boundary stamps every window
+   * after the first late by `WINDOW_OVERLAP_MS` - and, because the seam
+   * dedupe compares against the boundary, lets the repeated lead-in through
+   * as well. The field exists so the correct value is the one to hand.
+   */
+  sliceStartMs: number;
 }
 
 function samplesAt(ms: number): number {
@@ -72,10 +84,12 @@ export function planWindows(
   const windows: PcmWindow[] = [];
   for (let at = start; at < totalMs; at += windowMs) {
     const endMs = Math.min(at + windowMs, totalMs);
+    const sliceStartMs = Math.max(0, at - WINDOW_OVERLAP_MS);
     windows.push({
       startMs: at,
       endMs,
-      startSample: samplesAt(Math.max(0, at - WINDOW_OVERLAP_MS)),
+      sliceStartMs,
+      startSample: samplesAt(sliceStartMs),
       // Clamped, so float rounding on the last window can never slice past
       // the end of the buffer.
       endSample: Math.min(totalSamples, samplesAt(endMs)),

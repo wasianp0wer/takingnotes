@@ -270,3 +270,51 @@ describe('snippetAround', () => {
     expect(snippet).toContain('needle');
   });
 });
+
+describe('Find and the corpus agree about which transcripts are real', () => {
+  it('does not return segments from a failed transcript', () => {
+    // ⚑ `corpus.ts` excludes a failed transcript from smart search as "a
+    // stale attempt's leftovers". Find read the same row with no status gate
+    // at all, so the two paths disagreed - and the ungated one was the one
+    // with no warning attached.
+    const recording = {
+      id: 'r1',
+      title: 'Lecture',
+      transcript: {
+        status: 'failed',
+        error: 'boom',
+        segments: [{ startMs: 0, endMs: 500, text: 'mitochondria' }],
+        text: 'mitochondria',
+      },
+    } as unknown as RecordingRecord;
+    const corpus: SearchCorpus = {
+      notes: [],
+      recordings: [recording],
+      recordingOwner: new Map(),
+      partialTranscriptCount: 1,
+    };
+
+    expect(findInCorpus(corpus, 'mitochondria')).toEqual([]);
+  });
+
+  it('still returns segments from a running transcript', () => {
+    const recording = {
+      id: 'r1',
+      title: 'Lecture',
+      transcript: {
+        status: 'running',
+        error: null,
+        segments: [{ startMs: 0, endMs: 500, text: 'mitochondria' }],
+        text: 'mitochondria',
+      },
+    } as unknown as RecordingRecord;
+    const corpus: SearchCorpus = {
+      notes: [],
+      recordings: [recording],
+      recordingOwner: new Map(),
+      partialTranscriptCount: 1,
+    };
+
+    expect(findInCorpus(corpus, 'mitochondria')).toHaveLength(1);
+  });
+});

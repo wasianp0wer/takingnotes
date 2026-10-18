@@ -15,6 +15,7 @@ import {
   recordingOwnersByNote,
   recordingsForNote,
   setRecordingTranscript,
+  takeTranscriptionLease,
   updateRecording,
 } from '@/storage/recordings';
 import {
@@ -442,5 +443,80 @@ describe('recordingOwnersByNote (fix round 3, I5)', () => {
     }
     const batched = recordingOwnersByNote([viaSession, direct], finished);
     expect(batched).toEqual(looped);
+  });
+});
+
+describe('takeTranscriptionLease', () => {
+  async function seeded(transcript: AudioTranscriptRecord | null = null) {
+    const recording = await createRecording(
+      { title: 'Lecture', durationMs: 1000 },
+      new Blob(['a'], { type: 'audio/webm' }),
+    );
+    if (transcript) await setRecordingTranscript(recording.id, transcript);
+    return recording.id;
+  }
+
+  const row = (over: Partial<AudioTranscriptRecord> = {}): AudioTranscriptRecord => ({
+    text: '',
+    segments: [],
+    model: 'whisper',
+    language: null,
+    status: 'running',
+    error: null,
+    completedMs: 0,
+    leaseOwner: null,
+    leaseAt: null,
+    updatedAt: 1,
+    ...over,
+  });
+
+  it('grants the lease when nobody holds it', async () => {
+    const id = await seeded(row());
+
+    expect(await takeTranscriptionLease(id, 'tab-a', 1000, 60_000)).toBe(true);
+    expect((await getRecording(id))!.transcript!.leaseOwner).toBe('tab-a');
+  });
+
+  it('grants the lease when there is no transcript row at all', async () => {
+    const id = await seeded();
+
+    expect(await takeTranscriptionLease(id, 'tab-a', 1000, 60_000)).toBe(true);
+  });
+
+  it('refuses while another owner holds a fresh lease', async () => {
+    const id = await seeded(row({ leaseOwner: 'tab-b', leaseAt: 1000 }));
+
+    expect(await takeTranscriptionLease(id, 'tab-a', 1500, 60_000)).toBe(false);
+    expect((await getRecording(id))!.transcript!.leaseOwner).toBe('tab-b');
+  });
+
+  it('grants the lease once the holder has gone stale', async () => {
+    const id = await seeded(row({ leaseOwner: 'tab-b', leaseAt: 1000 }));
+
+    expect(await takeTranscriptionLease(id, 'tab-a', 1000 + 60_001, 60_000)).toBe(true);
+  });
+
+  it('grants the lease back to the owner that already holds it', async () => {
+    const id = await seeded(row({ leaseOwner: 'tab-a', leaseAt: 1000 }));
+
+    expect(await takeTranscriptionLease(id, 'tab-a', 1500, 60_000)).toBe(true);
+  });
+
+  it('refuses for a recording that no longer exists', async () => {
+    expect(await takeTranscriptionLease('gone', 'tab-a', 1000, 60_000)).toBe(false);
+  });
+
+  it('decides and writes atomically, so two tabs racing cannot both win', async () => {
+    // ⚑ The scenario the lease exists for: two tabs open at once, both run
+    // resume() at launch. A read-then-write lets both read "unheld" before
+    // either writes, and both transcribe into the same row.
+    const id = await seeded(row());
+
+    const [a, b] = await Promise.all([
+      takeTranscriptionLease(id, 'tab-a', 1000, 60_000),
+      takeTranscriptionLease(id, 'tab-b', 1000, 60_000),
+    ]);
+
+    expect([a, b].filter(Boolean)).toHaveLength(1);
   });
 });

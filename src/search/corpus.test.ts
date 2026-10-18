@@ -258,3 +258,55 @@ describe('partial transcripts in the corpus', () => {
     expect(corpus.partialTranscriptCount).toBe(0);
   });
 });
+
+describe('what Find and the caveat disagree about (review I4)', () => {
+  async function seedRecording(
+    noteId: string,
+    title: string,
+    transcript: Parameters<typeof setRecordingTranscript>[1] | null,
+    startedAt = 1000,
+  ): Promise<string> {
+    const recording = await createRecording(
+      { title, noteId, startedAt, durationMs: 1000 },
+      new Blob(['a']),
+    );
+    await finalizeRecording(recording.id, new Blob(['a']), {
+      endedAt: startedAt + 1000,
+      durationMs: 1000,
+    });
+    if (transcript) await setRecordingTranscript(recording.id, transcript);
+    return recording.id;
+  }
+
+  it('counts a pending recording as not fully transcribed', async () => {
+    // ⚑ Record three lectures and search before the queue reaches them: the
+    // view used to say nothing at all, though none of the corpus was read.
+    const note = await createNote({ title: 'Lecture', deviceId: 'd1', pageBaseline: 0 });
+    await seedRecording(note.id, 'queued', {
+      text: '',
+      segments: [],
+      model: 'whisper',
+      language: null,
+      status: 'pending',
+      error: null,
+      updatedAt: 1,
+    });
+
+    expect((await loadSearchCorpus()).partialTranscriptCount).toBe(1);
+  });
+
+  it('counts a failed recording as not fully transcribed', async () => {
+    const note = await createNote({ title: 'Lecture', deviceId: 'd1', pageBaseline: 0 });
+    await seedRecording(note.id, 'failed', {
+      text: 'leftovers from a stale attempt',
+      segments: [{ startMs: 0, endMs: 500, text: 'leftovers from a stale attempt' }],
+      model: 'whisper',
+      language: 'en',
+      status: 'failed',
+      error: 'boom',
+      updatedAt: 1,
+    });
+
+    expect((await loadSearchCorpus()).partialTranscriptCount).toBe(1);
+  });
+});
