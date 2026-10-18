@@ -38,3 +38,27 @@ describe('languageForModel', () => {
     expect(languageForModel('onnx-community/whisper-base')).toBeNull();
   });
 });
+
+
+describe('chunksToSegments offsetting', () => {
+  it('offsets segment times by the window start', () => {
+    const segments = chunksToSegments([{ timestamp: [1, 2], text: 'hi' }], 30_000, 600_000);
+
+    expect(segments[0]).toEqual({ startMs: 601_000, endMs: 602_000, text: 'hi' });
+  });
+
+  it('offsets a chunk whose end is filled from the window duration', () => {
+    // A final chunk with no end falls back to `durationMs` - which is the
+    // *window's* duration, so it needs the offset too or the last segment of
+    // every window after the first lands back near the start of the recording.
+    const segments = chunksToSegments([{ timestamp: [1, null], text: 'tail' }], 30_000, 600_000);
+
+    expect(segments[0]).toEqual({ startMs: 601_000, endMs: 630_000, text: 'tail' });
+  });
+
+  it('defaults to no offset', () => {
+    const segments = chunksToSegments([{ timestamp: [1, 2], text: 'hi' }], 30_000);
+
+    expect(segments[0].startMs).toBe(1000);
+  });
+});

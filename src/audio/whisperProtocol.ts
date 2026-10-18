@@ -16,7 +16,20 @@ export type WhisperRequest =
   | { type: 'cancel'; id: number };
 
 export type WhisperResponse =
-  | { type: 'progress'; id: number; stage: TranscribeStage; progress: number }
+  | {
+      type: 'progress';
+      id: number;
+      stage: TranscribeStage;
+      /** 0-1 while `loading`. Always 0 while `transcribing`: see `passes`. */
+      progress: number;
+      /**
+       * Decode passes finished so far, while `transcribing`. There is
+       * deliberately no total: the pipeline decides how many passes a window
+       * needs as it goes (`_generate_with_seek`), so the only honest report is
+       * the count, and a count is enough to tell a working job from a dead one.
+       */
+      passes?: number;
+    }
   | { type: 'result'; id: number; text: string; chunks: WhisperChunk[] }
   | { type: 'error'; id: number; message: string };
 
@@ -31,19 +44,33 @@ export const WHISPER_OPTIONS = {
  * Maps Whisper chunks (seconds) to transcript segments (ms offsets from the recording start).
  * Chunks are sorted by start and blank ones dropped; a missing end is filled from the next
  * chunk's start, or from `durationMs` for the last chunk.
+ *
+ * `durationMs` is the duration of whatever audio was transcribed, and
+ * `offsetMs` is where that audio began in the recording. For a whole-recording
+ * call both are what they have always been (`offsetMs` 0); for one window of a
+ * chunked transcription, `durationMs` is the window's length and `offsetMs` is
+ * its start, which is what lifts the window's local times back onto the
+ * recording's own clock.
  */
-export function chunksToSegments(chunks: readonly WhisperChunk[], durationMs: number): TranscriptSegment[] {
+export function chunksToSegments(
+  chunks: readonly WhisperChunk[],
+  durationMs: number,
+  offsetMs = 0,
+): TranscriptSegment[] {
   const kept = chunks
     .filter((chunk) => chunk.text.trim() !== '')
     .sort((a, b) => a.timestamp[0] - b.timestamp[0]);
 
   return kept.map((chunk, index) => {
     const [startSeconds, endSeconds] = chunk.timestamp;
-    const startMs = Math.round(startSeconds * 1000);
+    const startMs = Math.round(startSeconds * 1000) + offsetMs;
     const end = endSeconds ?? kept[index + 1]?.timestamp[0] ?? durationMs / 1000;
     return {
       startMs,
-      endMs: Math.max(startMs, Math.round(end * 1000)),
+      // The offset lands on the end too, including the `durationMs` fallback:
+      // without it the last segment of every window after the first would be
+      // stamped back near the start of the recording.
+      endMs: Math.max(startMs, Math.round(end * 1000) + offsetMs),
       text: chunk.text.trim(),
     };
   });
