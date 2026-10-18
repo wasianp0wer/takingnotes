@@ -892,6 +892,8 @@ describe('transcription queue', () => {
       stage: 'loading',
       progress: 0.5,
       passes: null,
+      completedMs: 0,
+      durationMs: 1_000,
       queuedIds: [],
     });
     expect(states.at(-1)).toEqual({
@@ -899,6 +901,8 @@ describe('transcription queue', () => {
       stage: null,
       progress: null,
       passes: null,
+      completedMs: null,
+      durationMs: null,
       queuedIds: [],
     });
     expect(changed).toEqual([id, id, id]);
@@ -937,6 +941,8 @@ describe('transcription queue', () => {
       stage: null,
       progress: null,
       passes: null,
+      completedMs: null,
+      durationMs: null,
       queuedIds: [],
     });
 

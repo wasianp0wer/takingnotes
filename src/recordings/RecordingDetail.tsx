@@ -141,6 +141,15 @@ export function RecordingDetail({
     (transcript?.status === 'pending' || transcript?.status === 'running') &&
     !isActive &&
     !isQueued;
+  /**
+   * How far the transcription has got, as a real proportion. From the live
+   * queue while this is the active job, and from the persisted cursor
+   * otherwise - which is what lets a paused or reloaded job still say where
+   * it stopped.
+   */
+  const completedMs = (isActive ? queueState.completedMs : null) ?? transcript?.completedMs ?? 0;
+  const totalMs = (isActive ? queueState.durationMs : null) ?? recording.durationMs;
+  const percent = totalMs > 0 ? Math.min(100, Math.round((completedMs / totalMs) * 100)) : 0;
 
   return (
     <div className="flex flex-col gap-4">
@@ -207,6 +216,25 @@ export function RecordingDetail({
         </div>
       )}
 
+      {(transcript?.status === 'running' || transcript?.status === 'paused') &&
+        transcript.text !== '' && (
+          // What has landed so far. Shown while the job runs and while it is
+          // paused: a partial transcript is the whole point of the cursor,
+          // and hiding it until `done` would waste it.
+          <p className="whitespace-pre-wrap text-sm text-muted-foreground">{transcript.text}</p>
+        )}
+
+      {transcript?.status === 'paused' && (
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground">
+            Paused at {formatClock(completedMs)} of {formatClock(totalMs)} ({percent}%)
+          </p>
+          <Button size="sm" onClick={() => void queue.retry(recording.id)}>
+            Resume
+          </Button>
+        </div>
+      )}
+
       {transcript?.status === 'running' && (
         <div className="space-y-2">
           <p className="text-sm text-muted-foreground">Transcribing…</p>
@@ -224,15 +252,21 @@ export function RecordingDetail({
             <p className="text-xs text-muted-foreground">Preparing the audio…</p>
           )}
           {isActive && queueState.stage === 'transcribing' && (
-            // ⚑ A climbing count, not a percentage. The pipeline decides how
-            // many decode passes each 30-second window needs as it runs, so
-            // there is no total here to be a proportion of - and presenting the
-            // count as one pinned this at "100%" partway through a lecture,
-            // which reads as stuck. The number going up is the sign of life;
-            // how much is left is genuinely not knowable from here.
-            <p className="text-xs text-muted-foreground">
-              {queueState.passes ?? 0} passes decoded so far
-            </p>
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">
+                {formatClock(completedMs)} of {formatClock(totalMs)} ({percent}%)
+              </p>
+              <Progress value={percent} />
+              {/* ⚑ A climbing count, deliberately not presented as a
+                  proportion: the pipeline decides how many decode passes each
+                  30-second window needs as it runs, so there is no total here
+                  to be a fraction of. The bar above is the real proportion -
+                  windows finished against the recording's length - and this
+                  is the sign of life *within* the window in flight. */}
+              <p className="text-xs text-muted-foreground">
+                {queueState.passes ?? 0} passes decoded in this window
+              </p>
+            </div>
           )}
           {(isActive || isQueued) && (
             <Button variant="outline" size="sm" onClick={() => void queue.pause(recording.id)}>

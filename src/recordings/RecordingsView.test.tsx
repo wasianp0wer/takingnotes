@@ -62,6 +62,8 @@ function createFakeQueue(initial: Partial<TranscriptionQueueState> = {}): FakeQu
     stage: null,
     progress: null,
     passes: null,
+    completedMs: null,
+    durationMs: null,
     queuedIds: [],
     ...initial,
   };
@@ -222,6 +224,77 @@ describe('RecordingsView', () => {
     expect(row?.textContent).toContain('Paused');
   });
 
+  it('shows the partial transcript text while a job is running', async () => {
+    const recording = await seed({ title: 'In progress' });
+    await setRecordingTranscript(recording.id, {
+      text: 'the first few minutes',
+      segments: [{ startMs: 0, endMs: 1000, text: 'the first few minutes' }],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'running',
+      error: null,
+      completedMs: 30_000,
+      updatedAt: Date.now(),
+    });
+    const queue = createFakeQueue({ activeId: recording.id });
+
+    render(queue);
+    await flushAll();
+
+    expect(container.textContent).toContain('the first few minutes');
+  });
+
+  it('shows how far a transcription has got as a real proportion', async () => {
+    const recording = await seed({ title: 'In progress' });
+    await setRecordingTranscript(recording.id, {
+      text: 'so far',
+      segments: [{ startMs: 0, endMs: 1000, text: 'so far' }],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'running',
+      error: null,
+      completedMs: 30_000,
+      updatedAt: Date.now(),
+    });
+    const queue = createFakeQueue({
+      activeId: recording.id,
+      stage: 'transcribing',
+      completedMs: 30_000,
+      durationMs: 120_000,
+    });
+
+    render(queue);
+    await flushAll();
+
+    expect(container.textContent).toContain('25%');
+  });
+
+  it('offers Resume on a paused transcription and shows what it kept', async () => {
+    const recording = await seed({ title: 'Half done' });
+    await setRecordingTranscript(recording.id, {
+      text: 'the part it heard',
+      segments: [{ startMs: 0, endMs: 1000, text: 'the part it heard' }],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'paused',
+      error: null,
+      completedMs: 30_000,
+      updatedAt: Date.now(),
+    });
+    const queue = createFakeQueue();
+
+    render(queue);
+    await flushAll();
+
+    expect(container.textContent).toContain('Paused at');
+    expect(container.textContent).toContain('the part it heard');
+    const resume = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Resume');
+    expect(resume).toBeTruthy();
+    await click(resume!);
+
+    expect(queue.retry).toHaveBeenCalledWith(recording.id);
+  });
+
   it('shows a failed transcript error and retries', async () => {
     const recording = await seed({ title: 'Broken' });
     await setRecordingTranscript(recording.id, {
@@ -267,7 +340,7 @@ describe('RecordingsView', () => {
     expect(container.textContent).toContain('Downloading model 42%');
   });
 
-  it('shows the decode passes finished so far, never a percentage of the audio', async () => {
+  it('shows decode passes as a count, with the real proportion coming from the cursor', async () => {
     const recording = await seed({ title: 'Lecture 4' });
     await setRecordingTranscript(recording.id, {
       text: '',
@@ -276,6 +349,7 @@ describe('RecordingsView', () => {
       language: null,
       status: 'running',
       error: null,
+      completedMs: 0,
       updatedAt: Date.now(),
     });
     const queue = createFakeQueue({
@@ -283,17 +357,22 @@ describe('RecordingsView', () => {
       stage: 'transcribing',
       progress: 0,
       passes: 137,
+      completedMs: 16_250,
+      durationMs: 65_000,
     });
 
     render(queue);
     await flushAll();
 
-    // ⚑ A count that climbs is the only honest sign of life here: the pipeline
-    // decides how many decode passes each window needs as it goes, so there is
-    // no total to be a percentage of. Showing one made the bar sit at "100%"
-    // partway through a lecture, which read as stuck.
+    // ⚑ The passes count is still a count, never a percentage: the pipeline
+    // decides how many decode passes the window in flight needs as it goes,
+    // so there is no total to be a fraction of. Presenting one pinned this at
+    // "100%" partway through a lecture, which read as stuck.
     expect(container.textContent).toContain('137 passes');
-    expect(container.textContent).not.toContain('%');
+    expect(container.textContent).not.toContain('137 passes decoded so far (');
+    // The honest proportion is windows finished against the recording length,
+    // which the cursor now gives.
+    expect(container.textContent).toContain('25%');
   });
 
   it('says an active job that has not reported a stage yet is still preparing', async () => {

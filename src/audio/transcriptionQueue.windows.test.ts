@@ -754,3 +754,37 @@ describe('the single-writer lease', () => {
     expect(paused.leaseOwner).toBeNull();
   });
 });
+
+describe('the queue state a view reads', () => {
+  it('reports the cursor and the recording duration while transcribing', async () => {
+    const id = await makeRecording();
+    const seen: { completedMs: number | null; durationMs: number | null }[] = [];
+    const { queue } = makeQueue({
+      transcribe: async (pcm, opts) => {
+        const state = queue.getState();
+        seen.push({ completedMs: state.completedMs, durationMs: state.durationMs });
+        return perWindow(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(seen).toEqual([
+      { completedMs: 0, durationMs: TOTAL_MS },
+      { completedMs: 100, durationMs: TOTAL_MS },
+      { completedMs: 200, durationMs: TOTAL_MS },
+    ]);
+  });
+
+  it('clears the cursor and duration when the queue goes idle', async () => {
+    const id = await makeRecording();
+    const { queue } = makeQueue();
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(queue.getState().completedMs).toBeNull();
+    expect(queue.getState().durationMs).toBeNull();
+  });
+});

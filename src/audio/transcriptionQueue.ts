@@ -40,6 +40,14 @@ export interface TranscriptionQueueState {
    * and a count that climbs is what tells a working job from a dead one.
    */
   passes: number | null;
+  /**
+   * How much of the active recording is transcribed, and how long it is, in
+   * ms. Both null when idle. Together they are the one honest proportion this
+   * queue can report - `passes` has no total to be a fraction of, and
+   * `progress` only means anything while the model is loading.
+   */
+  completedMs: number | null;
+  durationMs: number | null;
   /** Waiting ids in order, excluding the active one. */
   queuedIds: readonly string[];
 }
@@ -178,6 +186,8 @@ const IDLE: TranscriptionQueueState = {
   stage: null,
   progress: null,
   passes: null,
+  completedMs: null,
+  durationMs: null,
   queuedIds: [],
 };
 
@@ -201,6 +211,8 @@ function sameState(a: TranscriptionQueueState, b: TranscriptionQueueState): bool
     a.stage === b.stage &&
     a.progress === b.progress &&
     a.passes === b.passes &&
+    a.completedMs === b.completedMs &&
+    a.durationMs === b.durationMs &&
     a.queuedIds.length === b.queuedIds.length &&
     a.queuedIds.every((id, i) => id === b.queuedIds[i])
   );
@@ -243,6 +255,8 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
   let stage: TranscribeStage | null = null;
   let progress: number | null = null;
   let passes: number | null = null;
+  let completedMs: number | null = null;
+  let durationMs: number | null = null;
   let state: TranscriptionQueueState = IDLE;
   let draining: Promise<void> | null = null;
   /**
@@ -270,6 +284,8 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       stage,
       progress,
       passes,
+      completedMs,
+      durationMs,
       queuedIds: queuedIds(),
     };
     if (sameState(state, next)) return;
@@ -440,6 +456,15 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     let segments: TranscriptSegment[] = resumed?.segments ? [...resumed.segments] : [];
     let cursorMs = resumed?.completedMs ?? 0;
     let language: string | null = resumed?.language ?? null;
+
+    /** Publishes the cursor so a view can show a real proportion. */
+    const publishCursor = (): void => {
+      if (activeId !== id) return;
+      completedMs = cursorMs;
+      durationMs = recording.durationMs;
+      emit();
+    };
+    publishCursor();
 
     // ⚑ Not `blank(...)`: against a resumed job that would wipe the very
     // partial transcript this feature exists to keep, and wipe it before the
@@ -660,6 +685,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
         // that same quiet stretch for good.
         cursorMs = window.endMs;
         language = result.language ?? language;
+        publishCursor();
 
         const last = index === windows.length - 1;
         if (last) finished = true;
@@ -745,6 +771,8 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       stage = null;
       progress = null;
       passes = null;
+      completedMs = null;
+      durationMs = null;
       emit();
       let yielded = false;
       try {
@@ -759,6 +787,8 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
         stage = null;
         progress = null;
         passes = null;
+        completedMs = null;
+        durationMs = null;
         // ⚑ Back to the FRONT of its own class, not the back: a job that
         // stepped aside for something more urgent has already done work, and
         // sending it behind the rest of the backlog would be a demotion for
