@@ -112,7 +112,7 @@ describe('loadSearchCorpus', () => {
     expect(found.primaryRecordingId).toBe(earlier.id);
   });
 
-  it('excludes a failed or still-running transcript from audioText, and skips a recording with no owning note', async () => {
+  it('excludes a failed transcript from audioText, and skips a recording with no owning note', async () => {
     const note = await createNote({ title: 'Lecture', deviceId: 'd1', pageBaseline: 0 });
     const failed = await createRecording(
       { title: 'failed', noteId: note.id, startedAt: 1000, durationMs: 1000 },
@@ -154,5 +154,107 @@ describe('loadSearchCorpus', () => {
     const corpus = await loadSearchCorpus();
     expect(corpus.notes[0].audioText).toBe('');
     expect(corpus.notes[0].primaryRecordingId).toBeNull();
+  });
+});
+
+describe('partial transcripts in the corpus', () => {
+  /** A finished recording owned by `noteId`, with the given transcript shape. */
+  async function seedRecording(
+    noteId: string | undefined,
+    title: string,
+    transcript: Parameters<typeof setRecordingTranscript>[1] | null,
+    startedAt = 1000,
+  ): Promise<string> {
+    const recording = await createRecording(
+      { title, noteId: noteId ?? null, startedAt, durationMs: 1000 },
+      new Blob(['a']),
+    );
+    await finalizeRecording(recording.id, new Blob(['a']), {
+      endedAt: startedAt + 1000,
+      durationMs: 1000,
+    });
+    if (transcript) await setRecordingTranscript(recording.id, transcript);
+    return recording.id;
+  }
+
+  const partial = (text: string, status: 'running' | 'paused') => ({
+    text,
+    segments: text === '' ? [] : [{ startMs: 0, endMs: 500, text }],
+    model: 'whisper',
+    language: 'en',
+    status,
+    error: null,
+    completedMs: 500,
+    updatedAt: 1,
+  });
+
+  it('includes a running transcript with real text in audioText', async () => {
+    const note = await createNote({ title: 'Lecture', deviceId: 'd1', pageBaseline: 0 });
+    const id = await seedRecording(note.id, 'half done', partial('partial words', 'running'));
+
+    const corpus = await loadSearchCorpus();
+
+    const found = corpus.notes.find((n) => n.note.id === note.id)!;
+    expect(found.audioText).toContain('partial words');
+    expect(found.primaryRecordingId).toBe(id);
+  });
+
+  it('includes a paused transcript with real text in audioText', async () => {
+    const note = await createNote({ title: 'Lecture', deviceId: 'd1', pageBaseline: 0 });
+    await seedRecording(note.id, 'paused', partial('what it heard before stopping', 'paused'));
+
+    const corpus = await loadSearchCorpus();
+
+    expect(corpus.notes.find((n) => n.note.id === note.id)!.audioText).toContain(
+      'what it heard before stopping',
+    );
+  });
+
+  it('still excludes a running transcript with no text yet', async () => {
+    const note = await createNote({ title: 'Lecture', deviceId: 'd1', pageBaseline: 0 });
+    await seedRecording(note.id, 'just started', partial('', 'running'));
+
+    const corpus = await loadSearchCorpus();
+
+    const found = corpus.notes.find((n) => n.note.id === note.id)!;
+    expect(found.audioText).toBe('');
+    expect(found.primaryRecordingId).toBeNull();
+  });
+
+  it('counts the recordings that are not fully transcribed', async () => {
+    const note = await createNote({ title: 'Lecture', deviceId: 'd1', pageBaseline: 0 });
+    await seedRecording(note.id, 'done', {
+      text: 'all of it',
+      segments: [],
+      model: 'whisper',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    }, 1000);
+    await seedRecording(note.id, 'running', partial('some', 'running'), 2000);
+    await seedRecording(note.id, 'paused', partial('some', 'paused'), 3000);
+    await seedRecording(note.id, 'never started', null, 4000);
+
+    const corpus = await loadSearchCorpus();
+
+    expect(corpus.partialTranscriptCount).toBe(3);
+  });
+
+  it('counts nothing when every recording is transcribed', async () => {
+    const note = await createNote({ title: 'Lecture', deviceId: 'd1', pageBaseline: 0 });
+    await seedRecording(note.id, 'done', {
+      text: 'all of it',
+      segments: [],
+      model: 'whisper',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
+
+    const corpus = await loadSearchCorpus();
+
+    expect(corpus.partialTranscriptCount).toBe(0);
   });
 });

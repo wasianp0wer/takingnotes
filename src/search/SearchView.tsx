@@ -211,6 +211,20 @@ export function SearchView({ smartSearchDeps, onOpenNotes, onOpenRecordings }: S
 
           {error && <p className="text-sm text-destructive">{error}</p>}
 
+          {debouncedQuery.trim() !== '' && corpus.partialTranscriptCount > 0 && (
+            // ⚑ Rendered once for the whole view, covering both modes.
+            // Find reads `transcript.segments` with no status gate, so it
+            // returns partial hits whether or not anything asked it to;
+            // smart search reads the same partial text through `audioText`.
+            // Either way the honest claim is that some of what was searched
+            // is not all there yet.
+            <p className="text-xs text-muted-foreground">
+              {corpus.partialTranscriptCount}{' '}
+              {corpus.partialTranscriptCount === 1 ? 'recording is' : 'recordings are'} not fully
+              transcribed yet, so these results may be incomplete.
+            </p>
+          )}
+
           {debouncedQuery.trim() !== '' && (
             <ul className="space-y-2">
               {hits.length > FIND_RESULTS_CAP && (

@@ -39,7 +39,7 @@ function makeSearchNote(
 }
 
 function corpusOf(notes: SearchNote[]): SearchCorpus {
-  return { notes, recordings: [], recordingOwner: new Map() };
+  return { notes, recordings: [], recordingOwner: new Map(), partialTranscriptCount: 0 };
 }
 
 describe('runSmartSearch', () => {

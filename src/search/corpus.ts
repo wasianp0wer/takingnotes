@@ -55,11 +55,37 @@ export interface SearchCorpus {
    * superseded).
    */
   recordingOwner: Map<string, string>;
+  /**
+   * How many finished recordings in this corpus are not fully transcribed -
+   * absent, `running` or `paused`. Surfaced so `SearchView` can say results
+   * may be incomplete, in **both** modes: since a `running` transcript now
+   * carries real segments, Find returns partial hits whether or not anything
+   * asked it to.
+   */
+  partialTranscriptCount: number;
 }
 
-/** A recording whose transcript is done is the only kind whose `.text` is real content, not a leftover from a different run. */
-function isDoneTranscribed(recording: RecordingRecord): boolean {
-  return recording.transcript?.status === 'done';
+/**
+ * Whether a recording's transcript text is real content rather than a
+ * leftover from a different run.
+ *
+ * `running` and `paused` count: since transcription became chunked, those
+ * rows carry every window finished so far, and the owner would rather search
+ * the first forty minutes of a lecture than nothing at all. What they do not
+ * carry is completeness, which is why `partialTranscriptCount` exists.
+ *
+ * `failed` is still excluded: its text is whatever a previous attempt left
+ * behind, and nothing is coming to finish it without the owner asking.
+ */
+function hasSearchableTranscript(recording: RecordingRecord): boolean {
+  const status = recording.transcript?.status;
+  return status === 'done' || status === 'running' || status === 'paused';
+}
+
+/** Not fully transcribed: nothing yet, or stopped partway. */
+function isPartiallyTranscribed(recording: RecordingRecord): boolean {
+  const status = recording.transcript?.status;
+  return status === undefined || status === 'running' || status === 'paused';
 }
 
 /**
@@ -94,12 +120,12 @@ export async function loadSearchCorpus(): Promise<SearchCorpus> {
   // `listFinishedRecordings()` scan) per note.
   const recordingOwner = recordingOwnersByNote(notes, recordings);
 
-  // Fix round 3, C1: group each note's own done-transcribed recordings,
+  // Fix round 3, C1: group each note's own searchable recordings,
   // oldest first, so `audioText` reads like the lecture unfolded and
   // `primaryRecordingId` names the earliest (likely the main sitting).
   const recordingsByNote = new Map<string, RecordingRecord[]>();
   for (const recording of recordings) {
-    if (!isDoneTranscribed(recording)) continue;
+    if (!hasSearchableTranscript(recording)) continue;
     const ownerId = recordingOwner.get(recording.id);
     if (ownerId === undefined) continue;
     const list = recordingsByNote.get(ownerId) ?? [];
@@ -110,11 +136,11 @@ export async function loadSearchCorpus(): Promise<SearchCorpus> {
 
   const searchNotes: SearchNote[] = notes.map((note) => {
     const owned = recordingsByNote.get(note.id) ?? [];
-    // Only recordings that actually have something to say - a done
-    // transcript with blank text (silence, or a Whisper run that heard
-    // nothing) contributes to neither the joined text nor the "primary"
-    // choice, so `primaryRecordingId` always names a recording whose words
-    // are genuinely part of `audioText`.
+    // Only recordings that actually have something to say - a transcript
+    // with blank text (silence, a Whisper run that heard nothing, or a job
+    // that has not finished its first window yet) contributes to neither the
+    // joined text nor the "primary" choice, so `primaryRecordingId` always
+    // names a recording whose words are genuinely part of `audioText`.
     const contributing = owned
       .map((r) => ({ recording: r, text: (r.transcript?.text ?? '').trim() }))
       .filter((entry) => entry.text.length > 0);
@@ -126,5 +152,10 @@ export async function loadSearchCorpus(): Promise<SearchCorpus> {
     };
   });
 
-  return { notes: searchNotes, recordings, recordingOwner };
+  return {
+    notes: searchNotes,
+    recordings,
+    recordingOwner,
+    partialTranscriptCount: recordings.filter(isPartiallyTranscribed).length,
+  };
 }

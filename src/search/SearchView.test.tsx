@@ -505,3 +505,87 @@ describe('SearchView', () => {
     root = createRoot(container);
   });
 });
+
+describe('the partial-transcript caveat', () => {
+  /** A finished recording whose transcription stopped partway. */
+  async function seedPartialRecording(title: string, text: string): Promise<void> {
+    const recording = await createRecording(
+      { title, startedAt: 1000, durationMs: 120_000 },
+      new Blob(['a']),
+    );
+    await finalizeRecording(recording.id, new Blob(['a']), {
+      endedAt: 121_000,
+      durationMs: 120_000,
+    });
+    await setRecordingTranscript(recording.id, {
+      text,
+      segments: [{ startMs: 0, endMs: 1000, text }],
+      model: 'whisper',
+      language: 'en',
+      status: 'running',
+      error: null,
+      completedMs: 40_000,
+      updatedAt: 1,
+    });
+  }
+
+  it('warns under Find results that some recordings are not fully transcribed', async () => {
+    // ⚑ Find reads `transcript.segments` with no status gate at all, so it
+    // returns partial hits whether or not anything asked it to. The warning
+    // is what keeps that honest.
+    await seedPartialRecording('Lecture', 'mitochondria are the powerhouse');
+    render();
+    await settle();
+
+    await type('mitochondria');
+
+    expect(container.textContent).toContain('mitochondria are the powerhouse');
+    expect(container.textContent).toContain('not fully transcribed');
+  });
+
+  it('warns alongside smart-search results too', async () => {
+    await createNote({ title: 'Biology', deviceId: 'd', pageBaseline: 0 });
+    await seedPartialRecording('Lecture', 'mitochondria are the powerhouse');
+    const gen = createFakeTextGenerator(['[1]', '{"band":"strong","reason":"about cells"}']);
+    render({ smartSearchDeps: { generator: gen, model: 'm' } });
+    await settle();
+
+    await type('mitochondria');
+    await click(buttonByText('Smart search'));
+
+    expect(container.textContent).toContain('about cells');
+    expect(container.textContent).toContain('not fully transcribed');
+  });
+
+  it('says nothing when every recording is fully transcribed', async () => {
+    const recording = await createRecording(
+      { title: 'Lecture', startedAt: 1000, durationMs: 1000 },
+      new Blob(['a']),
+    );
+    await finalizeRecording(recording.id, new Blob(['a']), { endedAt: 2000, durationMs: 1000 });
+    await setRecordingTranscript(recording.id, {
+      text: 'mitochondria are the powerhouse',
+      segments: [{ startMs: 0, endMs: 1000, text: 'mitochondria are the powerhouse' }],
+      model: 'whisper',
+      language: 'en',
+      status: 'done',
+      error: null,
+      updatedAt: 1,
+    });
+    render();
+    await settle();
+
+    await type('mitochondria');
+
+    expect(container.textContent).toContain('mitochondria are the powerhouse');
+    expect(container.textContent).not.toContain('not fully transcribed');
+  });
+
+  it('says nothing before a query is typed', async () => {
+    await seedPartialRecording('Lecture', 'mitochondria are the powerhouse');
+    render();
+    await settle();
+
+    expect(container.textContent).not.toContain('not fully transcribed');
+  });
+});

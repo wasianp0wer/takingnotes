@@ -45,7 +45,12 @@ function makeRecording(overrides: Partial<RecordingRecord> & { id: string }): Re
   };
 }
 
-const EMPTY: SearchCorpus = { notes: [], recordings: [], recordingOwner: new Map() };
+const EMPTY: SearchCorpus = {
+  notes: [],
+  recordings: [],
+  recordingOwner: new Map(),
+  partialTranscriptCount: 0,
+};
 
 describe('findInCorpus', () => {
   it('matches a note title, case-insensitively', () => {
@@ -111,6 +116,7 @@ describe('findInCorpus', () => {
         }),
       ],
       recordingOwner: new Map([['r1', 'n1']]),
+    partialTranscriptCount: 0,
     };
     const hits = findInCorpus(corpus, 'entropy');
     expect(hits).toHaveLength(1);
@@ -142,6 +148,7 @@ describe('findInCorpus', () => {
         }),
       ],
       recordingOwner: new Map(),
+    partialTranscriptCount: 0,
     };
     const hits = findInCorpus(corpus, 'gravity');
     expect(hits).toHaveLength(1);
@@ -182,6 +189,7 @@ describe('findInCorpus', () => {
         }),
       ],
       recordingOwner: new Map(),
+    partialTranscriptCount: 0,
     };
     expect(findInCorpus(corpus, 'gravity')).toHaveLength(1);
   });
@@ -241,6 +249,7 @@ describe('findInCorpus', () => {
         }),
       ],
       recordingOwner: new Map([['r1', 'n2']]),
+    partialTranscriptCount: 0,
     };
     const hits = findInCorpus(corpus, 'gravity');
     expect(hits).toHaveLength(1);
