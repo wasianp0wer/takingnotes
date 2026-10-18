@@ -66,18 +66,49 @@ const perWindow: TranscribeBody = async (_pcm, opts) => {
   };
 };
 
+/** Rejects the second window, leaving a job half done. */
+const failSecondWindow: TranscribeBody = async (pcm, opts) => {
+  if (opts.offsetMs === 100) throw new Error('boom');
+  return perWindow(pcm, opts);
+};
+
+function samplesFor(ms: number): number {
+  return (ms / 1000) * TARGET_SAMPLE_RATE;
+}
+
 function makeQueue(
   overrides: {
     transcribe?: TranscribeBody;
     decodeMs?: number;
+    /** Seed the cache with this much audio before the run; omit for an empty cache. */
+    cachedMs?: number;
+    cacheReadError?: unknown;
     stallTimeoutMs?: number;
     setTimer?: (fn: () => void, ms: number) => number;
     clearTimer?: (handle: number) => void;
   } = {},
 ) {
   const transcribe = vi.fn(overrides.transcribe ?? perWindow);
-  const samples = ((overrides.decodeMs ?? TOTAL_MS) / 1000) * TARGET_SAMPLE_RATE;
-  const decode = vi.fn(async () => new Float32Array(samples));
+  const decode = vi.fn(async () => new Float32Array(samplesFor(overrides.decodeMs ?? TOTAL_MS)));
+
+  // An in-memory stand-in for the `pcmCache` store, so these tests exercise
+  // the queue's cache *policy* without depending on IndexedDB round trips.
+  const rows = new Map<string, Float32Array>();
+  if (overrides.cachedMs !== undefined) rows.set('seeded', new Float32Array(0));
+  const read = vi.fn(async (recordingId: string) => {
+    if (overrides.cacheReadError !== undefined) throw overrides.cacheReadError;
+    if (overrides.cachedMs !== undefined && !rows.has(recordingId)) {
+      return new Float32Array(samplesFor(overrides.cachedMs));
+    }
+    return rows.get(recordingId) ?? null;
+  });
+  const write = vi.fn(async (recordingId: string, pcm: Float32Array) => {
+    rows.set(recordingId, pcm);
+  });
+  const drop = vi.fn(async (recordingId: string) => {
+    rows.delete(recordingId);
+  });
+
   const transcriber: AudioTranscriber = { transcribe };
   const queue = createTranscriptionQueue({
     transcriber,
@@ -85,11 +116,14 @@ function makeQueue(
     getModel: async () => MODEL,
     now: () => 1000,
     windowMs: WINDOW_MS,
+    readPcmCache: read,
+    writePcmCache: write,
+    dropPcmCache: drop,
     stallTimeoutMs: overrides.stallTimeoutMs,
     setTimer: overrides.setTimer,
     clearTimer: overrides.clearTimer,
   });
-  return { queue, transcribe, decode };
+  return { queue, transcribe, decode, cache: { read, write, drop } };
 }
 
 /** Stand-in timers, so the stall watchdog is driven by the test, not a clock. */
@@ -180,11 +214,7 @@ describe('the windowed transcribe loop', () => {
 
   it('keeps the segments it already had when a later window fails', async () => {
     const id = await makeRecording();
-    const failSecond: TranscribeBody = async (pcm, opts) => {
-      if (opts.offsetMs === 100) throw new Error('boom');
-      return perWindow(pcm, opts);
-    };
-    const { queue } = makeQueue({ transcribe: failSecond });
+    const { queue } = makeQueue({ transcribe: failSecondWindow });
 
     await queue.enqueue(id);
     await queue.whenIdle();
@@ -237,5 +267,142 @@ describe('the windowed transcribe loop', () => {
     const final = writesFor(id).at(-1)!;
     expect(final.status).toBe('done');
     expect(final.completedMs).toBe(40);
+  });
+});
+
+describe('resuming from the cursor, backed by the PCM cache', () => {
+  /** The transcript a half-finished job leaves behind: one window done, cursor at 100. */
+  const HALF: AudioTranscriptRecord = {
+    text: 'window 1',
+    segments: [{ startMs: 0, endMs: 50, text: 'window 1' }],
+    model: MODEL,
+    language: 'en',
+    status: 'running',
+    error: null,
+    completedMs: 100,
+    updatedAt: 1,
+  };
+
+  it('starts at the stored cursor instead of at zero', async () => {
+    const id = await makeRecording();
+    await setRecordingTranscript(id, HALF);
+    writeSpy.mockClear();
+    const { queue, transcribe } = makeQueue();
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe.mock.calls.map(([, opts]) => opts.offsetMs)).toEqual([100, 200]);
+    const final = writesFor(id).at(-1)!;
+    expect(final.status).toBe('done');
+    expect(final.segments.map((s) => s.text)).toEqual(['window 1', 'window 2', 'window 3']);
+  });
+
+  it('does not blank a half-finished transcript when it picks the job back up', async () => {
+    // ⚑ The opening `running` write used to blank the row. Against a resumed
+    // job that would destroy the very partial this feature exists to keep -
+    // and destroy it *before* the first new window could replace it.
+    const id = await makeRecording();
+    await setRecordingTranscript(id, HALF);
+    writeSpy.mockClear();
+    const { queue } = makeQueue();
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(writesFor(id).every((r) => r.segments.length >= 1)).toBe(true);
+  });
+
+  it('caches the decoded PCM on the first decode and reuses it on the next run', async () => {
+    const id = await makeRecording();
+    const { queue, decode, cache } = makeQueue({ transcribe: failSecondWindow });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+    expect(decode).toHaveBeenCalledTimes(1);
+    expect(cache.write).toHaveBeenCalledTimes(1);
+
+    await queue.retry(id);
+    await queue.whenIdle();
+
+    expect(decode).toHaveBeenCalledTimes(1);
+    expect(cache.read).toHaveBeenCalledTimes(2);
+  });
+
+  it('deletes the cache once the transcript reaches a terminal status', async () => {
+    const id = await makeRecording();
+    const { queue, cache } = makeQueue();
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(cache.drop).toHaveBeenCalledWith(id);
+  });
+
+  it('keeps the cache when the job fails, so Retry resumes without re-decoding', async () => {
+    // ⚑ A failed job keeps its cursor precisely so Retry picks up at the last
+    // finished window. Dropping the cache here would make that retry re-decode
+    // the whole lecture first, giving back most of what the cursor buys.
+    const id = await makeRecording();
+    const { queue, cache } = makeQueue({ transcribe: failSecondWindow });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(cache.drop).not.toHaveBeenCalled();
+  });
+
+  it('re-decodes when the cached PCM is too short for the stored cursor', async () => {
+    // ⚑ A short cache row silently truncates the lecture: every window past
+    // its end would simply not exist, and the job would write `done`.
+    const id = await makeRecording();
+    await setRecordingTranscript(id, HALF);
+    const { queue, decode, cache } = makeQueue({
+      cachedMs: 50, // shorter than the cursor at 100
+    });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(cache.read).toHaveBeenCalledWith(id);
+    expect(decode).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-decodes when the cache read throws', async () => {
+    const id = await makeRecording();
+    const { queue, decode, cache } = makeQueue({ cacheReadError: new Error('store is gone') });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(cache.read).toHaveBeenCalledWith(id);
+    expect(decode).toHaveBeenCalledTimes(1);
+    expect(writesFor(id).at(-1)!.status).toBe('done');
+  });
+
+  it('finishes cleanly when the cursor is already at the end', async () => {
+    const id = await makeRecording();
+    await setRecordingTranscript(id, { ...HALF, completedMs: TOTAL_MS });
+    writeSpy.mockClear();
+    const { queue, transcribe } = makeQueue();
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe).not.toHaveBeenCalled();
+    expect(writesFor(id).at(-1)!.status).toBe('done');
+  });
+
+  it('finishes cleanly when the cursor is past the end', async () => {
+    const id = await makeRecording();
+    await setRecordingTranscript(id, { ...HALF, completedMs: TOTAL_MS + 5_000 });
+    writeSpy.mockClear();
+    const { queue, transcribe } = makeQueue();
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe).not.toHaveBeenCalled();
+    expect(writesFor(id).at(-1)!.status).toBe('done');
   });
 });

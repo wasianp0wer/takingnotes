@@ -1,8 +1,10 @@
 // Serial transcription queue: one job in flight, status persisted on the recording
 // itself so a reload can pick up where it left off (`resume()`). Whisper is far too
 // heavy to run two models at once, so the loop is deliberately strictly serial.
+import { TARGET_SAMPLE_RATE } from '@/audio/pcm';
 import type { AudioTranscriber, TranscribeStage } from '@/audio/types';
 import { mergeWindowSegments, planWindows } from '@/audio/windows';
+import { deletePcmCache, getPcmCache, putPcmCache } from '@/storage/pcmCache';
 import {
   getRecording,
   getRecordingAudio,
@@ -41,6 +43,15 @@ export interface TranscriptionQueueDeps {
   clearTimer?: (handle: number) => void;
   /** How much of a recording one window covers. Default: `DEFAULT_WINDOW_MS`. */
   windowMs?: number;
+  /**
+   * The decoded-audio cache. Defaults bind to `@/storage/pcmCache`. It exists
+   * so a resumed job never re-decodes: decoding a lecture costs minutes and
+   * peaks above a gigabyte, and a job that resumes on every launch would pay
+   * that every time.
+   */
+  readPcmCache?: (recordingId: string) => Promise<Float32Array | null>;
+  writePcmCache?: (recordingId: string, pcm: Float32Array) => Promise<void>;
+  dropPcmCache?: (recordingId: string) => Promise<void>;
 }
 
 export interface TranscriptionQueue {
@@ -152,6 +163,9 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
   // `window.setTimeout`, not the bare global, so the handle is a number here too.
   const setTimer = deps.setTimer ?? ((fn, ms) => window.setTimeout(fn, ms));
   const clearTimer = deps.clearTimer ?? ((handle) => window.clearTimeout(handle));
+  const readPcmCache = deps.readPcmCache ?? getPcmCache;
+  const writePcmCache = deps.writePcmCache ?? putPcmCache;
+  const dropPcmCache = deps.dropPcmCache ?? deletePcmCache;
   const queued: string[] = [];
   /**
    * Ids accepted by `enqueue` whose `pending` write has not landed yet. They are
@@ -235,15 +249,30 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     for (const fn of [...changeListeners]) safely(() => fn(id));
   }
 
-  function blank(model: string, status: 'pending' | 'running'): AudioTranscriptRecord {
+  /**
+   * The `pending` (or opening `running`) row for a recording, carrying forward
+   * whatever has already been transcribed.
+   *
+   * ⚑ Not a blank row. Since a `running` transcript holds real content and a
+   * cursor, writing blanks here would destroy the partial on the way *into*
+   * the queue - on every retry, every resumed launch, and every re-enqueue of
+   * a paused job. The one thing that deliberately starts clean is a model
+   * change, which `runJob` handles by discarding the cursor itself.
+   */
+  function carryForward(
+    existing: AudioTranscriptRecord | null | undefined,
+    model: string,
+    status: 'pending' | 'running',
+  ): AudioTranscriptRecord {
+    const segments = existing?.segments ?? [];
     return {
-      text: '',
-      segments: [],
+      text: textOf(segments),
+      segments,
       model,
-      language: null,
+      language: existing?.language ?? null,
       status,
       error: null,
-      completedMs: 0,
+      completedMs: existing?.completedMs ?? 0,
       updatedAt: now(),
     };
   }
@@ -260,12 +289,12 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     };
 
     // A recording deleted while it waited has nothing left to transcribe.
-    if (!(await getRecording(id))) return;
+    const recording = await getRecording(id);
+    if (!recording) return;
 
     // Re-read rather than reuse the model from the pending write: the setting may
     // have changed while the recording sat in the queue.
     const model = await deps.getModel();
-    await write(id, blank(model, 'running'));
 
     let finished = false;
     /**
@@ -273,18 +302,56 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
      * the job's whole persisted state: every write below is built from them,
      * including the failure writes, so a job that ends badly still leaves the
      * windows it did finish behind it.
+     *
+     * Seeded from what is already stored, which is what makes this job a
+     * continuation rather than a restart.
      */
-    let segments: TranscriptSegment[] = [];
-    let cursorMs = 0;
-    let language: string | null = null;
+    const resumed = recording.transcript;
+    let segments: TranscriptSegment[] = resumed?.segments ? [...resumed.segments] : [];
+    let cursorMs = resumed?.completedMs ?? 0;
+    let language: string | null = resumed?.language ?? null;
+
+    // ⚑ Not `blank(...)`: against a resumed job that would wipe the very
+    // partial transcript this feature exists to keep, and wipe it before the
+    // first new window could replace it.
+    await write(id, {
+      text: textOf(segments),
+      segments,
+      model,
+      language,
+      status: 'running',
+      error: null,
+      completedMs: cursorMs,
+      updatedAt: now(),
+    });
 
     /**
      * ⚑ Carries the accumulated segments and cursor, not blanks. A lecture
      * that stalls or errors in its fortieth window used to be written back
      * empty, so the retry repeated all forty and stalled in the same place.
      */
-    const fail = (error: unknown) =>
-      write(id, {
+    /**
+     * Releases the cached decode.
+     *
+     * ⚑ On `done` only - deliberately NOT on `failed`. A failed job keeps its
+     * cursor precisely so Retry resumes from the last finished window; making
+     * that retry re-decode first (minutes, and a peak above a gigabyte on a
+     * lecture) would give back most of what the cursor buys. The row is
+     * bounded by its recording: `deleteRecording` clears it, and a job that
+     * reaches `done` releases it here.
+     */
+    const dropCache = async (): Promise<void> => {
+      try {
+        await dropPcmCache(id);
+      } catch (error) {
+        // An orphaned cache row costs disk, not correctness, and the next
+        // delete of the recording clears it anyway.
+        console.warn(`Could not drop the cached decode for recording ${id}:`, error);
+      }
+    };
+
+    const fail = async (error: unknown) => {
+      await write(id, {
         text: textOf(segments),
         segments,
         model,
@@ -294,6 +361,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
         completedMs: cursorMs,
         updatedAt: now(),
       });
+    };
 
     // Watchdog: a worker killed without an `error` event would otherwise leave this
     // job - and with it the whole serial loop - waiting for a reply for good. Every
@@ -356,12 +424,48 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
 
     arm();
 
+    /**
+     * The cached decode, when there is one that can actually serve this job.
+     *
+     * ⚑ A row shorter than the cursor already claims is not usable: every
+     * window past its end would simply not exist and the job would write
+     * `done`, silently truncating the lecture. A read that throws is a miss,
+     * not a failure - the audio is still there to decode.
+     */
+    async function cachedPcm(): Promise<Float32Array | null> {
+      try {
+        const cached = await guard(readPcmCache(id));
+        if (!cached) return null;
+        const cachedMs = (cached.length / TARGET_SAMPLE_RATE) * 1000;
+        return cachedMs >= cursorMs ? cached : null;
+      } catch (error) {
+        if (stalled || cancelledByUser) throw error;
+        console.warn(`Could not read the cached decode for recording ${id}:`, error);
+        return null;
+      }
+    }
+
     let pcm: Float32Array;
     try {
-      const audio = await guard(getRecordingAudio(id));
-      if (!audio) throw new Error('Recording audio is missing');
-      step = 'decoding the audio';
-      pcm = await guard(deps.decode(audio));
+      const cached = await cachedPcm();
+      if (cached) {
+        pcm = cached;
+      } else {
+        const audio = await guard(getRecordingAudio(id));
+        if (!audio) throw new Error('Recording audio is missing');
+        step = 'decoding the audio';
+        pcm = await guard(deps.decode(audio));
+        // Cached before the first window, not after the last: the whole point
+        // is to be there for a job that does not reach the last window.
+        try {
+          await guard(writePcmCache(id, pcm));
+        } catch (error) {
+          if (stalled || cancelledByUser) throw error;
+          // A cache that cannot be written costs a re-decode on resume; it
+          // does not cost the transcription.
+          console.warn(`Could not cache the decode for recording ${id}:`, error);
+        }
+      }
     } catch (error) {
       finished = true;
       disarm();
@@ -423,6 +527,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
             updatedAt: now(),
           }),
         );
+        if (last) await dropCache();
         step = 'transcribing';
       }
 
@@ -444,6 +549,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
             updatedAt: now(),
           }),
         );
+        await dropCache();
       }
     } catch (error) {
       finished = true;
@@ -494,7 +600,8 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     if (activeId === id || reserved.has(id) || queued.includes(id)) return;
     reserved.add(id);
     try {
-      await write(id, blank(await deps.getModel(), 'pending'));
+      const [model, existing] = await Promise.all([deps.getModel(), getRecording(id)]);
+      await write(id, carryForward(existing?.transcript, model, 'pending'));
     } catch (error) {
       // `getModel` is a settings read and can reject. Give the reservation back so
       // the id is not stranded: a later retry must still be able to queue it, and
