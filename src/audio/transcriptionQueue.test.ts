@@ -89,6 +89,9 @@ const DONE: AudioTranscriptRecord = {
   language: 'en',
   status: 'done',
   error: null,
+  // The default decode is 16 samples at 16 kHz, so the whole recording is one
+  // 1 ms window and the finished cursor sits at its end.
+  completedMs: 1,
   updatedAt: NOW,
 };
 
@@ -99,6 +102,7 @@ const PENDING: AudioTranscriptRecord = {
   language: null,
   status: 'pending',
   error: null,
+  completedMs: 0,
   updatedAt: NOW,
 };
 
@@ -255,6 +259,7 @@ describe('transcription queue', () => {
       language: null,
       status: 'failed',
       error: 'model exploded',
+      completedMs: 0,
       updatedAt: NOW,
     });
   });

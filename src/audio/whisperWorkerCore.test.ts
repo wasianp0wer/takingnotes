@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
+import { TARGET_SAMPLE_RATE } from '@/audio/pcm';
 import {
   createWhisperWorkerCore,
   type AsrPipeline,
+  type DecodeStreamer,
   type PipelineLoader,
   type WhisperDevice,
 } from '@/audio/whisperWorkerCore';
@@ -51,17 +53,20 @@ interface HarnessOptions {
     onProgress: (info: { status: string; progress?: number }) => void,
   ) => void | Promise<void>;
   /** Result of the nth pipeline call; the default resolves immediately. */
-  transcribe?: (call: number) => Promise<{ text: string; chunks?: WhisperChunk[] }>;
+  transcribe?: (
+    call: number,
+    callOptions: Record<string, unknown>,
+  ) => Promise<{ text: string; chunks?: WhisperChunk[] }>;
 }
 
 function harness(options: HarnessOptions = {}): Harness {
   const post = vi.fn<(message: WhisperResponse) => void>();
   const loads: LoadCall[] = [];
   let transcribeCalls = 0;
-  const pipe = vi.fn<AsrPipeline>(async () => {
+  const pipe = vi.fn<AsrPipeline>(async (_audio, callOptions) => {
     transcribeCalls += 1;
     return options.transcribe
-      ? await options.transcribe(transcribeCalls)
+      ? await options.transcribe(transcribeCalls, callOptions)
       : { text: ' hi', chunks: CHUNKS };
   });
   const loadPipeline = vi.fn<PipelineLoader>(async (model, { device, onProgress }) => {
@@ -130,8 +135,70 @@ describe('createWhisperWorkerCore', () => {
 
     await h.core.handle({ type: 'transcribe', id: 1, model: MODEL, pcm });
 
-    expect(h.pipe).toHaveBeenCalledWith(pcm, CALL_OPTIONS);
+    expect(h.pipe).toHaveBeenCalledWith(pcm, { ...CALL_OPTIONS, streamer: expect.anything() });
     expect(h.posted()).toContainEqual({ type: 'result', id: 1, text: ' hi', chunks: CHUNKS });
+  });
+
+  it('reports completed decode passes, not a fraction of a total it cannot know', async () => {
+    // ⚑ `end()` fires once per *seek pass*, not once per 30 s window.
+    // `WhisperForConditionalGeneration.generate` runs its own seek loop whenever
+    // `return_timestamps` is set and `max_new_tokens` is not - see
+    // `_generate_with_seek` in modeling_whisper.js - calling `super.generate`,
+    // and so the streamer, an unpredictable number of times per window. Counting
+    // those against a window total pinned the bar at 100% while the pass ran on,
+    // and because every report re-arms the queue's stall watchdog, the job then
+    // had no upper bound at all. No total is knowable from in here, so none is
+    // claimed: the count is the whole signal.
+    const pcm = new Float32Array(TARGET_SAMPLE_RATE * 80);
+    const h = harness({
+      transcribe: async (_call, callOptions) => {
+        const streamer = callOptions.streamer as DecodeStreamer;
+        for (let pass = 0; pass < 3; pass += 1) {
+          streamer.put([[1n]]);
+          streamer.end();
+        }
+        return { text: ' hi', chunks: CHUNKS };
+      },
+    });
+
+    await h.core.handle({ type: 'transcribe', id: 1, model: MODEL, pcm });
+
+    const transcribing = h
+      .posted()
+      .filter((message) => message.type === 'progress' && message.stage === 'transcribing');
+    // The opening report, then a decode step and a finished pass for each of
+    // the three: the step repeats the count, the pass advances it.
+    expect(transcribing.map((message) => (message as { passes?: number }).passes)).toEqual([
+      0, 0, 1, 1, 2, 2, 3,
+    ]);
+    // Nothing presents itself as a proportion of a whole.
+    expect(
+      transcribing.every((message) => (message as { progress: number }).progress === 0),
+    ).toBe(true);
+  });
+
+  it('posts no transcribe-pass progress for a cancelled job', async () => {
+    const pcm = new Float32Array(TARGET_SAMPLE_RATE * 80);
+    // Captured and asserted outside the pipeline call: `run` swallows a throw
+    // from a cancelled job, so an assertion made in there could not fail.
+    let streamer: DecodeStreamer | undefined;
+    const h = harness({
+      transcribe: async (_call, callOptions) => {
+        streamer = callOptions.streamer as DecodeStreamer | undefined;
+        await h.core.handle({ type: 'cancel', id: 1 });
+        streamer?.put([[1n]]);
+        streamer?.end();
+        return { text: ' hi', chunks: CHUNKS };
+      },
+    });
+
+    await h.core.handle({ type: 'transcribe', id: 1, model: MODEL, pcm });
+
+    expect(streamer).toBeDefined();
+    expect(h.posted()).toEqual([
+      { type: 'progress', id: 1, stage: 'loading', progress: 1 },
+      { type: 'progress', id: 1, stage: 'transcribing', progress: 0, passes: 0 },
+    ]);
   });
 
   it('caches the pipeline per model', async () => {
@@ -163,7 +230,7 @@ describe('createWhisperWorkerCore', () => {
     expect(h.posted()).toEqual([
       { type: 'progress', id: 1, stage: 'loading', progress: 0.5 },
       { type: 'progress', id: 1, stage: 'loading', progress: 1 },
-      { type: 'progress', id: 1, stage: 'transcribing', progress: 0 },
+      { type: 'progress', id: 1, stage: 'transcribing', progress: 0, passes: 0 },
       { type: 'result', id: 1, text: ' hi', chunks: CHUNKS },
     ]);
   });

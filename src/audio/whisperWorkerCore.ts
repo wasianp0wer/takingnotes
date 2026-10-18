@@ -24,6 +24,16 @@ export type AsrPipeline = (
   options: Record<string, unknown>,
 ) => Promise<{ text: string; chunks?: WhisperChunk[] } | Array<{ text: string; chunks?: WhisperChunk[] }>>;
 
+/**
+ * The two hooks `generate()` calls on a `streamer`: `put` on every decode step,
+ * `end` once per window it finishes. Declared structurally so nothing here has
+ * to import the runtime's own `BaseStreamer`.
+ */
+export interface DecodeStreamer {
+  put(value: unknown): void;
+  end(): void;
+}
+
 export type PipelineLoader = (
   model: string,
   opts: { device: WhisperDevice; onProgress: (info: LoadProgress) => void },
@@ -123,8 +133,37 @@ export function createWhisperWorkerCore(deps: WhisperWorkerCoreDeps): {
         return;
       }
       deps.post({ type: 'progress', id, stage: 'loading', progress: 1 });
-      deps.post({ type: 'progress', id, stage: 'transcribing', progress: 0 });
-      const output = await pipeline(pcm, { ...WHISPER_OPTIONS });
+      // ⚑ The pipeline reports nothing of its own between here and its result,
+      // and the queue on the other side has only progress reports to tell a
+      // working job from a dead one (its stall watchdog). A streamer is the one
+      // hook `generate()` offers: `put` fires per decode step, `end` once per
+      // pass it finishes.
+      //
+      // ⚑ A pass is NOT a 30-second window. `WhisperForConditionalGeneration`
+      // runs its own seek loop whenever `return_timestamps` is set and
+      // `max_new_tokens` is not (`_generate_with_seek`), calling `super.generate`
+      // - and so this streamer - as many times as that window needs. Counting
+      // passes against a window total therefore reached "100%" partway through
+      // and stayed there, while every report went on re-arming the watchdog, so
+      // the job had no bound at all. No total is knowable here, so none is sent.
+      let passes = 0;
+      const report = (): void => {
+        if (cancelled.has(id)) {
+          return;
+        }
+        deps.post({ type: 'progress', id, stage: 'transcribing', progress: 0, passes });
+      };
+      report();
+      const streamer: DecodeStreamer = {
+        put: () => {
+          report();
+        },
+        end: () => {
+          passes += 1;
+          report();
+        },
+      };
+      const output = await pipeline(pcm, { ...WHISPER_OPTIONS, streamer });
       if (cancelled.has(id)) {
         return;
       }

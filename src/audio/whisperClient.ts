@@ -22,7 +22,9 @@ export interface WorkerLike {
 interface PendingCall {
   model: string;
   durationMs: number;
-  onProgress?: (p: number, stage: TranscribeStage) => void;
+  /** Where this call's audio begins in the recording; added to every segment time. */
+  offsetMs: number;
+  onProgress?: (p: number, stage: TranscribeStage, passes?: number) => void;
   resolve: (result: AudioTranscriptionResult) => void;
   reject: (error: unknown) => void;
 }
@@ -49,13 +51,13 @@ export function createWhisperTranscriber(deps: { createWorker: () => WorkerLike 
     }
     switch (response.type) {
       case 'progress':
-        call.onProgress?.(response.progress, response.stage);
+        call.onProgress?.(response.progress, response.stage, response.passes);
         return;
       case 'result':
         pending.delete(response.id);
         call.resolve({
           text: response.text.trim(),
-          segments: chunksToSegments(response.chunks, call.durationMs),
+          segments: chunksToSegments(response.chunks, call.durationMs, call.offsetMs),
           language: languageForModel(call.model),
         });
         return;
@@ -66,17 +68,32 @@ export function createWhisperTranscriber(deps: { createWorker: () => WorkerLike 
     }
   }
 
-  function handleCrash(crashed: WorkerLike, message: string | undefined): void {
-    const error = new Error(`Whisper worker crashed: ${message || 'unknown error'}`);
+  /**
+   * Stops using `used`, kills it, and rejects whatever was still waiting on it.
+   *
+   * ⚑ Both callers need every part of this. The worker runs its jobs on one
+   * chain and cannot interrupt the pipeline call it is inside, so a job nobody
+   * is waiting for any more still owns the worker until it finishes on its own -
+   * and the next job posted to that worker does not start, reports no progress,
+   * and is declared stalled in its turn. That is how one abandoned job used to
+   * fail an entire backlog. A worker that owes us an answer we have stopped
+   * waiting for is not ours to keep.
+   */
+  function discard(used: WorkerLike, reason: string): void {
+    const error = new Error(reason);
     const calls = [...pending.values()];
     pending.clear();
-    if (worker === crashed) {
+    if (worker === used) {
       worker = null;
     }
-    crashed.terminate();
+    used.terminate();
     for (const call of calls) {
       call.reject(error);
     }
+  }
+
+  function handleCrash(crashed: WorkerLike, message: string | undefined): void {
+    discard(crashed, `Whisper worker crashed: ${message || 'unknown error'}`);
   }
 
   function ensureWorker(): WorkerLike {
@@ -95,7 +112,7 @@ export function createWhisperTranscriber(deps: { createWorker: () => WorkerLike 
   }
 
   function transcribe(pcm: Float32Array, opts: TranscribeOptions): Promise<AudioTranscriptionResult> {
-    const { model, onProgress, signal } = opts;
+    const { model, onProgress, signal, offsetMs = 0 } = opts;
     return new Promise<AudioTranscriptionResult>((resolve, reject) => {
       if (signal?.aborted) {
         reject(abortError());
@@ -123,6 +140,7 @@ export function createWhisperTranscriber(deps: { createWorker: () => WorkerLike 
       pending.set(id, {
         model,
         durationMs,
+        offsetMs,
         onProgress,
         resolve: (result) => settle(() => resolve(result)),
         reject: (error) => settle(() => reject(error)),
@@ -141,6 +159,10 @@ export function createWhisperTranscriber(deps: { createWorker: () => WorkerLike 
             // leave the call unsettled for good.
             console.error('Could not cancel the Whisper job in the worker:', error);
           }
+          // The `cancel` above only lands if the worker is still answering, and
+          // the one caller that aborts does so *because* it has had no sign of
+          // life for a quarter of an hour.
+          discard(active, 'Whisper worker discarded after an aborted transcription');
           settle(() => reject(abortError()));
         };
         signal.addEventListener('abort', onAbort, { once: true });

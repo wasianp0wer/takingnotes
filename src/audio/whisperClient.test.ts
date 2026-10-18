@@ -144,6 +144,29 @@ describe('createWhisperTranscriber', () => {
     });
   });
 
+  it('offsets mapped segments by offsetMs, so a window lands on the recording clock', async () => {
+    // One window of a chunked transcription: the worker only ever sees the
+    // window's own audio, so its chunk times are local to the window. Without
+    // the offset every window's segments stack on top of the first one's.
+    const transcriber = makeTranscriber();
+
+    const promise = transcriber.transcribe(new Float32Array(32_000), {
+      model: 'Xenova/whisper-base.en',
+      offsetMs: 600_000,
+    });
+    const request = workers[0].posted[0].message as Extract<WhisperRequest, { type: 'transcribe' }>;
+    workers[0].emit({
+      type: 'result',
+      id: request.id,
+      text: 'later words',
+      chunks: [{ timestamp: [1, 2], text: 'later words' }],
+    });
+
+    await expect(promise).resolves.toMatchObject({
+      segments: [{ startMs: 601_000, endMs: 602_000, text: 'later words' }],
+    });
+  });
+
   it('posts a subarray as an exact-size copy with the same values', async () => {
     const transcriber = makeTranscriber();
     const backing = new Float32Array(64);
@@ -172,12 +195,13 @@ describe('createWhisperTranscriber', () => {
     const request = workers[0].transcribeRequests()[0];
 
     workers[0].emit({ type: 'progress', id: request.id, stage: 'loading', progress: 0.5 });
-    workers[0].emit({ type: 'progress', id: request.id, stage: 'transcribing', progress: 0 });
-    workers[0].emit({ type: 'progress', id: request.id + 999, stage: 'transcribing', progress: 0.9 });
+    workers[0].emit({ type: 'progress', id: request.id, stage: 'transcribing', progress: 0, passes: 7 });
+    workers[0].emit({ type: 'progress', id: request.id + 999, stage: 'transcribing', progress: 0, passes: 9 });
 
+    // The pass count is forwarded with the report it belongs to; `loading` has none.
     expect(onProgress.mock.calls).toEqual([
-      [0.5, 'loading'],
-      [0, 'transcribing'],
+      [0.5, 'loading', undefined],
+      [0, 'transcribing', 7],
     ]);
 
     workers[0].emit({ type: 'result', id: request.id, text: 'x', chunks: [] });
@@ -284,6 +308,48 @@ describe('createWhisperTranscriber', () => {
 
     await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
     expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it('discards the worker when a call is aborted, so a later call is not stuck behind it', async () => {
+    // ⚑ An abort cannot interrupt the pipeline call the worker is inside: the
+    // worker runs its jobs on one chain, so the abandoned job keeps the chain
+    // for as long as it takes to finish, and the *next* recording's job never
+    // starts, never reports, and is declared stalled in its turn. One false
+    // stall used to fail the whole backlog that way. A fired watchdog means
+    // this worker is not answering, so it is not ours to keep.
+    const transcriber = makeTranscriber();
+    const controller = new AbortController();
+    const promise = transcriber.transcribe(new Float32Array(16_000), {
+      model: 'Xenova/whisper-base.en',
+      signal: controller.signal,
+    });
+
+    controller.abort();
+
+    await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    expect(workers[0].terminated).toBe(true);
+
+    const next = transcriber.transcribe(new Float32Array(16_000), { model: 'Xenova/whisper-base.en' });
+    expect(workers).toHaveLength(2);
+    workers[1].emit({ type: 'result', id: workers[1].transcribeRequests()[0].id, text: 'ok', chunks: [] });
+    expect((await next).text).toBe('ok');
+  });
+
+  it('discards the worker on an abort even when the cancel post throws', async () => {
+    const transcriber = makeTranscriber();
+    const controller = new AbortController();
+    const promise = transcriber.transcribe(new Float32Array(16_000), {
+      model: 'Xenova/whisper-base.en',
+      signal: controller.signal,
+    });
+    workers[0].throwOnCancel = new Error('worker is gone');
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    controller.abort();
+
+    await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    expect(workers[0].terminated).toBe(true);
     logged.mockRestore();
   });
 
