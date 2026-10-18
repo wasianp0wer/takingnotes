@@ -4,6 +4,7 @@
 import { TARGET_SAMPLE_RATE } from '@/audio/pcm';
 import type { AudioTranscriber, TranscribeStage } from '@/audio/types';
 import { mergeWindowSegments, planWindows } from '@/audio/windows';
+import { newId } from '@/storage/id';
 import { deletePcmCache, getPcmCache, putPcmCache } from '@/storage/pcmCache';
 import {
   getRecording,
@@ -63,6 +64,13 @@ export interface TranscriptionQueueDeps {
    * peaks above a gigabyte, and a job that resumes on every launch would pay
    * that every time.
    */
+  /**
+   * Identifies this queue instance in the lease it writes. Default: a fresh
+   * random id per queue, which is per tab.
+   */
+  ownerId?: string;
+  /** How long a lease survives without a heartbeat. Default: `LEASE_STALE_MS`. */
+  leaseStaleMs?: number;
   readPcmCache?: (recordingId: string) => Promise<Float32Array | null>;
   writePcmCache?: (recordingId: string, pcm: Float32Array) => Promise<void>;
   dropPcmCache?: (recordingId: string) => Promise<void>;
@@ -136,6 +144,16 @@ export interface TranscriptionQueue {
  */
 const DEFAULT_STALL_TIMEOUT_MS = 15 * 60 * 1000;
 
+/**
+ * How long a lease stays valid without a heartbeat.
+ *
+ * Deliberately the stall timeout: a job that has not written in that long is
+ * dead by the watchdog's own definition, so the tab holding it is either gone
+ * or about to abandon the job itself. Shorter would let a healthy slow tab be
+ * robbed mid-window; longer would strand a lecture behind a crashed tab.
+ */
+export const LEASE_STALE_MS = DEFAULT_STALL_TIMEOUT_MS;
+
 /** The step of a job a stall is reported against, named as the message reads it. */
 type JobStep = 'reading the audio' | 'decoding the audio' | 'transcribing' | 'saving the transcript';
 
@@ -194,6 +212,8 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
   // `window.setTimeout`, not the bare global, so the handle is a number here too.
   const setTimer = deps.setTimer ?? ((fn, ms) => window.setTimeout(fn, ms));
   const clearTimer = deps.clearTimer ?? ((handle) => window.clearTimeout(handle));
+  const ownerId = deps.ownerId ?? newId();
+  const leaseStaleMs = deps.leaseStaleMs ?? LEASE_STALE_MS;
   const readPcmCache = deps.readPcmCache ?? getPcmCache;
   const writePcmCache = deps.writePcmCache ?? putPcmCache;
   const dropPcmCache = deps.dropPcmCache ?? deletePcmCache;
@@ -327,6 +347,11 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       status,
       error: null,
       completedMs: continues?.completedMs ?? 0,
+      // ⚑ Carried, not cleared. This write happens before `runJob` reads the
+      // row, so dropping the lease here would hand another tab's in-flight
+      // job straight to this one - defeating the lease entirely.
+      leaseOwner: existing?.leaseOwner ?? null,
+      leaseAt: existing?.leaseAt ?? null,
       updatedAt: now(),
     };
   }
@@ -342,6 +367,30 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
   }
 
   /** Resolves true when the job stepped aside at a window boundary rather than finishing. */
+  /**
+   * Whether another queue is actively working this recording right now.
+   *
+   * Two tabs each build their own queue and each run `resume()` at launch.
+   * Before a `running` row carried real content that only wasted CPU and the
+   * last write won; now their interleaved per-window writes would ratchet the
+   * cursor backwards and splice two runs into one transcript. A lease older
+   * than `leaseStaleMs` is taken over - the tab that wrote it is gone.
+   */
+  function heldByAnother(record: AudioTranscriptRecord | null | undefined): boolean {
+    const owner = record?.leaseOwner ?? null;
+    if (owner === null || owner === ownerId) return false;
+    const at = record?.leaseAt ?? null;
+    return at !== null && now() - at < leaseStaleMs;
+  }
+
+  /** The lease fields for a write made while this queue holds the job. */
+  function held(): Pick<AudioTranscriptRecord, 'leaseOwner' | 'leaseAt'> {
+    return { leaseOwner: ownerId, leaseAt: now() };
+  }
+
+  /** The lease fields for a write that gives the job up. */
+  const released = { leaseOwner: null, leaseAt: null } as const;
+
   async function runJob(id: string, priority: TranscriptionPriority): Promise<boolean> {
     // Before the first await: `cancel` is a button press and the window between
     // this job becoming active and its controller existing covers two storage
@@ -356,6 +405,10 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     // A recording deleted while it waited has nothing left to transcribe.
     const recording = await getRecording(id);
     if (!recording) return false;
+
+    // ⚑ Left untouched, not failed: the other tab is working on it, and
+    // writing anything here is exactly the interleaving the lease prevents.
+    if (heldByAnother(recording.transcript)) return false;
 
     // Re-read rather than reuse the model from the pending write: the setting may
     // have changed while the recording sat in the queue.
@@ -399,6 +452,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       status: 'running',
       error: null,
       completedMs: cursorMs,
+      ...held(),
       updatedAt: now(),
     });
 
@@ -436,6 +490,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
         status: 'failed',
         error: messageOf(error),
         completedMs: cursorMs,
+        ...released,
         updatedAt: now(),
       });
     };
@@ -512,6 +567,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
         status: 'paused',
         error: null,
         completedMs: cursorMs,
+        ...released,
         updatedAt: now(),
       });
 
@@ -619,6 +675,9 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
             status: last ? 'done' : 'running',
             error: null,
             completedMs: cursorMs,
+            // Released on the terminal write; refreshed as a heartbeat on
+            // every other one.
+            ...(last ? released : held()),
             updatedAt: now(),
           }),
         );
@@ -631,6 +690,8 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
         // it, deferring a job meant losing its work, which is why the queue
         // order had to be a fixed policy.
         if (!last && shouldYield(priority)) {
+          // The lease stays: this same queue is coming back to it, and its
+          // heartbeat was just refreshed by the write above.
           yielded = true;
           break;
         }
@@ -651,6 +712,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
             status: 'done',
             error: null,
             completedMs: cursorMs,
+            ...released,
             updatedAt: now(),
           }),
         );
@@ -726,6 +788,13 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     reserved.add(id);
     try {
       const [model, existing] = await Promise.all([deps.getModel(), getRecording(id)]);
+      // Another tab is working this recording right now: not ours to queue,
+      // and not ours to write a `pending` row over.
+      if (heldByAnother(existing?.transcript)) {
+        reserved.delete(id);
+        notifyIdle();
+        return;
+      }
       await write(id, carryForward(existing?.transcript, model, 'pending'));
     } catch (error) {
       // `getModel` is a settings read and can reject. Give the reservation back so
@@ -762,6 +831,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     await write(id, {
       ...carryForward(existing, existing?.model ?? '', 'pending'),
       status: 'paused',
+      ...released,
     });
     notifyIdle();
   }

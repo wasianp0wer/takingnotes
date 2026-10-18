@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TARGET_SAMPLE_RATE } from '@/audio/pcm';
-import { createTranscriptionQueue } from '@/audio/transcriptionQueue';
+import { LEASE_STALE_MS, createTranscriptionQueue } from '@/audio/transcriptionQueue';
 import type {
   AudioTranscriber,
   AudioTranscriptionResult,
@@ -83,6 +83,7 @@ function makeQueue(
     /** Seed the cache with this much audio before the run; omit for an empty cache. */
     cachedMs?: number;
     cacheReadError?: unknown;
+    ownerId?: string;
     stallTimeoutMs?: number;
     setTimer?: (fn: () => void, ms: number) => number;
     clearTimer?: (handle: number) => void;
@@ -116,6 +117,7 @@ function makeQueue(
     getModel: async () => MODEL,
     now: () => 1000,
     windowMs: WINDOW_MS,
+    ownerId: overrides.ownerId,
     readPcmCache: read,
     writePcmCache: write,
     dropPcmCache: drop,
@@ -616,5 +618,139 @@ describe('priority and window-boundary preemption', () => {
     await queue.whenIdle();
 
     expect(order).toEqual([old, fresh, old]);
+  });
+});
+
+describe('the single-writer lease', () => {
+  const OWNER = 'owner-a';
+
+  it('stamps its owner and a heartbeat on every window write', async () => {
+    const id = await makeRecording();
+    const { queue } = makeQueue({ ownerId: OWNER });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    const running = writesFor(id).filter((r) => r.status === 'running');
+    expect(running.every((r) => r.leaseOwner === OWNER)).toBe(true);
+    expect(running.every((r) => typeof r.leaseAt === 'number')).toBe(true);
+  });
+
+  it('skips a job another owner is actively holding', async () => {
+    // ⚑ Two tabs each build their own queue and each run resume() at launch.
+    // Without this, their interleaved window writes ratchet the cursor
+    // backwards and splice two runs into one transcript.
+    const id = await makeRecording();
+    await setRecordingTranscript(id, {
+      text: 'theirs',
+      segments: [{ startMs: 0, endMs: 50, text: 'theirs' }],
+      model: MODEL,
+      language: 'en',
+      status: 'running',
+      error: null,
+      completedMs: 100,
+      leaseOwner: 'owner-b',
+      leaseAt: 1000,
+      updatedAt: 1000,
+    });
+    writeSpy.mockClear();
+    const { queue, transcribe } = makeQueue({ ownerId: OWNER });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe).not.toHaveBeenCalled();
+    expect(writesFor(id).some((r) => r.leaseOwner === OWNER)).toBe(false);
+  });
+
+  it('takes over a job whose lease has gone stale', async () => {
+    const id = await makeRecording();
+    await setRecordingTranscript(id, {
+      text: '',
+      segments: [],
+      model: MODEL,
+      language: null,
+      status: 'running',
+      error: null,
+      completedMs: 0,
+      leaseOwner: 'owner-b',
+      leaseAt: 1000 - (LEASE_STALE_MS + 1),
+      updatedAt: 1,
+    });
+    const { queue, transcribe } = makeQueue({ ownerId: OWNER });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe).toHaveBeenCalled();
+  });
+
+  it('takes a job with no lease at all, as every pre-upgrade row has', async () => {
+    const id = await makeRecording();
+    const { queue, transcribe } = makeQueue({ ownerId: OWNER });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe).toHaveBeenCalled();
+  });
+
+  it('takes back a job it already owns', async () => {
+    const id = await makeRecording();
+    await setRecordingTranscript(id, {
+      text: '',
+      segments: [],
+      model: MODEL,
+      language: null,
+      status: 'running',
+      error: null,
+      completedMs: 0,
+      leaseOwner: OWNER,
+      leaseAt: 1000,
+      updatedAt: 1,
+    });
+    const { queue, transcribe } = makeQueue({ ownerId: OWNER });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe).toHaveBeenCalled();
+  });
+
+  it('clears the lease when the job finishes', async () => {
+    const id = await makeRecording();
+    const { queue } = makeQueue({ ownerId: OWNER });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(writesFor(id).at(-1)!.leaseOwner).toBeNull();
+  });
+
+  it('clears the lease when the job fails', async () => {
+    const id = await makeRecording();
+    const { queue } = makeQueue({ ownerId: OWNER, transcribe: failSecondWindow });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(writesFor(id).at(-1)!.leaseOwner).toBeNull();
+  });
+
+  it('clears the lease when the owner pauses', async () => {
+    const id = await makeRecording();
+    const { queue } = makeQueue({
+      ownerId: OWNER,
+      transcribe: async (pcm, opts) => {
+        if (opts.offsetMs === 100) await queue.pause(id);
+        return perWindow(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    const paused = writesFor(id).filter((r) => r.status === 'paused').at(-1)!;
+    expect(paused.leaseOwner).toBeNull();
   });
 });
