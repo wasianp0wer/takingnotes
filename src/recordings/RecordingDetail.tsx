@@ -9,6 +9,24 @@ import { deleteRecording, getRecordingAudio } from '@/storage/recordings';
 import type { RecordingRecord } from '@/storage/types';
 
 /**
+ * The extension for a recorded blob's MIME type. `MediaRecorder` types carry a
+ * codecs parameter (`audio/webm;codecs=opus`), and a stitched recording whose
+ * chunks all arrived without a type at all has none to read, so webm - what
+ * this app records - is the fallback rather than a guess at nothing.
+ */
+function extensionFor(type: string): string {
+  const subtype = type.split(';')[0]?.split('/')[1];
+  return subtype && /^[a-z0-9]+$/i.test(subtype) ? subtype : 'webm';
+}
+
+/** A filename that survives every filesystem: no separators, no runs of spaces. */
+function downloadName(title: string, startedAt: number, type: string): string {
+  const safe = title.replace(/[^\w\s-]/g, '').replace(/\s+/g, ' ').trim() || 'Recording';
+  const date = new Date(startedAt).toISOString().slice(0, 10);
+  return `${safe} ${date}.${extensionFor(type)}`;
+}
+
+/**
  * The selected recording: an audio player, its transcription status (with
  * live progress while it is the queue's active job) and, once done, a
  * seekable list of transcript segments.
@@ -24,6 +42,10 @@ export function RecordingDetail({
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  // Held as well as the player's URL: the download builds its own URL from these
+  // bytes, with its own type. A Blob out of storage is a handle to the browser's
+  // blob store, not a copy of the audio in JS memory.
+  const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioMissing, setAudioMissing] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const queueState = useSyncExternalStore(queue.subscribe, queue.getState);
@@ -41,6 +63,7 @@ export function RecordingDetail({
         return;
       }
       createdUrl = URL.createObjectURL(blob);
+      setAudioBlob(blob);
       setAudioUrl(createdUrl);
     });
 
@@ -61,6 +84,37 @@ export function RecordingDetail({
     if (playing && typeof playing.catch === 'function') {
       playing.catch(() => {});
     }
+  }
+
+  /**
+   * Saves the whole recording as a file.
+   *
+   * ⚑ Not an `<a href={audioUrl} download>`, which is what this was first: a
+   * blob URL that advertises `audio/webm` is media the browser would rather play
+   * than save, and Safari ignores `download` on a blob URL altogether and
+   * navigates to it - so the recording opened as a stream in a new window
+   * instead of being saved. Re-typing the bytes as a generic binary payload is
+   * what makes it a download everywhere.
+   *
+   * `slice` with a content type re-labels the same bytes without copying them,
+   * which matters at lecture length; the player's own URL is left alone, since
+   * it still needs to be audio.
+   */
+  function downloadAudio() {
+    if (!audioBlob) return;
+    const url = URL.createObjectURL(audioBlob.slice(0, audioBlob.size, 'application/octet-stream'));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = downloadName(recording.title, recording.startedAt, audioBlob.type);
+    link.rel = 'noopener';
+    // Appended rather than clicked detached: Firefox and Safari ignore a click
+    // on an anchor that is not in the document.
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    // Released on the next tick, not here: revoking inside the same task can
+    // cancel the save the click just started.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   async function handleDelete() {
@@ -120,7 +174,12 @@ export function RecordingDetail({
       {audioMissing ? (
         <p className="text-sm text-muted-foreground">Audio is missing</p>
       ) : audioUrl ? (
-        <audio ref={audioRef} controls src={audioUrl} className="w-full" />
+        <div className="space-y-2">
+          <audio ref={audioRef} controls src={audioUrl} className="w-full" />
+          <Button variant="outline" size="sm" onClick={downloadAudio}>
+            Download audio
+          </Button>
+        </div>
       ) : null}
 
       {transcript === null && (
@@ -135,6 +194,11 @@ export function RecordingDetail({
       {transcript?.status === 'pending' && (
         <div className="space-y-2">
           <p className="text-sm text-muted-foreground">Queued for transcription</p>
+          {(isActive || isQueued) && (
+            <Button variant="outline" size="sm" onClick={() => void queue.pause(recording.id)}>
+              Pause
+            </Button>
+          )}
           {stuck && (
             <Button size="sm" onClick={() => void queue.retry(recording.id)}>
               Retry
@@ -154,8 +218,26 @@ export function RecordingDetail({
               <Progress value={Math.round((queueState.progress ?? 0) * 100)} />
             </div>
           )}
+          {isActive && queueState.stage === null && (
+            // Reading and decoding the audio, or loading an already-cached
+            // model: the steps of a job that report nothing of their own.
+            <p className="text-xs text-muted-foreground">Preparing the audio…</p>
+          )}
           {isActive && queueState.stage === 'transcribing' && (
-            <p className="text-xs text-muted-foreground">Transcribing…</p>
+            // ⚑ A climbing count, not a percentage. The pipeline decides how
+            // many decode passes each 30-second window needs as it runs, so
+            // there is no total here to be a proportion of - and presenting the
+            // count as one pinned this at "100%" partway through a lecture,
+            // which reads as stuck. The number going up is the sign of life;
+            // how much is left is genuinely not knowable from here.
+            <p className="text-xs text-muted-foreground">
+              {queueState.passes ?? 0} passes decoded so far
+            </p>
+          )}
+          {(isActive || isQueued) && (
+            <Button variant="outline" size="sm" onClick={() => void queue.pause(recording.id)}>
+              Pause
+            </Button>
           )}
           {stuck && (
             <Button size="sm" onClick={() => void queue.retry(recording.id)}>

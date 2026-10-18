@@ -364,7 +364,7 @@ describe('transcription queue', () => {
     expect(timers.armed()).toEqual([]);
   });
 
-  it('cancels the active job, leaves it cancelled, and carries on with the next recording', async () => {
+  it('pauses the active job, leaves it paused, and carries on with the next recording', async () => {
     const stopped = await makeRecording(1);
     const next = await makeRecording(2);
     let calls = 0;
@@ -372,12 +372,11 @@ describe('transcription queue', () => {
       transcribe: (pcm, opts) => {
         calls += 1;
         if (calls > 1) return defaultTranscribe(pcm, opts);
-        // Cancelled from outside, the way the Cancel button does, once the job
-        // is genuinely in the transcriber's hands.
-        // `queue` is bound by the time this runs - the transcriber is only
-        // ever called from inside the drain loop.
+        // Paused from outside, the way the Pause button does, once the job is
+        // genuinely in the transcriber's hands. `queue` is bound by the time
+        // this runs - the transcriber is only ever called from the drain loop.
         return silentTranscribe(() => {
-          void queue.cancel(stopped);
+          void queue.pause(stopped);
         })(pcm, opts);
       },
     });
@@ -387,12 +386,12 @@ describe('transcription queue', () => {
     await queue.whenIdle();
 
     const record = (await getRecording(stopped))!.transcript!;
-    // ⚑ Terminal, not `running` or `pending`: those two are exactly what
-    // `resume()` re-enqueues on the next launch, so anything else would restart
-    // the job the owner just stopped. `failed` also brings back Retry, which is
-    // what makes cancelling reversible.
-    expect(record.status).toBe('failed');
-    expect(record.error).toBe('Transcription cancelled.');
+    // ⚑ `paused`, and `resume()` skips it - which is the property today's
+    // terminal cancel existed for. `null`, `pending` and `running` are exactly
+    // what `resume()` re-enqueues, so any of those would restart the job the
+    // owner just stopped on the next launch.
+    expect(record.status).toBe('paused');
+    expect(record.error).toBeNull();
     expect(await statusOf(next)).toBe('done');
     expect(transcribe).toHaveBeenCalledTimes(2);
   });
@@ -410,26 +409,53 @@ describe('transcription queue', () => {
 
     await queue.enqueue(first);
     await queue.enqueue(dropped);
-    await queue.cancel(dropped);
+    await queue.pause(dropped);
     gate.resolve();
     await queue.whenIdle();
 
-    expect((await getRecording(dropped))!.transcript).toMatchObject({
-      status: 'failed',
-      error: 'Transcription cancelled.',
-    });
+    expect((await getRecording(dropped))!.transcript).toMatchObject({ status: 'paused' });
     expect(transcribe).toHaveBeenCalledTimes(1);
     expect(queue.getState().queuedIds).toEqual([]);
   });
 
-  it('ignores a cancel for a recording it is neither running nor holding', async () => {
+  it('ignores a pause for a recording it is neither running nor holding', async () => {
     const id = await makeRecording();
     const { queue, transcribe } = makeQueue();
 
-    await queue.cancel(id);
+    await queue.pause(id);
 
     expect(await statusOf(id)).toBeUndefined();
     expect(transcribe).not.toHaveBeenCalled();
+  });
+
+  it('ignores a pause for a recording that no longer exists', async () => {
+    const { queue } = makeQueue();
+
+    await expect(queue.pause('deleted')).resolves.toBeUndefined();
+  });
+
+  it('skips a paused recording at launch, so a stopped job stays stopped', async () => {
+    const id = await makeRecording();
+    await setRecordingTranscript(id, transcript('paused'));
+    const { queue, transcribe } = makeQueue();
+
+    await queue.resume();
+    await queue.whenIdle();
+
+    expect(transcribe).not.toHaveBeenCalled();
+    expect(await statusOf(id)).toBe('paused');
+  });
+
+  it('continues from the cursor when a paused recording is enqueued again', async () => {
+    const id = await makeRecording();
+    await setRecordingTranscript(id, transcript('paused'));
+    const { queue, transcribe } = makeQueue();
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect(await statusOf(id)).toBe('done');
   });
 
   it('records a decode rejection as failed', async () => {

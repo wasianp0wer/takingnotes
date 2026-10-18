@@ -60,22 +60,32 @@ export interface TranscriptionQueue {
   /** Same as enqueue; for a failed (or done) recording. */
   retry(id: string): Promise<void>;
   /**
-   * Stops this recording's transcription: the active job is aborted (which
-   * terminates the Whisper worker, so the work really stops rather than
-   * grinding on unwatched), and a merely queued one is dropped before it ever
-   * reaches the transcriber. Either way the transcript is left `failed`
-   * carrying `CANCELLED_MESSAGE`.
+   * Stops this recording's transcription and keeps what it has: the active job
+   * is aborted (which terminates the Whisper worker, so the work really stops
+   * rather than grinding on unwatched) and a merely queued one is dropped
+   * before it ever reaches the transcriber. Either way the transcript is left
+   * `paused`, carrying every window finished so far and the cursor they reach.
    *
-   * ⚑ Terminal on purpose. `null`, `pending` and `running` are exactly what
-   * `resume()` re-enqueues at launch, so leaving any of them would restart the
-   * job the owner just stopped on the next reload. `failed` also brings back
-   * the Retry button, which is what keeps cancelling reversible.
+   * ⚑ Immediate, not deferred to the next window boundary. A stop button that
+   * does nothing visible for a window length would be worse than losing the
+   * window in flight, which is the cost here: the cursor sits at the last
+   * boundary that completed.
    *
-   * Only the active and queued jobs are cancellable: an id the queue is not
-   * holding is a no-op, not an error.
+   * ⚑ `paused` is its own status because `null`, `pending` and `running` are
+   * exactly what `resume()` re-enqueues at launch - leaving any of them would
+   * restart on the next reload the job the owner just stopped. This is the
+   * property the old terminal cancel existed for, now served without throwing
+   * the partial transcript away.
+   *
+   * Only the active and queued jobs can be paused: an id the queue is not
+   * holding, or a recording that no longer exists, is a no-op rather than an
+   * error. Discarding a transcription outright is deleting the recording.
    */
-  cancel(id: string): Promise<void>;
-  /** Queues every recording whose transcript is null, 'pending' or 'running', oldest first. */
+  pause(id: string): Promise<void>;
+  /**
+   * Queues every recording whose transcript is null, 'pending' or 'running',
+   * oldest first. Deliberately not `paused`, and not `failed`.
+   */
   resume(): Promise<void>;
   /** The same object until something changes, for `useSyncExternalStore`. */
   getState(): TranscriptionQueueState;
@@ -121,8 +131,11 @@ function stallMessage(step: JobStep): string {
   return `Transcription stalled while ${step}: it stopped responding, so it was cancelled. Try again.`;
 }
 
-/** What a cancelled job's transcript records, so the owner sees why it stopped. */
-const CANCELLED_MESSAGE = 'Transcription cancelled.';
+/**
+ * Rejects the in-flight step when the owner pauses. Never persisted: a paused
+ * job writes `status: 'paused'` with no error, since pausing is not a failure.
+ */
+const PAUSED_SENTINEL = 'Transcription paused.';
 
 const IDLE: TranscriptionQueueState = {
   activeId: null,
@@ -282,9 +295,9 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     // this job becoming active and its controller existing covers two storage
     // reads and a write, which is long enough for a click to land in.
     const controller = new AbortController();
-    let cancelledByUser = false;
+    let pausedByUser = false;
     cancelActive = () => {
-      cancelledByUser = true;
+      pausedByUser = true;
       controller.abort();
     };
 
@@ -401,7 +414,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
      */
     const whenStalled = new Promise<never>((_resolve, reject) => {
       const bail = (): void => {
-        reject(new Error(cancelledByUser ? CANCELLED_MESSAGE : stallMessage(step)));
+        reject(new Error(pausedByUser ? PAUSED_SENTINEL : stallMessage(step)));
       };
       // An abort that already happened fires no listener, and a cancel can land
       // before this promise is built.
@@ -417,10 +430,26 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
 
     /** What a terminal failure should record, given how the job actually ended. */
     const endedWith = (error: unknown): unknown => {
-      if (cancelledByUser) return new Error(CANCELLED_MESSAGE);
       if (stalled) return new Error(stallMessage(step));
       return error;
     };
+
+    /**
+     * A paused job: every window it finished, the cursor they reach, and no
+     * error - being stopped on purpose is not a failure, and writing one here
+     * would put a red message under a transcript that is simply waiting.
+     */
+    const writePaused = () =>
+      write(id, {
+        text: textOf(segments),
+        segments,
+        model,
+        language,
+        status: 'paused',
+        error: null,
+        completedMs: cursorMs,
+        updatedAt: now(),
+      });
 
     arm();
 
@@ -439,7 +468,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
         const cachedMs = (cached.length / TARGET_SAMPLE_RATE) * 1000;
         return cachedMs >= cursorMs ? cached : null;
       } catch (error) {
-        if (stalled || cancelledByUser) throw error;
+        if (stalled || pausedByUser) throw error;
         console.warn(`Could not read the cached decode for recording ${id}:`, error);
         return null;
       }
@@ -460,7 +489,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
         try {
           await guard(writePcmCache(id, pcm));
         } catch (error) {
-          if (stalled || cancelledByUser) throw error;
+          if (stalled || pausedByUser) throw error;
           // A cache that cannot be written costs a re-decode on resume; it
           // does not cost the transcription.
           console.warn(`Could not cache the decode for recording ${id}:`, error);
@@ -469,7 +498,8 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     } catch (error) {
       finished = true;
       disarm();
-      await fail(endedWith(error));
+      if (pausedByUser) await writePaused();
+      else await fail(endedWith(error));
       return;
     }
 
@@ -553,7 +583,8 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       }
     } catch (error) {
       finished = true;
-      await fail(endedWith(error));
+      if (pausedByUser) await writePaused();
+      else await fail(endedWith(error));
     } finally {
       // Every exit path: a watchdog left armed here would abort a later job.
       disarm();
@@ -616,7 +647,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     pump();
   }
 
-  async function cancel(id: string): Promise<void> {
+  async function pause(id: string): Promise<void> {
     if (activeId === id) {
       cancelActive?.();
       return;
@@ -627,17 +658,14 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     if (waiting === -1) return;
     queued.splice(waiting, 1);
     emit();
-    // The model the `pending` write already stored, rather than another settings
-    // read that could fail and leave the id dropped but still marked pending.
-    const model = (await getRecording(id))?.transcript?.model ?? '';
+    // Whatever the `pending` write already stored, rather than another
+    // settings read that could fail and leave the id dropped but still marked
+    // pending. A recording deleted in the meantime has nothing to write, and
+    // `write` swallows that.
+    const existing = (await getRecording(id))?.transcript;
     await write(id, {
-      text: '',
-      segments: [],
-      model,
-      language: null,
-      status: 'failed',
-      error: CANCELLED_MESSAGE,
-      updatedAt: now(),
+      ...carryForward(existing, existing?.model ?? '', 'pending'),
+      status: 'paused',
     });
     notifyIdle();
   }
@@ -665,7 +693,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
   return {
     enqueue,
     retry: enqueue,
-    cancel,
+    pause,
     resume,
     getState: () => state,
     subscribe(fn) {

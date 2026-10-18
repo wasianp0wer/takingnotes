@@ -71,7 +71,7 @@ function createFakeQueue(initial: Partial<TranscriptionQueueState> = {}): FakeQu
   return {
     enqueue: vi.fn(async () => {}),
     retry: vi.fn(async () => {}),
-    cancel: vi.fn(async () => {}),
+    pause: vi.fn(async () => {}),
     resume: vi.fn(async () => {}),
     getState: () => state,
     subscribe(fn) {
@@ -317,7 +317,7 @@ describe('RecordingsView', () => {
     expect(container.textContent).toContain('Preparing the audio');
   });
 
-  it('offers Cancel for the job the queue is running and calls it with that recording', async () => {
+  it('offers Pause for the job the queue is running and calls it with that recording', async () => {
     const recording = await seed({ title: 'Lecture 6' });
     await setRecordingTranscript(recording.id, {
       text: '',
@@ -337,11 +337,11 @@ describe('RecordingsView', () => {
 
     render(queue);
     await flushAll();
-    const cancel = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Cancel');
-    expect(cancel).toBeTruthy();
-    await click(cancel!);
+    const pause = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Pause');
+    expect(pause).toBeTruthy();
+    await click(pause!);
 
-    expect(queue.cancel).toHaveBeenCalledWith(recording.id);
+    expect(queue.pause).toHaveBeenCalledWith(recording.id);
   });
 
   it('downloads the whole recording as a file rather than opening it as a stream', async () => {
