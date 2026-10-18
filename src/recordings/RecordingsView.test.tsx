@@ -61,6 +61,7 @@ function createFakeQueue(initial: Partial<TranscriptionQueueState> = {}): FakeQu
     activeId: null,
     stage: null,
     progress: null,
+    passes: null,
     queuedIds: [],
     ...initial,
   };
@@ -70,6 +71,7 @@ function createFakeQueue(initial: Partial<TranscriptionQueueState> = {}): FakeQu
   return {
     enqueue: vi.fn(async () => {}),
     retry: vi.fn(async () => {}),
+    cancel: vi.fn(async () => {}),
     resume: vi.fn(async () => {}),
     getState: () => state,
     subscribe(fn) {
@@ -199,6 +201,27 @@ describe('RecordingsView', () => {
     expect(audio.currentTime).toBe(65);
   });
 
+  it('labels a paused transcript "Paused" in the list', async () => {
+    const recording = await seed({ title: 'Half done' });
+    await setRecordingTranscript(recording.id, {
+      text: 'the first half',
+      segments: [{ startMs: 0, endMs: 1000, text: 'the first half' }],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'paused',
+      error: null,
+      completedMs: 30_000,
+      updatedAt: Date.now(),
+    });
+    const queue = createFakeQueue();
+
+    render(queue);
+    await flushAll();
+
+    const row = listButtons().find((b) => b.textContent?.includes('Half done'));
+    expect(row?.textContent).toContain('Paused');
+  });
+
   it('shows a failed transcript error and retries', async () => {
     const recording = await seed({ title: 'Broken' });
     await setRecordingTranscript(recording.id, {
@@ -242,6 +265,115 @@ describe('RecordingsView', () => {
     await flushAll();
 
     expect(container.textContent).toContain('Downloading model 42%');
+  });
+
+  it('shows the decode passes finished so far, never a percentage of the audio', async () => {
+    const recording = await seed({ title: 'Lecture 4' });
+    await setRecordingTranscript(recording.id, {
+      text: '',
+      segments: [],
+      model: 'Xenova/whisper-base.en',
+      language: null,
+      status: 'running',
+      error: null,
+      updatedAt: Date.now(),
+    });
+    const queue = createFakeQueue({
+      activeId: recording.id,
+      stage: 'transcribing',
+      progress: 0,
+      passes: 137,
+    });
+
+    render(queue);
+    await flushAll();
+
+    // ⚑ A count that climbs is the only honest sign of life here: the pipeline
+    // decides how many decode passes each window needs as it goes, so there is
+    // no total to be a percentage of. Showing one made the bar sit at "100%"
+    // partway through a lecture, which read as stuck.
+    expect(container.textContent).toContain('137 passes');
+    expect(container.textContent).not.toContain('%');
+  });
+
+  it('says an active job that has not reported a stage yet is still preparing', async () => {
+    const recording = await seed({ title: 'Lecture 5' });
+    await setRecordingTranscript(recording.id, {
+      text: '',
+      segments: [],
+      model: 'Xenova/whisper-base.en',
+      language: null,
+      status: 'running',
+      error: null,
+      updatedAt: Date.now(),
+    });
+    const queue = createFakeQueue({ activeId: recording.id, stage: null, progress: null });
+
+    render(queue);
+    await flushAll();
+
+    // Reading and decoding the audio, or loading an already-cached model: the
+    // two steps that report nothing of their own.
+    expect(container.textContent).toContain('Preparing the audio');
+  });
+
+  it('offers Cancel for the job the queue is running and calls it with that recording', async () => {
+    const recording = await seed({ title: 'Lecture 6' });
+    await setRecordingTranscript(recording.id, {
+      text: '',
+      segments: [],
+      model: 'Xenova/whisper-base.en',
+      language: null,
+      status: 'running',
+      error: null,
+      updatedAt: Date.now(),
+    });
+    const queue = createFakeQueue({
+      activeId: recording.id,
+      stage: 'transcribing',
+      progress: 0,
+      passes: 12,
+    });
+
+    render(queue);
+    await flushAll();
+    const cancel = [...container.querySelectorAll('button')].find((b) => b.textContent === 'Cancel');
+    expect(cancel).toBeTruthy();
+    await click(cancel!);
+
+    expect(queue.cancel).toHaveBeenCalledWith(recording.id);
+  });
+
+  it('downloads the whole recording as a file rather than opening it as a stream', async () => {
+    await seed({ title: 'Lecture 7' });
+    const queue = createFakeQueue();
+
+    render(queue);
+    await flushAll();
+    const clicked: string[] = [];
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        clicked.push(this.download);
+      });
+    const button = [...container.querySelectorAll('button')].find(
+      (b) => b.textContent === 'Download audio',
+    );
+    expect(button).toBeTruthy();
+    await click(button!);
+    await flushAll();
+
+    // One anchor click, carrying the filename.
+    expect(clicked).toEqual([expect.stringMatching(/^Lecture 7 \d{4}-\d{2}-\d{2}\.webm$/)]);
+    // ⚑ The downloaded blob is re-typed as a generic binary payload. A blob URL
+    // that still advertises `audio/webm` is media the browser would rather play
+    // than save - Safari ignores `download` on a blob URL and navigates to it -
+    // which opened the recording as a stream in a new window instead of saving it.
+    const types = vi.mocked(URL.createObjectURL).mock.calls.map(([value]) => (value as Blob).type);
+    expect(types).toContain('application/octet-stream');
+    // The URL made for the download is released again.
+    expect(URL.revokeObjectURL).toHaveBeenCalled();
+    clickSpy.mockRestore();
   });
 
   it('offers a retry for a recording stuck pending outside the queue', async () => {

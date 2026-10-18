@@ -15,6 +15,8 @@ function statusWord(recording: RecordingRecord): string {
       return 'Queued';
     case 'running':
       return 'Transcribing';
+    case 'paused':
+      return 'Paused';
     case 'done':
       return 'Done';
     case 'failed':

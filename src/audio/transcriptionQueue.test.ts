@@ -14,7 +14,7 @@ import {
   getRecording,
   setRecordingTranscript,
 } from '@/storage/recordings';
-import type { AudioTranscriptRecord, TranscriptStatus } from '@/storage/types';
+import type { AudioTranscriptRecord, AudioTranscriptStatus } from '@/storage/types';
 import { resetDatabase } from '@/test/resetDb';
 
 const MODEL = 'Xenova/whisper-base.en';
@@ -64,7 +64,7 @@ async function makeUnfinishedRecording(startedAt = 1, title = 't'): Promise<stri
   return recording.id;
 }
 
-function transcript(status: TranscriptStatus): AudioTranscriptRecord {
+function transcript(status: AudioTranscriptStatus): AudioTranscriptRecord {
   return {
     text: status === 'done' ? 'old' : '',
     segments: [],
@@ -199,7 +199,7 @@ function gateAtJobStart(model: () => string) {
   return { gate, getModel };
 }
 
-async function statusOf(id: string): Promise<TranscriptStatus | undefined> {
+async function statusOf(id: string): Promise<AudioTranscriptStatus | undefined> {
   return (await getRecording(id))?.transcript?.status;
 }
 
@@ -222,7 +222,7 @@ describe('transcription queue', () => {
 
   it('persists running while the transcriber is working', async () => {
     const id = await makeRecording();
-    let seen: TranscriptStatus | undefined;
+    let seen: AudioTranscriptStatus | undefined;
     const { queue } = makeQueue({
       transcribe: async (pcm, opts) => {
         seen = await statusOf(id);
@@ -316,6 +316,115 @@ describe('transcription queue', () => {
     expect(armedDuringJob[0]).not.toBe(armedAtStart);
     expect(await statusOf(id)).toBe('done');
     expect(timers.armed()).toEqual([]);
+  });
+
+  it('gives up on audio that never decodes and carries on with the next recording', async () => {
+    // ⚑ The watchdog used to be armed only *after* the decode, so a decode that
+    // never settles - and `decodeAudioData` on a lecture-length recording is a
+    // real hazard - left the job unfinished, the serial loop blocked behind it,
+    // and nothing on screen but "Transcribing..." for as long as the tab stayed
+    // open. No error, no timeout, no way past it.
+    const hung = await makeRecording(1);
+    const next = await makeRecording(2);
+    const timers = manualTimers();
+    let decodeCalls = 0;
+    let armedDuringDecode: number[] = [];
+    const { queue, transcribe } = makeQueue({
+      ...timers.deps,
+      stallTimeoutMs: 25,
+      decode: async () => {
+        decodeCalls += 1;
+        if (decodeCalls > 1) return new Float32Array(16);
+        // Only fires if the watchdog is already armed by this point.
+        armedDuringDecode = timers.armed();
+        timers.fire();
+        return new Promise<Float32Array>(() => {});
+      },
+    });
+
+    await queue.enqueue(hung);
+    await queue.enqueue(next);
+    await queue.whenIdle();
+
+    expect(armedDuringDecode).toHaveLength(1);
+    const record = (await getRecording(hung))!.transcript!;
+    expect(record.status).toBe('failed');
+    // ⚑ Names the step that went silent. Two rounds of "it appears to be
+    // stuck" went by without anyone being able to say *where* it stopped; a
+    // stall that does not name its own step cannot be acted on.
+    expect(record.error).toContain('stalled while decoding the audio');
+    // The decode was never waited out: the recording behind it still ran.
+    expect(await statusOf(next)).toBe('done');
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect(timers.armed()).toEqual([]);
+  });
+
+  it('cancels the active job, leaves it cancelled, and carries on with the next recording', async () => {
+    const stopped = await makeRecording(1);
+    const next = await makeRecording(2);
+    let calls = 0;
+    const { queue, transcribe } = makeQueue({
+      transcribe: (pcm, opts) => {
+        calls += 1;
+        if (calls > 1) return defaultTranscribe(pcm, opts);
+        // Cancelled from outside, the way the Cancel button does, once the job
+        // is genuinely in the transcriber's hands.
+        // `queue` is bound by the time this runs - the transcriber is only
+        // ever called from inside the drain loop.
+        return silentTranscribe(() => {
+          void queue.cancel(stopped);
+        })(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(stopped);
+    await queue.enqueue(next);
+    await queue.whenIdle();
+
+    const record = (await getRecording(stopped))!.transcript!;
+    // ⚑ Terminal, not `running` or `pending`: those two are exactly what
+    // `resume()` re-enqueues on the next launch, so anything else would restart
+    // the job the owner just stopped. `failed` also brings back Retry, which is
+    // what makes cancelling reversible.
+    expect(record.status).toBe('failed');
+    expect(record.error).toBe('Transcription cancelled.');
+    expect(await statusOf(next)).toBe('done');
+    expect(transcribe).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops a queued recording so it is never handed to the transcriber', async () => {
+    const first = await makeRecording(1);
+    const dropped = await makeRecording(2);
+    const gate = deferred();
+    const { queue, transcribe } = makeQueue({
+      transcribe: async (pcm, opts) => {
+        await gate.promise;
+        return defaultTranscribe(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(first);
+    await queue.enqueue(dropped);
+    await queue.cancel(dropped);
+    gate.resolve();
+    await queue.whenIdle();
+
+    expect((await getRecording(dropped))!.transcript).toMatchObject({
+      status: 'failed',
+      error: 'Transcription cancelled.',
+    });
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect(queue.getState().queuedIds).toEqual([]);
+  });
+
+  it('ignores a cancel for a recording it is neither running nor holding', async () => {
+    const id = await makeRecording();
+    const { queue, transcribe } = makeQueue();
+
+    await queue.cancel(id);
+
+    expect(await statusOf(id)).toBeUndefined();
+    expect(transcribe).not.toHaveBeenCalled();
   });
 
   it('records a decode rejection as failed', async () => {
@@ -745,12 +854,14 @@ describe('transcription queue', () => {
       activeId: id,
       stage: 'loading',
       progress: 0.5,
+      passes: null,
       queuedIds: [],
     });
     expect(states.at(-1)).toEqual({
       activeId: null,
       stage: null,
       progress: null,
+      passes: null,
       queuedIds: [],
     });
     expect(changed).toEqual([id, id, id]);
@@ -784,7 +895,13 @@ describe('transcription queue', () => {
 
     const idle = queue.getState();
     expect(queue.getState()).toBe(idle);
-    expect(idle).toEqual({ activeId: null, stage: null, progress: null, queuedIds: [] });
+    expect(idle).toEqual({
+      activeId: null,
+      stage: null,
+      progress: null,
+      passes: null,
+      queuedIds: [],
+    });
 
     await queue.enqueue(id);
     const queued = queue.getState();

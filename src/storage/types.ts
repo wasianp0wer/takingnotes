@@ -11,6 +11,21 @@ export type PageSource = 'rom' | 'live' | 'typed';
 export type TitleSource = 'default' | 'auto' | 'manual';
 
 export type TranscriptStatus = 'pending' | 'running' | 'done' | 'failed';
+
+/**
+ * An audio transcript's status. Deliberately a *separate* union from
+ * `TranscriptStatus` rather than a widening of it: `'paused'` can only ever
+ * happen to a Whisper job, and widening the shared type would force every
+ * page-handwriting reader (`src/transcription/queue.ts`,
+ * `src/notes/TranscriptPanel.tsx`, `src/notes/naming/queue.ts`) to handle a
+ * state that cannot occur for a page.
+ *
+ * `'paused'` exists because a lecture-length transcription now keeps a cursor,
+ * so stopping one no longer has to mean discarding its work. It is the status
+ * the queue's `resume()` deliberately skips at launch - which is what keeps a
+ * job the owner stopped from restarting itself on the next reload.
+ */
+export type AudioTranscriptStatus = TranscriptStatus | 'paused';
 /** Mirrors `TabletDeviceType` in src/types/memory.ts. */
 export type DeviceType = 'huion' | 'wacom';
 
@@ -189,9 +204,35 @@ export interface AudioTranscriptRecord {
   /** Whisper model id, e.g. `Xenova/whisper-base.en`. */
   model: string;
   language: string | null;
-  status: TranscriptStatus;
+  status: AudioTranscriptStatus;
   error: string | null;
   updatedAt: number;
+  /**
+   * How much of the recording has been transcribed, in ms from its start.
+   * Absent reads as `0`. A `running` row carries real `text` and `segments`
+   * up to this point, which is what lets a reload, a pause or a preemption
+   * pick the job up where it stopped instead of starting it over.
+   *
+   * The one thing that discards it is a model change: resuming model-B onto
+   * model-A's output and stamping the row with one model id would be a lie
+   * about what the transcript is.
+   */
+  completedMs?: number;
+  /**
+   * The transcription queue instance currently working this recording, or
+   * `null`/absent when nobody holds it. Two tabs each build their own queue
+   * and each run `resume()` at launch; without a lease their interleaved
+   * per-window writes would ratchet `completedMs` backwards and splice two
+   * runs into one transcript.
+   */
+  leaseOwner?: string | null;
+  /**
+   * Epoch ms of the last heartbeat on `leaseOwner`, refreshed with every
+   * per-window write. A lease older than the stall timeout is taken over:
+   * a job that has not written in that long is dead by the watchdog's own
+   * definition. Absent reads as `null`.
+   */
+  leaseAt?: number | null;
 }
 
 export interface RecordingRecord {
