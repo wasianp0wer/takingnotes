@@ -6,7 +6,7 @@ import { formatClock } from '@/audio/format';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { deleteRecording, getRecordingAudio } from '@/storage/recordings';
-import type { RecordingRecord } from '@/storage/types';
+import type { RecordingRecord, TranscriptSegment } from '@/storage/types';
 
 /**
  * The extension for a recorded blob's MIME type. `MediaRecorder` types carry a
@@ -24,6 +24,39 @@ function downloadName(title: string, startedAt: number, type: string): string {
   const safe = title.replace(/[^\w\s-]/g, '').replace(/\s+/g, ' ').trim() || 'Recording';
   const date = new Date(startedAt).toISOString().slice(0, 10);
   return `${safe} ${date}.${extensionFor(type)}`;
+}
+
+/**
+ * A transcript as a list of timestamped lines, each seeking the player.
+ *
+ * Shared by every state that has segments to show - `done`, `running` and
+ * `paused` - so a transcription does not change how it reads depending on
+ * whether it has finished.
+ */
+function TranscriptSegments({
+  segments,
+  onSeek,
+}: {
+  segments: readonly TranscriptSegment[];
+  onSeek: (startMs: number) => void;
+}) {
+  return (
+    <ul className="space-y-1">
+      {segments.map((segment, index) => (
+        <li key={index} className="flex items-start gap-2 text-sm">
+          <button
+            type="button"
+            data-start-ms={segment.startMs}
+            onClick={() => onSeek(segment.startMs)}
+            className="shrink-0 tabular-nums text-primary underline-offset-4 hover:underline"
+          >
+            {formatClock(segment.startMs)}
+          </button>
+          <span>{segment.text}</span>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /**
@@ -217,11 +250,14 @@ export function RecordingDetail({
       )}
 
       {(transcript?.status === 'running' || transcript?.status === 'paused') &&
-        transcript.text !== '' && (
-          // What has landed so far. Shown while the job runs and while it is
-          // paused: a partial transcript is the whole point of the cursor,
-          // and hiding it until `done` would waste it.
-          <p className="whitespace-pre-wrap text-sm text-muted-foreground">{transcript.text}</p>
+        transcript.segments.length > 0 && (
+          // ⚑ The same list the finished transcript renders, not a paragraph
+          // of joined text. A partial transcript's segments carry their
+          // `startMs` exactly as a finished one's do, so presenting it
+          // differently would drop the timestamp links - and the seek they
+          // perform - for the whole time a long job is running, which is
+          // precisely when the owner is most likely to be reading along.
+          <TranscriptSegments segments={transcript.segments} onSeek={seekTo} />
         )}
 
       {transcript?.status === 'paused' && (
@@ -297,21 +333,7 @@ export function RecordingDetail({
           {transcript.segments.length === 0 && !transcript.text ? (
             <p className="text-sm text-muted-foreground">No speech detected</p>
           ) : transcript.segments.length > 0 ? (
-            <ul className="space-y-1">
-              {transcript.segments.map((segment, index) => (
-                <li key={index} className="flex items-start gap-2 text-sm">
-                  <button
-                    type="button"
-                    data-start-ms={segment.startMs}
-                    onClick={() => seekTo(segment.startMs)}
-                    className="shrink-0 tabular-nums text-primary underline-offset-4 hover:underline"
-                  >
-                    {formatClock(segment.startMs)}
-                  </button>
-                  <span>{segment.text}</span>
-                </li>
-              ))}
-            </ul>
+            <TranscriptSegments segments={transcript.segments} onSeek={seekTo} />
           ) : (
             <p className="text-sm">{transcript.text}</p>
           )}

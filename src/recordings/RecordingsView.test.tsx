@@ -244,6 +244,62 @@ describe('RecordingsView', () => {
     expect(container.textContent).toContain('the first few minutes');
   });
 
+  it('keeps the clickable timestamps on a partial transcript, as the finished one has', async () => {
+    // ⚑ A partial transcript's segments carry their startMs just as a
+    // finished one's do. Rendering the joined text as a paragraph throws
+    // away the timestamp links and the seek-on-click with them - the view
+    // regresses the moment a job stops being `done`.
+    const recording = await seed({ title: 'In progress' });
+    await setRecordingTranscript(recording.id, {
+      text: 'first bit second bit',
+      segments: [
+        { startMs: 0, endMs: 1000, text: 'first bit' },
+        { startMs: 65_000, endMs: 66_000, text: 'second bit' },
+      ],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'running',
+      error: null,
+      completedMs: 70_000,
+      updatedAt: Date.now(),
+    });
+    const queue = createFakeQueue({ activeId: recording.id });
+
+    render(queue);
+    await flushAll();
+
+    const segmentButtons = [...container.querySelectorAll('[data-start-ms]')] as HTMLButtonElement[];
+    expect(segmentButtons).toHaveLength(2);
+    expect(segmentButtons[0].textContent).toContain('0:00');
+    expect(segmentButtons[1].textContent).toContain('1:05');
+
+    const audio = container.querySelector('audio') as HTMLAudioElement;
+    await click(segmentButtons[1]);
+    expect(audio.currentTime).toBe(65);
+  });
+
+  it('keeps the clickable timestamps on a paused transcript too', async () => {
+    const recording = await seed({ title: 'Half done' });
+    await setRecordingTranscript(recording.id, {
+      text: 'what it heard',
+      segments: [{ startMs: 65_000, endMs: 66_000, text: 'what it heard' }],
+      model: 'Xenova/whisper-base.en',
+      language: 'en',
+      status: 'paused',
+      error: null,
+      completedMs: 70_000,
+      updatedAt: Date.now(),
+    });
+    const queue = createFakeQueue();
+
+    render(queue);
+    await flushAll();
+
+    const segmentButtons = [...container.querySelectorAll('[data-start-ms]')] as HTMLButtonElement[];
+    expect(segmentButtons).toHaveLength(1);
+    expect(segmentButtons[0].textContent).toContain('1:05');
+  });
+
   it('shows how far a transcription has got as a real proportion', async () => {
     const recording = await seed({ title: 'In progress' });
     await setRecordingTranscript(recording.id, {
