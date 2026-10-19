@@ -249,17 +249,6 @@ export function RecordingDetail({
         </div>
       )}
 
-      {(transcript?.status === 'running' || transcript?.status === 'paused') &&
-        transcript.segments.length > 0 && (
-          // ⚑ The same list the finished transcript renders, not a paragraph
-          // of joined text. A partial transcript's segments carry their
-          // `startMs` exactly as a finished one's do, so presenting it
-          // differently would drop the timestamp links - and the seek they
-          // perform - for the whole time a long job is running, which is
-          // precisely when the owner is most likely to be reading along.
-          <TranscriptSegments segments={transcript.segments} onSeek={seekTo} />
-        )}
-
       {transcript?.status === 'paused' && (
         <div className="space-y-2">
           <p className="text-sm text-muted-foreground">
@@ -316,6 +305,22 @@ export function RecordingDetail({
           )}
         </div>
       )}
+
+      {(transcript?.status === 'running' || transcript?.status === 'paused') &&
+        transcript.segments.length > 0 && (
+          // ⚑ Below the status and its controls, not above: on a lecture
+          // this list runs to thousands of lines, and anything after it is
+          // off screen. Pause and Resume have to stay reachable while the
+          // transcript they act on is being read.
+          //
+          // ⚑ The same list the finished transcript renders, not a paragraph
+          // of joined text. A partial transcript's segments carry their
+          // `startMs` exactly as a finished one's do, so presenting it
+          // differently would drop the timestamp links - and the seek they
+          // perform - for the whole time a long job is running, which is
+          // precisely when the owner is most likely to be reading along.
+          <TranscriptSegments segments={transcript.segments} onSeek={seekTo} />
+        )}
 
       {transcript?.status === 'failed' && (
         <div className="space-y-2">
