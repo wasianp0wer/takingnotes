@@ -12,7 +12,12 @@ import type { WhisperChunk, WhisperRequest, WhisperResponse } from '@/audio/whis
 const MODEL = 'Xenova/whisper-base.en';
 const OTHER_MODEL = 'Xenova/whisper-tiny';
 const CHUNKS: WhisperChunk[] = [{ timestamp: [0, 1], text: ' hi' }];
-const CALL_OPTIONS = { return_timestamps: true, chunk_length_s: 30, stride_length_s: 5 };
+const CALL_OPTIONS = {
+  return_timestamps: true,
+  chunk_length_s: 30,
+  stride_length_s: 5,
+  max_new_tokens: 440,
+};
 
 /** One load the fake loader saw, so tests can assert model/device without digging in mock calls. */
 interface LoadCall {
@@ -140,15 +145,18 @@ describe('createWhisperWorkerCore', () => {
   });
 
   it('reports completed decode passes, not a fraction of a total it cannot know', async () => {
-    // ⚑ `end()` fires once per *seek pass*, not once per 30 s window.
-    // `WhisperForConditionalGeneration.generate` runs its own seek loop whenever
-    // `return_timestamps` is set and `max_new_tokens` is not - see
-    // `_generate_with_seek` in modeling_whisper.js - calling `super.generate`,
-    // and so the streamer, an unpredictable number of times per window. Counting
-    // those against a window total pinned the bar at 100% while the pass ran on,
-    // and because every report re-arms the queue's stall watchdog, the job then
-    // had no upper bound at all. No total is knowable from in here, so none is
-    // claimed: the count is the whole signal.
+    // ⚑ `end()` fires once per `generate()` call, which is once per 30 s
+    // piece the pipeline's own `chunk_length_s` windowing produces - not once
+    // per transcribe request. Counting those against a window total pinned
+    // the bar at 100% while the pass ran on, so no total is claimed from in
+    // here: the count is a sign of life, and the real proportion comes from
+    // the queue's cursor.
+    //
+    // Before `WHISPER_OPTIONS.max_new_tokens` existed this was far worse:
+    // `generate` ran its own seek loop (`_generate_with_seek`) on top of the
+    // pipeline's chunking, calling the streamer an unbounded number of times
+    // when that loop failed to advance - and since every report re-arms the
+    // queue's stall watchdog, the job had no upper bound at all.
     const pcm = new Float32Array(TARGET_SAMPLE_RATE * 80);
     const h = harness({
       transcribe: async (_call, callOptions) => {
@@ -393,5 +401,34 @@ describe('createWhisperWorkerCore', () => {
     await h.core.handle({ type: 'transcribe', id: 1, model: MODEL, pcm: new Float32Array(4) });
 
     expect(h.posted()).toContainEqual({ type: 'result', id: 1, text: '', chunks: [] });
+  });
+});
+
+describe('bounding the decode so a window cannot spin forever', () => {
+  it('passes a max_new_tokens to the pipeline', async () => {
+    // ⚑ This is what keeps a window from running thousands of decode passes.
+    // With `return_timestamps` set and no `max_new_tokens`, transformers.js
+    // routes through `WhisperForConditionalGeneration._generate_with_seek`
+    // (modeling_whisper.js:157), whose `while (seek < total_frames)` loop
+    // advances by `seek += segment_offset` - and `segment_offset` is
+    // `last_ts_pos * input_stride`, which is **zero** when the model's last
+    // complete segment boundary is the `<|0.00|>` timestamp. There is no
+    // guard for that, so the loop spins, re-generating the same audio and
+    // emitting a progress report on every spin.
+    //
+    // Setting `max_new_tokens` takes the plain `super.generate()` path
+    // instead, which the timestamp logits processor is still installed on,
+    // so timestamps survive. The pipeline's own `chunk_length_s` windowing
+    // already does the long-form splitting the seek loop exists for.
+    const h = harness();
+
+    await h.core.handle({ type: 'transcribe', id: 1, model: MODEL, pcm: new Float32Array(4) });
+
+    const [, callOptions] = h.pipe.mock.calls[0];
+    expect(typeof callOptions.max_new_tokens).toBe('number');
+    // Whisper's decoder holds 448 positions in total, prefix included, so the
+    // cap has to leave room for the init tokens.
+    expect(callOptions.max_new_tokens as number).toBeLessThan(448);
+    expect(callOptions.max_new_tokens as number).toBeGreaterThan(256);
   });
 });

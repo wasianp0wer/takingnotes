@@ -33,11 +33,49 @@ export type WhisperResponse =
   | { type: 'result'; id: number; text: string; chunks: WhisperChunk[] }
   | { type: 'error'; id: number; message: string };
 
+/**
+ * Whisper's decoder holds 448 positions in total, the prompt prefix included,
+ * so a new-token cap has to leave room for the init tokens. 440 is far more
+ * than a 30-second chunk of real speech ever needs (that would be several
+ * hundred words a minute) while still being a hard stop.
+ */
+const MAX_NEW_TOKENS = 440;
+
 /** Options passed to the Whisper pipeline call itself (global constraints). */
 export const WHISPER_OPTIONS = {
   return_timestamps: true,
   chunk_length_s: 30,
   stride_length_s: 5,
+  /**
+   * ⚑ Load-bearing, and not only as a safety cap: this is what keeps a single
+   * window from running thousands of decode passes and never finishing.
+   *
+   * With `return_timestamps` set and no `max_new_tokens`, transformers.js
+   * routes through `WhisperForConditionalGeneration._generate_with_seek`
+   * (`modeling_whisper.js:157`). That function's `while (seek < total_frames)`
+   * loop advances by `seek += segment_offset`, and in its "ends mid-segment"
+   * branch `segment_offset = last_ts_pos * input_stride` - which is **zero**
+   * whenever the model's last complete segment boundary is the `<|0.00|>`
+   * timestamp. Nothing guards against a zero advance, so the loop re-generates
+   * the same audio for ever. Every spin emits a progress report, which is why
+   * the pass counter climbs without bound and why the stall watchdog - which
+   * reads any report as a sign of life - never fires.
+   *
+   * Degenerate decodes are what produce that `<|0.00|>` boundary: repetition
+   * loops, crosstalk, overlapping speakers, long silence. A seminar recording
+   * is squarely in that territory.
+   *
+   * Setting this takes the plain `super.generate()` path instead. Timestamps
+   * survive, because `WhisperTimeStampLogitsProcessor` is installed before the
+   * branch; and nothing is lost by skipping the seek loop, because
+   * `chunk_length_s` above already splits the audio into 30-second pieces -
+   * the long-form splitting the seek loop exists to do - and the pipeline
+   * stitches them back with `stride_length_s`.
+   *
+   * It also bounds an ordinary repetition loop, which would otherwise run to
+   * the decoder's own limit on every affected chunk.
+   */
+  max_new_tokens: MAX_NEW_TOKENS,
 } as const;
 
 /**
