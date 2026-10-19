@@ -101,6 +101,7 @@ function makeQueue(
     cacheReadError?: unknown;
     ownerId?: string;
     now?: () => number;
+    maxPassesPerWindow?: number;
     stallTimeoutMs?: number;
     setTimer?: (fn: () => void, ms: number) => number;
     clearTimer?: (handle: number) => void;
@@ -138,6 +139,7 @@ function makeQueue(
     readPcmCache: read,
     writePcmCache: write,
     dropPcmCache: drop,
+    maxPassesPerWindow: overrides.maxPassesPerWindow,
     stallTimeoutMs: overrides.stallTimeoutMs,
     setTimer: overrides.setTimer,
     clearTimer: overrides.clearTimer,
@@ -1015,5 +1017,89 @@ describe('rejecting a cached decode that does not match its recording', () => {
     await queue.whenIdle();
 
     expect(decode).not.toHaveBeenCalled();
+  });
+});
+
+describe('a window that will not finish', () => {
+  /** Reports `count` decode passes and then waits for an abort that must come. */
+  function runawayWindow(count: number): TranscribeBody {
+    return (_pcm, opts) =>
+      new Promise<AudioTranscriptionResult>((_resolve, reject) => {
+        opts.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('Transcription aborted', 'AbortError')),
+          { once: true },
+        );
+        for (let pass = 1; pass <= count; pass += 1) {
+          opts.onProgress?.(0, 'transcribing', pass);
+        }
+      });
+  }
+
+  it('is given up on once it blows its pass budget', async () => {
+    // ⚑ The watchdog alone cannot catch this: it re-arms on every progress
+    // report, and a spinning decode loop reports on every spin. Liveness and
+    // progress are not the same thing, and only a budget tells them apart.
+    const id = await makeRecording();
+    const { queue } = makeQueue({ transcribe: runawayWindow(5_000), maxPassesPerWindow: 100 });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    const failed = writesFor(id).at(-1)!;
+    expect(failed.status).toBe('failed');
+    expect(failed.error).toContain('stopped making progress');
+  });
+
+  it('keeps the windows it had already finished', async () => {
+    const id = await makeRecording();
+    const { queue } = makeQueue({
+      maxPassesPerWindow: 100,
+      transcribe: async (pcm, opts) => {
+        if (boundaryOf(opts) !== WINDOW_MS) return perWindow(pcm, opts);
+        return runawayWindow(5_000)(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    const failed = writesFor(id).at(-1)!;
+    expect(failed.completedMs).toBe(20_000);
+    expect(failed.segments.map((s) => s.text)).toEqual(['window 1']);
+  });
+
+  it('does not block the recording behind it', async () => {
+    const stuck = await makeRecording();
+    const next = await makeRecording();
+    const { queue } = makeQueue({
+      maxPassesPerWindow: 100,
+      transcribe: async (pcm, opts) => {
+        if (queue.getState().activeId === stuck) return runawayWindow(5_000)(pcm, opts);
+        return perWindow(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(stuck);
+    await queue.enqueue(next);
+    await queue.whenIdle();
+
+    expect(writesFor(next).at(-1)!.status).toBe('done');
+  });
+
+  it('leaves a healthy window that reports many passes alone', async () => {
+    const id = await makeRecording();
+    const { queue } = makeQueue({
+      maxPassesPerWindow: 100,
+      transcribe: async (pcm, opts) => {
+        for (let pass = 1; pass <= 50; pass += 1) opts.onProgress?.(0, 'transcribing', pass);
+        return perWindow(pcm, opts);
+      },
+    });
+
+    await queue.enqueue(id);
+    await queue.whenIdle();
+
+    expect(writesFor(id).at(-1)!.status).toBe('done');
   });
 });

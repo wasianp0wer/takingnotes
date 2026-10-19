@@ -3,7 +3,7 @@
 // heavy to run two models at once, so the loop is deliberately strictly serial.
 import { TARGET_SAMPLE_RATE } from '@/audio/pcm';
 import type { AudioTranscriber, TranscribeStage } from '@/audio/types';
-import { mergeWindowSegments, planWindows } from '@/audio/windows';
+import { DEFAULT_WINDOW_MS, mergeWindowSegments, planWindows } from '@/audio/windows';
 import { newId } from '@/storage/id';
 import { deletePcmCache, getPcmCache, putPcmCache } from '@/storage/pcmCache';
 import {
@@ -68,11 +68,10 @@ export interface TranscriptionQueueDeps {
   /** How much of a recording one window covers. Default: `DEFAULT_WINDOW_MS`. */
   windowMs?: number;
   /**
-   * The decoded-audio cache. Defaults bind to `@/storage/pcmCache`. It exists
-   * so a resumed job never re-decodes: decoding a lecture costs minutes and
-   * peaks above a gigabyte, and a job that resumes on every launch would pay
-   * that every time.
+   * How many decode passes one window may run before the job is abandoned.
+   * Default: `DEFAULT_MAX_PASSES_PER_WINDOW_MINUTE` per minute of window.
    */
+  maxPassesPerWindow?: number;
   /**
    * Identifies this tab in the lease it writes. Default: an id held in
    * `sessionStorage`, so a reloaded tab is still recognised as itself.
@@ -80,6 +79,12 @@ export interface TranscriptionQueueDeps {
   ownerId?: string;
   /** How long a lease survives without a heartbeat. Default: `LEASE_STALE_MS`. */
   leaseStaleMs?: number;
+  /**
+   * The decoded-audio cache. Defaults bind to `@/storage/pcmCache`. It exists
+   * so a resumed job never re-decodes: decoding a lecture costs minutes and
+   * peaks above a gigabyte, and a job that resumes on every launch would pay
+   * that every time.
+   */
   readPcmCache?: (recordingId: string) => Promise<Float32Array | null>;
   writePcmCache?: (recordingId: string, pcm: Float32Array) => Promise<void>;
   dropPcmCache?: (recordingId: string) => Promise<void>;
@@ -179,6 +184,29 @@ export const LEASE_STALE_MS = 60 * 1000;
 const LEASE_HEARTBEAT_MS = 10 * 1000;
 
 /**
+ * How many decode passes one minute of a window may take before the job is
+ * given up on.
+ *
+ * ⚑ The stall watchdog cannot catch a decode that spins: it re-arms on every
+ * progress report, and a spinning loop reports on every spin, so the job
+ * looks maximally alive while getting nowhere. Liveness and progress are not
+ * the same thing, and this is what tells them apart.
+ *
+ * `WHISPER_OPTIONS.max_new_tokens` removes the known cause (see its comment),
+ * so this is the backstop rather than the fix - a pathology that is not that
+ * one, or a change in the model runtime, must still not be able to hang the
+ * queue a third time. A healthy window runs roughly three passes per minute
+ * of audio (`chunk_length_s` 30 with a 20 s jump), so sixty is twenty times
+ * the headroom a real transcription needs.
+ */
+const DEFAULT_MAX_PASSES_PER_WINDOW_MINUTE = 60;
+
+/** What a job abandoned for spinning records, so the owner sees why it stopped. */
+function runawayMessage(passes: number): string {
+  return `Transcription stopped making progress: one stretch of audio ran ${passes} decode passes without finishing, so it was given up on. Try again, or try a different model.`;
+}
+
+/**
  * How far a cached decode's length may differ from its recording's reported
  * duration before it is distrusted and re-decoded.
  *
@@ -273,6 +301,13 @@ function sameState(a: TranscriptionQueueState, b: TranscriptionQueueState): bool
 export function createTranscriptionQueue(deps: TranscriptionQueueDeps): TranscriptionQueue {
   const now = deps.now ?? Date.now;
   const stallTimeoutMs = deps.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS;
+  const windowMs = deps.windowMs ?? DEFAULT_WINDOW_MS;
+  const maxPassesPerWindow =
+    deps.maxPassesPerWindow ??
+    Math.max(
+      DEFAULT_MAX_PASSES_PER_WINDOW_MINUTE,
+      Math.ceil(windowMs / 60_000) * DEFAULT_MAX_PASSES_PER_WINDOW_MINUTE,
+    );
   // `window.setTimeout`, not the bare global, so the handle is a number here too.
   const setTimer = deps.setTimer ?? ((fn, ms) => window.setTimeout(fn, ms));
   const clearTimer = deps.clearTimer ?? ((handle) => window.clearTimeout(handle));
@@ -586,6 +621,8 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     // "Transcribing...".
     let timer: number | null = null;
     let stalled = false;
+    /** Set when a window blew its pass budget, so the failure can name itself. */
+    let runawayPasses: number | null = null;
     /** Read when the watchdog fires, so the stall names whatever was in flight. */
     let step: JobStep = 'reading the audio';
     const disarm = (): void => {
@@ -627,6 +664,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
 
     /** What a terminal failure should record, given how the job actually ended. */
     const endedWith = (error: unknown): unknown => {
+      if (runawayPasses !== null) return new Error(runawayMessage(runawayPasses));
       if (stalled) return new Error(stallMessage(step));
       return error;
     };
@@ -732,7 +770,15 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
     /** When the lease was last refreshed, so the heartbeat can be throttled. */
     let lastBeat = now();
     const onProgress = (p: number, reported: TranscribeStage, reportedPasses?: number): void => {
-      if (finished) return;
+      if (finished || runawayPasses !== null) return;
+      // ⚑ Checked before `arm()`, deliberately: a spinning decode's reports
+      // are what keep the watchdog from ever firing, so re-arming on the
+      // report that proves the window is runaway would be the bug itself.
+      if (reportedPasses !== undefined && reportedPasses > maxPassesPerWindow) {
+        runawayPasses = reportedPasses;
+        controller.abort();
+        return;
+      }
       arm();
       if (activeId !== id) return;
       progress = p;
@@ -752,7 +798,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       // used to be a single pipeline call that reported nothing and persisted
       // nothing until it finished - hours later, or never. Each window's write
       // below is what makes the job resumable.
-      const windows = planWindows(pcm.length, cursorMs, deps.windowMs);
+      const windows = planWindows(pcm.length, cursorMs, windowMs);
       for (const [index, window] of windows.entries()) {
         const result = await deps.transcriber.transcribe(
           // A subarray, so the master PCM is not detached by the hand-off and
