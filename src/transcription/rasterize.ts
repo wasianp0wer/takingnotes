@@ -66,20 +66,32 @@ export function strokeWidth(pressure: number, longEdge: number): number {
   return longEdge * (0.0012 + 0.0028 * clamp01(pressure));
 }
 
-/** Draws normalized (0-1) strokes as black ink on a white background. */
+export interface InkColors {
+  background: string;
+  ink: string;
+}
+
+/** What the OCR model is shown: black ink on white, whatever the UI theme. */
+export const RASTER_INK: InkColors = { background: '#ffffff', ink: '#000000' };
+
+/**
+ * Draws normalized (0-1) strokes in `colors` (default: black ink on white,
+ * the OCR raster). Only the on-screen canvas passes theme colours.
+ */
 export function drawStrokes(
   ctx: InkContext,
   strokes: readonly PageStroke[],
   size: RasterSize,
+  colors: InkColors = RASTER_INK,
 ): void {
   const { width, height } = size;
   const longEdge = Math.max(width, height);
 
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = colors.background;
   ctx.fillRect(0, 0, width, height);
 
-  ctx.strokeStyle = '#000000';
-  ctx.fillStyle = '#000000';
+  ctx.strokeStyle = colors.ink;
+  ctx.fillStyle = colors.ink;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 

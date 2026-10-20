@@ -2,9 +2,6 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-/** Task 5 removes InkCanvas's hard-coded canvas colour; delete this allowlist then. */
-const KNOWN_UNTIL_TASK_5 = ['/src/notes/InkCanvas.tsx']
-
 const PALETTE_CLASS =
   /\b(?:bg|text|border|ring|fill|stroke|from|to|via|outline|shadow)-(?:white|black|(?:red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose|slate|gray|zinc|neutral|stone)-\d{2,3})\b/
 const HEX = /#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b/
@@ -14,7 +11,7 @@ describe('no hard-coded colours', () => {
   it('keeps palette classes and hex colours out of component sources', () => {
     const offenders: string[] = []
     for (const [path, text] of Object.entries(sources)) {
-      if (path.includes('/probe/') || path.includes('.test.') || KNOWN_UNTIL_TASK_5.includes(path)) continue
+      if (path.includes('/probe/') || path.includes('.test.')) continue
       for (const re of [PALETTE_CLASS, HEX]) {
         const match = text.match(re)
         if (match) offenders.push(`${path}: ${match[0]}`)

@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { applyTheme } from '@/themes/applyTheme';
+import { BUILT_IN_THEMES } from '@/themes/builtins';
 import {
   defaultCanvasFactory,
   drawStrokes,
@@ -201,6 +203,16 @@ describe('drawStrokes', () => {
 });
 
 describe('renderPage', () => {
+  it('the OCR raster stays white on black ink whatever theme is applied', async () => {
+    const dark = BUILT_IN_THEMES.find((t) => t.id === 'dark')!;
+    applyTheme(dark, document.documentElement);
+    const { ctx, calls } = createRecordingCtx();
+    const factory: CanvasFactory = () => ({ getContext: () => ctx, toBlob: async () => new Blob() });
+    await renderPage([{ points: [point(0.1, 0.1, 0.5), point(0.2, 0.2, 0.5)] }], A5, 256, factory);
+    expect(calls.find((c) => c[0] === 'set' && c[1] === 'fillStyle')![2]).toBe('#ffffff');
+    expect(calls.find((c) => c[0] === 'set' && c[1] === 'strokeStyle')![2]).toBe('#000000');
+  });
+
   it('renders with a fake factory and returns the blob it produced', async () => {
     const blob = new Blob(['png-bytes'], { type: 'image/png' });
     const { ctx } = createRecordingCtx();
