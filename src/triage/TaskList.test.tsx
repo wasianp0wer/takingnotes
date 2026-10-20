@@ -74,46 +74,46 @@ describe('TaskList', () => {
   });
 
   describe('score band colour (K22)', () => {
-    const BAND_CLASSES = ['text-red-600', 'text-orange-600', 'text-amber-600', 'text-lime-600', 'text-green-600'];
+    const BAND_CLASSES = ['text-score-red', 'text-score-orange', 'text-score-amber', 'text-score-lime', 'text-score-green'];
     const bandClassOf = (className: string): string | undefined => BAND_CLASSES.find((c) => className.includes(c));
 
-    it('red: a score of 200 (the cap) gets text-red-600 and no other band class', () => {
+    it('red: a score of 200 (the cap) gets text-score-red and no other band class', () => {
       const m = mount(<TaskList tasks={[RED_TASK]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
       const badge = m.container.querySelector('[data-testid="task-score"]')!;
       expect(badge.textContent).toBe('200');
-      expect(bandClassOf(badge.className)).toBe('text-red-600');
+      expect(bandClassOf(badge.className)).toBe('text-score-red');
       m.unmount();
     });
 
-    it('orange: a score of 108 gets text-orange-600', () => {
+    it('orange: a score of 108 gets text-score-orange', () => {
       const m = mount(<TaskList tasks={[URGENT]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
       const badge = m.container.querySelector('[data-testid="task-score"]')!;
       expect(badge.textContent).toBe('108');
-      expect(bandClassOf(badge.className)).toBe('text-orange-600');
+      expect(bandClassOf(badge.className)).toBe('text-score-orange');
       m.unmount();
     });
 
-    it('amber: a score of 86 gets text-amber-600', () => {
+    it('amber: a score of 86 gets text-score-amber', () => {
       const m = mount(<TaskList tasks={[AMBER_TASK]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
       const badge = m.container.querySelector('[data-testid="task-score"]')!;
       expect(badge.textContent).toBe('86');
-      expect(bandClassOf(badge.className)).toBe('text-amber-600');
+      expect(bandClassOf(badge.className)).toBe('text-score-amber');
       m.unmount();
     });
 
-    it('lime: a score of 34 gets text-lime-600', () => {
+    it('lime: a score of 34 gets text-score-lime', () => {
       const m = mount(<TaskList tasks={[MEDIUM]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
       const badge = m.container.querySelector('[data-testid="task-score"]')!;
       expect(badge.textContent).toBe('34');
-      expect(bandClassOf(badge.className)).toBe('text-lime-600');
+      expect(bandClassOf(badge.className)).toBe('text-score-lime');
       m.unmount();
     });
 
-    it('green: a score of 5 gets text-green-600', () => {
+    it('green: a score of 5 gets text-score-green', () => {
       const m = mount(<TaskList tasks={[LOW]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
       const badge = m.container.querySelector('[data-testid="task-score"]')!;
       expect(badge.textContent).toBe('5');
-      expect(bandClassOf(badge.className)).toBe('text-green-600');
+      expect(bandClassOf(badge.className)).toBe('text-score-green');
       m.unmount();
     });
 

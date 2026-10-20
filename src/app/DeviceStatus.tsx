@@ -45,9 +45,9 @@ export function DeviceStatus({
   const disconnect = () => run(() => controller.disconnect());
 
   const dot = state.isReconnecting
-    ? 'bg-amber-500'
+    ? 'bg-status-warn'
     : state.isConnected
-      ? 'bg-emerald-500'
+      ? 'bg-status-ok'
       : 'bg-muted-foreground/40';
 
   return (

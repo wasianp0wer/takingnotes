@@ -304,7 +304,7 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
       )}
 
       {interrupted && interrupted.note.id !== dismissedNoteId && (
-        <span role="status" className="flex items-center gap-1 text-xs text-amber-600">
+        <span role="status" className="flex items-center gap-1 text-xs text-status-warn">
           {`"${interrupted.note.title}" was interrupted.`}
           {/* K14: Resume on the interrupted note itself, right beside the
               notice - the same ResumeButton the sidebar uses, so both share

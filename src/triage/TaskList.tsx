@@ -14,11 +14,11 @@ import type { TaskPatch } from '@/triage/useTriageData';
 
 /** K22: the score's band gets a text colour; the chip's background stays neutral. */
 const BAND_TEXT_CLASS: Record<ScoreBand, string> = {
-  red: 'text-red-600',
-  orange: 'text-orange-600',
-  amber: 'text-amber-600',
-  lime: 'text-lime-600',
-  green: 'text-green-600',
+  red: 'text-score-red',
+  orange: 'text-score-orange',
+  amber: 'text-score-amber',
+  lime: 'text-score-lime',
+  green: 'text-score-green',
 };
 
 export interface TaskListProps {
