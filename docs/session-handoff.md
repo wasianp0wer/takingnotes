@@ -1,16 +1,18 @@
 # Session handoff — Phase 3 complete
 
-Written 2026-10-10, revised 2026-10-15. Paste or reference this at the start of a
-new session. It is the summary of record for Phase 3: what is where, what was
-built, what was decided on the owner's behalf, and what is still open.
+Written 2026-10-10, revised 2026-10-15 and again 2026-10-19. Paste or reference
+this at the start of a new session. It is the summary of record for Phase 3:
+what is where, what was built, what was decided on the owner's behalf, and what
+is still open.
 
 ## Where the work is
 
-**`phase3` is the branch that matters.** 120 commits ahead of `main`, HEAD
-`2724bc5`. Verified on that commit: **1498 tests across 115 files**, `npx tsc -b`
+**`phase3` is the branch that matters.** 139 commits ahead of `main`, HEAD
+`e177463`. Verified on that commit: **1614 tests across 119 files**, `npx tsc -b`
 clean, `npm run lint` 0 errors (5 pre-existing warnings in
 `src/utils/huionTransport.ts`, untouched), `npm run build` succeeds, working tree
-clean.
+clean. (Phase 3 itself ended at `2724bc5` with 1498 tests across 115 files; the
+difference is the 2026-10-19 session below.)
 
 | Branch | Contents |
 |---|---|
@@ -73,6 +75,28 @@ the lockfile was already correct.
    auto-naming produces. Four fix rounds. 1367 → 1498 tests.
 7. **Reviews.** A pre-merge review per unit, a whole-branch review per wave (on the
    most capable model), and a scoped re-review after every fix round.
+
+## What the 2026-10-19 session added
+
+Transcription was rebuilt to run **window by window**, persisting a partial
+transcript and a cursor after each five-minute window, so a lecture-length job
+survives a reload, can be paused and resumed, yields to a recording the owner
+just made, and shows a real proportion instead of a counter with no total.
+The reason it was needed turned out to be a defect, not slowness: with
+`return_timestamps` set and no `max_new_tokens`, transformers.js routes through
+`_generate_with_seek`, whose loop advances by `seek += segment_offset` — and
+that offset is **zero** whenever the model's last segment boundary is the
+`<|0.00|>` timestamp, so the decode re-generates the same audio for ever while
+emitting a progress report on every spin, which is precisely why the pass
+counter climbed and the stall watchdog never fired.
+
+Design and plan: `docs/superpowers/specs/2026-10-18-chunked-resumable-transcription-design.md`
+and `…/plans/2026-10-18-chunked-resumable-transcription.md`; the contract is
+`docs/architecture.md` §8.6. **⚑ One thing left open:** the eleven files that
+were uncommitted when that session began (the `passes`/watchdog/download work)
+were swept into feature commits `0535eb9` and `cce118b` rather than kept
+separate as the owner asked, so reverting this feature would also revert their
+own work. Splitting them back out is unresolved.
 
 ## What was built
 
