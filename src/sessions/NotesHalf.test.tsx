@@ -225,6 +225,29 @@ describe('NotesHalf', () => {
     expect(live).toHaveBeenCalled();
   });
 
+  it('keeps typed text when the mode is toggled on a typed page', async () => {
+    const { entry, note } = await seedNoteEntry();
+    const typed = await createTypedPage({ noteId: note.id, pageIndex: 0, capturedAt: 5 });
+    await renderWith({ entry, pages: [typed], mode: 'handwriting' });
+    const ta = container.querySelector('textarea')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+    await act(async () => {
+      setter.call(ta, 'Newton: F=ma');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // Same stale `pages` prop (typing sends no change signal), new mode.
+    await renderWith({ entry, pages: [typed], mode: 'transcription' });
+    expect(container.querySelector('textarea')?.value).toBe('Newton: F=ma');
+    await renderWith({ entry, pages: [typed], mode: 'handwriting' });
+    expect(container.querySelector('textarea')?.value).toBe('Newton: F=ma');
+  });
+
+  it('shows no empty prompt while pages are still loading', async () => {
+    const { entry } = await seedNoteEntry();
+    await renderWith({ entry, pages: null });
+    expect(container.textContent).not.toContain('Resume this session');
+  });
+
   it('a note entry with no pages shows an empty prompt and no canvas', async () => {
     const { entry } = await seedNoteEntry();
     await renderWith({ entry, pages: [] });

@@ -17,7 +17,8 @@ import type { TranscriptionQueue } from '@/transcription/queue';
 
 export interface NotesHalfProps {
   entry: SessionEntry | null;
-  pages: PageRecord[];
+  /** `null` while the pages are still loading (see `useNotePages`). */
+  pages: PageRecord[] | null;
   pageIndex: number;
   onGoToPage(i: number): void;
   mode: NotesMode;
@@ -63,8 +64,10 @@ export function NotesHalf({
   }
 
   const note = entry?.kind === 'note' ? entry.note : null;
-  const viewedIndex = pages.length > 0 ? Math.min(Math.max(pageIndex, 0), pages.length - 1) : 0;
-  const viewedPage = pages[viewedIndex];
+  const pageList = pages ?? [];
+  const viewedIndex =
+    pageList.length > 0 ? Math.min(Math.max(pageIndex, 0), pageList.length - 1) : 0;
+  const viewedPage = pageList[viewedIndex];
   const dims = { pageWidth: note?.pageWidth ?? null, pageHeight: note?.pageHeight ?? null };
 
   return (
@@ -100,46 +103,44 @@ export function NotesHalf({
             Type page
           </Button>
         }
-        pageCount={pages.length}
+        pageCount={pageList.length}
         viewedIndex={viewedIndex}
         onGoToPage={onGoToPage}
       />
-      {note && !viewedPage && (
+      {note && pages !== null && !viewedPage && (
         <p className="p-4 text-sm text-muted-foreground">
           Resume this session to write or type a page.
         </p>
       )}
-      {note && viewedPage && mode === 'handwriting' && (
-        <div className="flex flex-1 items-start justify-center overflow-auto p-4">
-          {isTypedPage(viewedPage) ? (
-            // Remounts per page (key), so a previous page's local edit state
-            // never bleeds into the next one shown here.
-            <TypedPageEditor
-              key={viewedPage.id}
-              pageId={viewedPage.id}
-              initialText={viewedPage.text ?? ''}
-            />
-          ) : viewedPage.id === state.activePageId ? (
-            <InkCanvas live dims={dims} />
-          ) : (
-            <InkCanvas strokes={viewedPage.strokes} dims={dims} />
-          )}
-        </div>
-      )}
-      {note && viewedPage && mode === 'transcription' && (
+      {note && viewedPage && (
+        // One container for both modes. The typed editor sits at the same
+        // position in the tree either way, so toggling the mode never remounts
+        // it: a remount would re-seed it from `viewedPage.text`, which is stale
+        // (typing sends no change signal) and a later keystroke would then
+        // overwrite the saved text.
         <div className="flex flex-1 flex-col overflow-auto">
           {/* Gap analysis sits above the transcript (owner decision). */}
-          <GapPanel
-            key={`gaps-${viewedPage.id}`}
-            noteId={viewedPage.noteId}
-            pageId={viewedPage.id}
-          />
+          {mode === 'transcription' && (
+            <GapPanel
+              key={`gaps-${viewedPage.id}`}
+              noteId={viewedPage.noteId}
+              pageId={viewedPage.id}
+            />
+          )}
           {isTypedPage(viewedPage) ? (
             <TypedPageEditor
               key={viewedPage.id}
               pageId={viewedPage.id}
               initialText={viewedPage.text ?? ''}
             />
+          ) : mode === 'handwriting' ? (
+            <div className="flex items-start justify-center p-4">
+              {viewedPage.id === state.activePageId ? (
+                <InkCanvas live dims={dims} />
+              ) : (
+                <InkCanvas strokes={viewedPage.strokes} dims={dims} />
+              )}
+            </div>
           ) : (
             <TranscriptPanel
               key={viewedPage.id}

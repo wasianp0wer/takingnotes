@@ -6,12 +6,14 @@ import type { PageRecord } from '@/storage/types';
 import type { TranscriptionQueue } from '@/transcription/queue';
 
 /**
- * The pages of `noteId`, by `pageIndex`; empty when `noteId` is null. Storage
+ * The pages of `noteId`, by `pageIndex`. `null` while the read for the current
+ * note is in flight (so a caller can tell loading from loaded-empty); an empty
+ * array when `noteId` is null. Storage
  * has no change feed, so this reloads on the two signals that mean a page was
  * written: capture state (a new page) and the transcription queue (a
  * transcript status change).
  */
-export function useNotePages(noteId: string | null, transcriptionQueue: TranscriptionQueue): PageRecord[] {
+export function useNotePages(noteId: string | null, transcriptionQueue: TranscriptionQueue): PageRecord[] | null {
   const { activeNoteId, activePageId, pageIndex } = useCaptureState();
   // Tagged with the note it belongs to: without the tag, selecting a second
   // note would show the first one's pages for as long as the new read took.
@@ -40,5 +42,6 @@ export function useNotePages(noteId: string | null, transcriptionQueue: Transcri
     };
   }, [noteId, activeNoteId, activePageId, pageIndex, revision]);
 
-  return loaded && loaded.noteId === noteId ? loaded.rows : [];
+  if (noteId === null) return [];
+  return loaded && loaded.noteId === noteId ? loaded.rows : null;
 }
