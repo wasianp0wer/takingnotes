@@ -101,6 +101,13 @@ describe('NoteToolbar', () => {
     expect(container.querySelector('[data-testid="banner-slot"]')).not.toBeNull();
   });
 
+  it('centres the page navigation and omits the title block when no title props are given', async () => {
+    await render({ noteTitle: undefined });
+    const prev = container.querySelector('button[aria-label="Previous page"]');
+    expect(prev?.parentElement?.className).toContain('justify-center');
+    expect(container.textContent).not.toContain('No note selected');
+  });
+
   it('disables New note while a session is locked', async () => {
     await render({ sessionLocked: true });
     expect(buttonByText('New note').disabled).toBe(true);

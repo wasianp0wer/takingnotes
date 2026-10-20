@@ -10,7 +10,7 @@ export interface NoteToolbarProps {
    * `NotesView.test.tsx:312`, so it is part of the contract, not a placeholder
    * to reword.
    */
-  noteTitle: string | null;
+  noteTitle?: string | null;
   /** **Wave 2 mount point**: S1's inline title editor. Replaces the plain title. */
   title?: ReactNode;
   /** **Wave 2 mount point**: S5's tag editor. Rendered under the title. */
@@ -55,11 +55,15 @@ export function NoteToolbar({
   return (
     <div className="flex flex-col border-b border-border">
       <div className="flex items-center justify-between gap-3 px-4 py-2">
-        <div className="flex flex-col">
-          {title ?? <span className="text-sm font-medium">{noteTitle ?? 'No note selected'}</span>}
-          {meta}
-        </div>
-        <div className="flex items-center gap-2">
+        {(noteTitle !== undefined || title || meta) && (
+          <div className="flex flex-col">
+            {title ?? (
+              <span className="text-sm font-medium">{noteTitle ?? 'No note selected'}</span>
+            )}
+            {meta}
+          </div>
+        )}
+        <div className="ml-auto flex items-center gap-2">
           <Button variant="outline" size="sm" disabled={sessionLocked} onClick={onNewNote}>
             New note
           </Button>
@@ -67,35 +71,35 @@ export function NoteToolbar({
             End note
           </Button>
           {actions}
-          {pageCount > 0 && (
-            <>
-              <Button
-                variant="outline"
-                size="icon-sm"
-                aria-label="Previous page"
-                disabled={viewedIndex <= 0}
-                onClick={() => onGoToPage(viewedIndex - 1)}
-              >
-                ‹
-              </Button>
-              <span className="text-sm text-muted-foreground">
-                Page {viewedIndex + 1} of {pageCount}
-              </span>
-              <Button
-                variant="outline"
-                size="icon-sm"
-                aria-label="Next page"
-                disabled={viewedIndex >= pageCount - 1}
-                onClick={() => onGoToPage(viewedIndex + 1)}
-              >
-                ›
-              </Button>
-            </>
-          )}
           {/* F4's only mount point (docs/architecture.md §4) - must stay mounted. */}
           <PageTurnControls />
         </div>
       </div>
+      {pageCount > 0 && (
+        <div className="flex items-center justify-center gap-2 px-4 py-1">
+          <Button
+            variant="outline"
+            size="icon-sm"
+            aria-label="Previous page"
+            disabled={viewedIndex <= 0}
+            onClick={() => onGoToPage(viewedIndex - 1)}
+          >
+            ‹
+          </Button>
+          <span className="text-sm text-muted-foreground">
+            Page {viewedIndex + 1} of {pageCount}
+          </span>
+          <Button
+            variant="outline"
+            size="icon-sm"
+            aria-label="Next page"
+            disabled={viewedIndex >= pageCount - 1}
+            onClick={() => onGoToPage(viewedIndex + 1)}
+          >
+            ›
+          </Button>
+        </div>
+      )}
       {banner}
     </div>
   );
