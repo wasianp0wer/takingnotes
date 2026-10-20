@@ -7,6 +7,11 @@ describe('hexToHslTriplet', () => {
     expect(hexToHslTriplet('#000000')).toBe('0 0% 0%')
     expect(hexToHslTriplet('#ff0000')).toBe('0 100% 50%')
   })
+
+  it('handles a blue max channel and the negative-hue wrap', () => {
+    expect(hexToHslTriplet('#ff0080')).toBe('330 100% 50%')
+    expect(hexToHslTriplet('#0080ff')).toBe('210 100% 50%')
+  })
 })
 
 describe('isHexColor', () => {
