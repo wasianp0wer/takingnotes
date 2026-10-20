@@ -135,8 +135,8 @@ A sidebar entry is a **note**. In practice a note and its `SessionRecord` are
 - **Handwriting/Transcription switch.** A single toggle switch, not two buttons,
   centred at the top of the half. **(owner)** It defaults to Handwriting.
   - **Handwriting** shows `InkCanvas`, or `TypedPageEditor` for a typed page.
-  - **Transcription** shows the page's OCR transcript (`TranscriptPanel`), with
-    **gap analysis** (`GapPanel`) below it. **(call)**
+  - **Transcription** shows **gap analysis** (`GapPanel`, with its button)
+    *above* the page's OCR transcript (`TranscriptPanel`). **(owner)**
 - **Page navigation** ("‹ Page N of M ›") sits centred just below the switch,
   with the `NoteToolbar` actions (Type page and the rest) nearby.
 - **Blank when there are no pages.** The owner can Resume and type a page.
