@@ -44,10 +44,21 @@ describe("Switch", () => {
     act(() => el.click())
     expect(fn).toHaveBeenCalledWith(true)
   })
-  it("is a native button, so Space and Enter activate it", () => {
+  it("is a native button (the browser supplies Space and Enter activation)", () => {
     const el = mount({})
     expect(el.tagName).toBe("BUTTON")
     expect(el.type).toBe("button")
+  })
+  it("when checked, reports aria-checked=true and click calls back with false", () => {
+    const fn = vi.fn()
+    const el = mount({ checked: true, onChange: fn })
+    expect(el.getAttribute("aria-checked")).toBe("true")
+    act(() => el.click())
+    expect(fn).toHaveBeenCalledTimes(1)
+    expect(fn).toHaveBeenCalledWith(false)
+  })
+  it("keeps a focus-visible ring", () => {
+    expect(mount({}).className).toContain("focus-visible:ring-2")
   })
   it("does not call back when disabled", () => {
     const fn = vi.fn()

@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client"
 import { describe, expect, it } from "vitest"
 import { Button, buttonVariants } from "./button"
 import { HOVER_AFFORDANCE } from "./hover"
+import { Input } from "./input"
 import { Tabs, TabsList, TabsTrigger } from "./tabs"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -36,7 +37,7 @@ describe("Button visual language", () => {
 })
 
 describe("TabsTrigger", () => {
-  it("carries the active underline and is not rounded-md", () => {
+  function mountTabs() {
     const host = document.createElement("div")
     document.body.appendChild(host)
     const root = createRoot(host)
@@ -45,15 +46,42 @@ describe("TabsTrigger", () => {
         <Tabs defaultValue="a">
           <TabsList>
             <TabsTrigger value="a">A</TabsTrigger>
+            <TabsTrigger value="b">B</TabsTrigger>
           </TabsList>
         </Tabs>
       )
     )
+    return { host, done: () => { act(() => root.unmount()); host.remove() } }
+  }
+  it("carries the active underline and is not rounded-md", () => {
+    const { host, done } = mountTabs()
     const el = host.querySelector('[data-slot="tabs-trigger"]')!
     expect(el.getAttribute("data-state")).toBe("active")
     expect(el.className).toContain("data-[state=active]:shadow-[inset_0_-3px_0_hsl(var(--primary))]")
     expect(el.className).not.toContain("rounded-md")
+    done()
+  })
+  it("an inactive trigger has no unconditional underline", () => {
+    const { host, done } = mountTabs()
+    const el = host.querySelectorAll('[data-slot="tabs-trigger"]')[1]
+    expect(el.getAttribute("data-state")).toBe("inactive")
+    const unconditional = el.className.split(/\s+/).filter((t) => /^shadow-/.test(t))
+    expect(unconditional).toEqual([])
+    done()
+  })
+  it("keeps a focus-visible ring", () => {
+    const { host, done } = mountTabs()
+    expect(host.querySelector('[data-slot="tabs-trigger"]')!.className).toContain("focus-visible:ring-2")
+    done()
+  })
+})
+
+describe("Input", () => {
+  it("keeps a focus-visible ring", () => {
+    const host = document.createElement("div")
+    const root = createRoot(host)
+    act(() => root.render(<Input />))
+    expect(host.querySelector("input")!.className).toContain("focus-visible:ring-2")
     act(() => root.unmount())
-    host.remove()
   })
 })
