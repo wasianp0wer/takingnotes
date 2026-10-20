@@ -5,7 +5,7 @@ import type { TranscriptionQueue } from '@/audio/transcriptionQueue';
 import { formatClock } from '@/audio/format';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
-import { deleteRecording, getRecordingAudio } from '@/storage/recordings';
+import { deleteRecording, getRecordingAudio, updateRecording } from '@/storage/recordings';
 import type { RecordingRecord, TranscriptSegment } from '@/storage/types';
 
 /**
@@ -48,7 +48,7 @@ function TranscriptSegments({
             type="button"
             data-start-ms={segment.startMs}
             onClick={() => onSeek(segment.startMs)}
-            className="shrink-0 tabular-nums text-primary underline-offset-4 hover:underline"
+            className="shrink-0 tabular-nums text-timestamp underline-offset-4 hover:underline"
           >
             {formatClock(segment.startMs)}
           </button>
@@ -68,10 +68,17 @@ export function RecordingDetail({
   recording,
   queue,
   onDelete,
+  seek,
+  onSeekApplied,
+  onRenamed,
 }: {
   recording: RecordingRecord;
   queue: TranscriptionQueue;
   onDelete: (id: string) => void;
+  /** Applied once per `token`, after the audio URL is ready. */
+  seek?: { token: number; startMs: number };
+  onSeekApplied?: (token: number) => void;
+  onRenamed?: () => void;
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -82,6 +89,10 @@ export function RecordingDetail({
   const [audioMissing, setAudioMissing] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const queueState = useSyncExternalStore(queue.subscribe, queue.getState);
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const appliedSeekToken = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -117,6 +128,51 @@ export function RecordingDetail({
     if (playing && typeof playing.catch === 'function') {
       playing.catch(() => {});
     }
+  }
+
+  const seekToken = seek?.token;
+  const seekStartMs = seek?.startMs;
+  useEffect(() => {
+    // Waits for the player: the element only exists once the audio URL does.
+    if (seekToken === undefined || seekStartMs === undefined || !audioUrl) return;
+    if (appliedSeekToken.current === seekToken) return;
+    appliedSeekToken.current = seekToken;
+    seekTo(seekStartMs);
+    onSeekApplied?.(seekToken);
+    // `seekTo` and `onSeekApplied` are deliberately not dependencies: a new
+    // identity for either must not replay a request already applied.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seekToken, seekStartMs, audioUrl]);
+
+  function startRename() {
+    setDraftTitle(recording.title);
+    setRenameError(null);
+    setRenaming(true);
+  }
+
+  function cancelRename() {
+    setRenaming(false);
+    setRenameError(null);
+  }
+
+  async function commitRename() {
+    const title = draftTitle.trim();
+    if (!title) {
+      setRenameError('A title cannot be blank');
+      return;
+    }
+    if (title === recording.title) {
+      cancelRename();
+      return;
+    }
+    try {
+      await updateRecording(recording.id, { title });
+    } catch (error) {
+      setRenameError(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    cancelRename();
+    onRenamed?.();
   }
 
   /**
@@ -188,7 +244,38 @@ export function RecordingDetail({
     <div className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <h2 className="text-sm font-medium">{recording.title}</h2>
+          {renaming ? (
+            <input
+              autoFocus
+              aria-label="Recording title"
+              value={draftTitle}
+              onChange={(event) => {
+                setDraftTitle(event.target.value);
+                setRenameError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void commitRename();
+                else if (event.key === 'Escape') cancelRename();
+              }}
+              className="w-full bg-transparent text-sm font-medium"
+            />
+          ) : (
+            <h2 className="text-sm font-medium">
+              <button
+                type="button"
+                title="Rename recording"
+                onClick={startRename}
+                className="text-left text-session-title"
+              >
+                {recording.title}
+              </button>
+            </h2>
+          )}
+          {renameError && (
+            <p role="alert" className="text-xs text-destructive">
+              {renameError}
+            </p>
+          )}
           <p className="text-xs text-muted-foreground">
             {new Date(recording.startedAt).toLocaleString(undefined, {
               dateStyle: 'medium',
