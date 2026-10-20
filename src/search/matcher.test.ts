@@ -40,7 +40,7 @@ describe('compileMatcher', () => {
     expect(compileMatcher('a'.repeat(MAX_PATTERN_LENGTH), { regex: true }).ok).toBe(true);
   });
 
-  it.each(['(a+)+$', '(a*)*', '(\\w+\\s?)+$', '(a|aa)+', '(?:a+)+', 'x((a)*b)+', '(a+){2,}', '(a|b){1,5}'])(
+  it.each(['(a+)+$', '(a*)*', '(\\w+\\s?)+$', '(a|aa)+', '(?:a+)+', 'x((a)*b)+', '(a+){2,}', '(a|b){1,5}', '(a+){30}b', '(\\w+\\s?){12}$', '(a|a){25}b', '.*.*.*.*z', '(a+){20}'])(
     'rejects nested repetition %s',
     (p) => {
       expect(err(p)).toContain('too long to run');
@@ -53,6 +53,23 @@ describe('compileMatcher', () => {
       expect(compileMatcher(p, { regex: true }).ok).toBe(true);
     },
   );
+
+  it('rejects more than two unbounded quantifiers but allows two', () => {
+    expect(compileMatcher('a+b+', { regex: true }).ok).toBe(true);
+    expect(compileMatcher('a+b+c+', { regex: true }).ok).toBe(false);
+  });
+
+  it('ignores quantifier characters inside classes and escapes when counting', () => {
+    expect(compileMatcher('[+*][+*][+*]\\+\\+', { regex: true }).ok).toBe(true);
+  });
+
+  it('treats a zero-length regex match as no match', () => {
+    for (const p of ['x*', '^', '$', 'x?']) {
+      const m = ok(p, true);
+      expect(m.test('abc')).toBe(false);
+      expect(m.firstMatch('abc')).toBeNull();
+    }
+  });
 
   it('test() is stateless across calls', () => {
     const m = ok('abc', true);
