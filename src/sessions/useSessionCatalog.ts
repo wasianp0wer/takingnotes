@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { useCaptureState } from "@/capture/CaptureContext";
-import { listNotes } from "@/storage/notes";
-import { listFinishedRecordings } from "@/storage/recordings";
-import type { NoteRecord, RecordingRecord } from "@/storage/types";
+import { useCaptureState } from '@/capture/CaptureContext';
+import { listNotes } from '@/storage/notes';
+import { listFinishedRecordings } from '@/storage/recordings';
+import type { NoteRecord, RecordingRecord } from '@/storage/types';
 
-import { buildSessionCatalog } from "./catalog";
-import type { SessionCatalog } from "./catalog";
+import { buildSessionCatalog } from './catalog';
+import type { SessionCatalog } from './catalog';
 
 const EMPTY: SessionCatalog = { sessions: [], uncategorized: [] };
 
@@ -14,10 +14,7 @@ async function loadFromStorage(): Promise<{
   notes: NoteRecord[];
   finished: RecordingRecord[];
 }> {
-  const [notes, finished] = await Promise.all([
-    listNotes(),
-    listFinishedRecordings(),
-  ]);
+  const [notes, finished] = await Promise.all([listNotes(), listFinishedRecordings()]);
   return { notes, finished };
 }
 
@@ -56,8 +53,12 @@ export function useSessionCatalog(
         setCatalog(buildSessionCatalog(notes, finished));
         setLoaded(true);
       },
-      () => {
-        // A failed read keeps the last good catalog; the next signal retries.
+      (error: unknown) => {
+        // Keep the last good catalog but mark loaded, so consumers do not wait
+        // forever; the next signal retries.
+        if (seq !== seqRef.current) return;
+        console.error('Session catalog load failed', error);
+        setLoaded(true);
       },
     );
   }, [load]);

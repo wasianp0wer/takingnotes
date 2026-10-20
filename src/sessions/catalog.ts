@@ -1,18 +1,18 @@
-import { recordingOwnersByNote } from "@/storage/recordings";
-import type { NoteRecord, RecordingRecord } from "@/storage/types";
+import { recordingOwnersByNote } from '@/storage/recordings';
+import type { NoteRecord, RecordingRecord } from '@/storage/types';
 
 export type EntryKey = `note:${string}` | `recording:${string}`;
 
 export type SessionEntry =
   | {
-      kind: "note";
+      kind: 'note';
       key: `note:${string}`;
       note: NoteRecord;
       /** Recordings owned by this note, `startedAt` ascending. */
       recordings: RecordingRecord[];
     }
   | {
-      kind: "recording";
+      kind: 'recording';
       key: `recording:${string}`;
       recording: RecordingRecord;
     };
@@ -33,13 +33,11 @@ export function recordingKey(recordingId: string): `recording:${string}` {
 }
 
 export function entryStartedAt(entry: SessionEntry): number {
-  return entry.kind === "note"
-    ? entry.note.startedAt
-    : entry.recording.startedAt;
+  return entry.kind === 'note' ? entry.note.startedAt : entry.recording.startedAt;
 }
 
 export function entryTitle(entry: SessionEntry): string {
-  return entry.kind === "note" ? entry.note.title : entry.recording.title;
+  return entry.kind === 'note' ? entry.note.title : entry.recording.title;
 }
 
 /**
@@ -70,37 +68,31 @@ export function buildSessionCatalog(
   const sessions: SessionEntry[] = [];
   const uncategorized: SessionEntry[] = [];
   for (const note of notes) {
-    const recordings = (byNote.get(note.id) ?? []).sort(
-      (a, b) => a.startedAt - b.startedAt,
-    );
+    const recordings = (byNote.get(note.id) ?? []).sort((a, b) => a.startedAt - b.startedAt);
     const entry: SessionEntry = {
-      kind: "note",
+      kind: 'note',
       key: noteKey(note.id),
       note,
       recordings,
     };
-    if (typeof note.sessionId === "string") sessions.push(entry);
+    if (typeof note.sessionId === 'string') sessions.push(entry);
     else uncategorized.push(entry);
   }
   for (const recording of orphans) {
     uncategorized.push({
-      kind: "recording",
+      kind: 'recording',
       key: recordingKey(recording.id),
       recording,
     });
   }
 
-  const newestFirst = (a: SessionEntry, b: SessionEntry) =>
-    entryStartedAt(b) - entryStartedAt(a);
+  const newestFirst = (a: SessionEntry, b: SessionEntry) => entryStartedAt(b) - entryStartedAt(a);
   sessions.sort(newestFirst);
   uncategorized.sort(newestFirst);
   return { sessions, uncategorized };
 }
 
-export function findEntry(
-  catalog: SessionCatalog,
-  key: string | null,
-): SessionEntry | null {
+export function findEntry(catalog: SessionCatalog, key: string | null): SessionEntry | null {
   if (key === null) return null;
   return (
     catalog.sessions.find((e) => e.key === key) ??
