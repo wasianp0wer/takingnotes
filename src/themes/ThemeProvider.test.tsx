@@ -5,7 +5,7 @@ import { getSettingValue } from '@/storage/settingKeys'
 import { resetDatabase } from '@/test/resetDb'
 import { BUILT_IN_THEMES, lightTheme } from './builtins'
 import { ThemeProvider, useThemes, type ThemesContextValue } from './ThemeProvider'
-import { THEME_MIRROR_KEY } from './themeStore'
+import { applyMirroredThemeEarly, THEME_MIRROR_KEY } from './themeStore'
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean | undefined
@@ -40,7 +40,12 @@ function Consumer() {
 
 const rendered = () => container.querySelector('span')!.textContent
 const bg = () => document.documentElement.style.getPropertyValue('--background')
-const flush = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+// Waits for the provider's initial load (it marks itself ready by painting a theme).
+const flush = () =>
+  act(async () => {
+    for (let i = 0; i < 100 && bg() === ''; i++) await new Promise((r) => setTimeout(r, 5))
+    await new Promise((r) => setTimeout(r, 0))
+  })
 
 beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
@@ -95,6 +100,22 @@ describe('ThemeProvider', () => {
     expect(rendered()).toBe('dark')
     act(() => themes().preview(null))
     expect(bg()).toBe(before)
+  })
+
+  it('keeps the mirrored theme painted until the stored choice has loaded', async () => {
+    await act(async () => root.unmount())
+    const darkTheme = BUILT_IN_THEMES.find((t) => t.id === 'dark')!
+    localStorage.setItem(THEME_MIRROR_KEY, JSON.stringify(darkTheme))
+    applyMirroredThemeEarly(localStorage)
+    const darkBg = bg()
+    expect(darkBg).not.toBe('')
+    root = createRoot(container)
+    // Synchronous act: the IndexedDB read has not resolved when we look.
+    act(() => root.render(<ThemeProvider><Consumer /></ThemeProvider>))
+    expect(bg()).toBe(darkBg)
+    expect(JSON.parse(localStorage.getItem(THEME_MIRROR_KEY)!).id).toBe('dark')
+    await flush()
+    expect(rendered()).toBe('light')
   })
 
   it('useThemes outside a provider returns an inert light default', async () => {

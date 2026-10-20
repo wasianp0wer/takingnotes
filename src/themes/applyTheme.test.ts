@@ -44,4 +44,13 @@ describe('applyTheme', () => {
     expect(el.dataset.themeBase).toBe('light')
     expect(el.classList.contains('dark')).toBe(false)
   })
+
+  it('updates the theme-color meta when present', () => {
+    const meta = document.createElement('meta')
+    meta.name = 'theme-color'
+    document.head.appendChild(meta)
+    applyTheme(dark, document.documentElement)
+    expect(meta.getAttribute('content')).toBe(dark.colors.background)
+    meta.remove()
+  })
 })

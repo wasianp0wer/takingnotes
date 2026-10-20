@@ -53,16 +53,23 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const activeRef = useRef<Theme>(lightTheme())
   // A choice made before the initial load finishes must not be overwritten by the stored one.
   const choseRef = useRef(false)
+  // Until the stored choice is known the early-painted (mirrored) theme stays; applying
+  // Light first would flash and overwrite the mirror.
+  const [ready, setReady] = useState(false)
 
   const active = useMemo(() => resolveTheme(activeId, custom), [activeId, custom])
 
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      const [id, themes] = await Promise.all([getSettingValue('ui.theme'), loadCustomThemes()])
-      if (cancelled) return
-      setCustom(themes)
-      if (!choseRef.current) setActiveId(id)
+      try {
+        const [id, themes] = await Promise.all([getSettingValue('ui.theme'), loadCustomThemes()])
+        if (cancelled) return
+        setCustom(themes)
+        if (!choseRef.current) setActiveId(id)
+      } finally {
+        if (!cancelled) setReady(true)
+      }
     })()
     return () => {
       cancelled = true
@@ -71,12 +78,14 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     activeRef.current = active
+    if (!ready) return
     applyTheme(active)
     writeThemeMirror(active)
-  }, [active])
+  }, [active, ready])
 
   const setActive = useCallback(async (id: string) => {
     choseRef.current = true
+    setReady(true)
     setActiveId(id)
     await setSettingValue('ui.theme', id)
   }, [])
@@ -84,6 +93,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const saveCustom = useCallback(async (theme: Theme) => {
     const next = await saveCustomTheme(theme)
     choseRef.current = true
+    setReady(true)
     setCustom(next)
     setActiveId(theme.id)
     await setSettingValue('ui.theme', theme.id)
@@ -94,6 +104,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     setCustom(next)
     if (activeRef.current.id === id) {
       choseRef.current = true
+    setReady(true)
       setActiveId(LIGHT_THEME_ID)
       await setSettingValue('ui.theme', LIGHT_THEME_ID)
     }
