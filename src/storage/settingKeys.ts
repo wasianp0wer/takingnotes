@@ -35,6 +35,10 @@ export interface SettingValues {
    * year. `null` until the user sets one, which means "resolve against today".
    */
   'syllabus.termStart': number | null;
+  /** UI: id of the active theme (built-in or custom). Unknown ids fall back to Light. */
+  'ui.theme': string;
+  /** UI: user-made themes. Entries are untrusted JSON; `loadCustomThemes` validates each. */
+  'ui.customThemes': unknown[];
 }
 
 export type SettingKey = keyof SettingValues;
@@ -50,6 +54,8 @@ export const SETTING_DEFAULTS: SettingValues = {
   'gaps.leadMs': 60_000,
   'gaps.trailMs': 30_000,
   'syllabus.termStart': null,
+  'ui.theme': 'light',
+  'ui.customThemes': [],
 };
 
 /** Transcription findings F1-F4: below this the handwriting stops being legible. */

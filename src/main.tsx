@@ -5,6 +5,8 @@ import { AppShell } from '@/app/AppShell'
 import { CaptureProvider } from '@/capture/CaptureContext'
 import { createCaptureEngine } from '@/capture/engine'
 import { TabletProvider, useHuionDevice } from '@/device/TabletProvider'
+import { ThemeProvider } from '@/themes/ThemeProvider'
+import { applyMirroredThemeEarly } from '@/themes/themeStore'
 
 /**
  * Exists only to read the controller out of `TabletProvider` and build the one
@@ -27,10 +29,19 @@ function CaptureRoot() {
   )
 }
 
+// Paint the last-used theme before React mounts so there is no flash of Light.
+try {
+  applyMirroredThemeEarly(window.localStorage)
+} catch {
+  // localStorage can throw when blocked; the stylesheet defaults apply.
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <TabletProvider>
-      <CaptureRoot />
-    </TabletProvider>
+    <ThemeProvider>
+      <TabletProvider>
+        <CaptureRoot />
+      </TabletProvider>
+    </ThemeProvider>
   </StrictMode>,
 )

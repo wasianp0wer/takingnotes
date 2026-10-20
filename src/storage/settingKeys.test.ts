@@ -24,6 +24,8 @@ describe('setting keys', () => {
       'gaps.leadMs': 60_000,
       'gaps.trailMs': 30_000,
       'syllabus.termStart': null,
+      'ui.theme': 'light',
+      'ui.customThemes': [],
     });
   });
 
