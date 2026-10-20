@@ -318,3 +318,113 @@ describe('Find and the corpus agree about which transcripts are real', () => {
     expect(findInCorpus(corpus, 'mitochondria')).toHaveLength(1);
   });
 });
+
+describe('FindOptions', () => {
+  const recordingWith = (id: string, startedAt: number, text: string): RecordingRecord =>
+    makeRecording({
+      id,
+      startedAt,
+      transcript: {
+        status: 'done',
+        error: null,
+        model: 'm',
+        language: 'en',
+        updatedAt: 0,
+        segments: [{ startMs: 0, endMs: 500, text }],
+        text,
+      },
+    });
+
+  it('regex: true finds page text and the snippet contains the matched word', () => {
+    const corpus: SearchCorpus = {
+      ...EMPTY,
+      notes: [
+        makeSearchNote(makeNote({ id: 'n1' }), [
+          { pageId: 'p1', pageIndex: 0, text: 'The Reconstruction era followed.', isTyped: true },
+        ]),
+      ],
+    };
+    const hits = findInCorpus(corpus, 'reconstr\\w+', { regex: true });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({ source: 'page-text' });
+    expect(hits[0].snippet).toContain('Reconstruction');
+  });
+
+  it('an invalid or unsafe regex returns [] without throwing', () => {
+    const corpus: SearchCorpus = {
+      ...EMPTY,
+      notes: [makeSearchNote(makeNote({ id: 'n1', title: 'aaaa' }))],
+    };
+    expect(findInCorpus(corpus, '[', { regex: true })).toEqual([]);
+    expect(findInCorpus(corpus, '(a+)+$', { regex: true })).toEqual([]);
+  });
+
+  it('from/to exclude a note outside the range; an orphan audio hit is dated by recording.startedAt', () => {
+    const corpus: SearchCorpus = {
+      ...EMPTY,
+      notes: [
+        makeSearchNote(makeNote({ id: 'old', title: 'topic old', startedAt: 100 })),
+        makeSearchNote(makeNote({ id: 'new', title: 'topic new', startedAt: 500 })),
+      ],
+      recordings: [recordingWith('r-in', 500, 'topic spoken'), recordingWith('r-out', 100, 'topic spoken')],
+    };
+    const hits = findInCorpus(corpus, 'topic', { from: 400, to: 600 });
+    expect(hits.map((h) => h.noteId ?? h.recordingId)).toEqual(['new', 'r-in']);
+    // inclusive bounds
+    expect(findInCorpus(corpus, 'topic', { from: 500, to: 500 })).toHaveLength(2);
+  });
+
+  it('tags excludes a note without the tag and every hit whose noteId is null', () => {
+    const corpus: SearchCorpus = {
+      ...EMPTY,
+      notes: [
+        makeSearchNote(makeNote({ id: 'a', title: 'topic a', tags: ['hist'] })),
+        makeSearchNote(makeNote({ id: 'b', title: 'topic b', tags: ['math'] })),
+      ],
+      recordings: [recordingWith('orphan', 0, 'topic spoken')],
+    };
+    const hits = findInCorpus(corpus, 'topic', { tags: ['hist'] });
+    expect(hits.map((h) => h.noteId)).toEqual(['a']);
+  });
+
+  it('tagMode and decides between any and every tag', () => {
+    const corpus: SearchCorpus = {
+      ...EMPTY,
+      notes: [
+        makeSearchNote(makeNote({ id: 'a', title: 'topic a', tags: ['hist'] })),
+        makeSearchNote(makeNote({ id: 'b', title: 'topic b', tags: ['hist', 'math'] })),
+      ],
+    };
+    expect(findInCorpus(corpus, 'topic', { tags: ['hist', 'math'] })).toHaveLength(2);
+    expect(findInCorpus(corpus, 'topic', { tags: ['hist', 'math'], tagMode: 'and' }).map((h) => h.noteId)).toEqual(['b']);
+  });
+
+  it("sources: ['audio-segment'] returns only audio hits", () => {
+    const corpus: SearchCorpus = {
+      ...EMPTY,
+      notes: [makeSearchNote(makeNote({ id: 'a', title: 'topic a' }))],
+      recordings: [recordingWith('r1', 0, 'topic spoken')],
+    };
+    const hits = findInCorpus(corpus, 'topic', { sources: ['audio-segment'] });
+    expect(hits.map((h) => h.source)).toEqual(['audio-segment']);
+  });
+
+  it('regex mode has no minimum length', () => {
+    const corpus: SearchCorpus = {
+      ...EMPTY,
+      notes: [makeSearchNote(makeNote({ id: 'a', title: 'xylophone' }))],
+    };
+    expect(findInCorpus(corpus, 'x', { regex: true })).toHaveLength(1);
+    expect(findInCorpus(corpus, 'x')).toEqual([]);
+  });
+
+  it('no options behaves exactly as before', () => {
+    const corpus: SearchCorpus = {
+      ...EMPTY,
+      notes: [makeSearchNote(makeNote({ id: 'a', title: 'topic a', summary: 'a topic' }))],
+      recordings: [recordingWith('r1', 0, 'topic spoken')],
+    };
+    expect(findInCorpus(corpus, 'topic')).toEqual(findInCorpus(corpus, 'topic', {}));
+    expect(findInCorpus(corpus, 'topic').length).toBe(3);
+  });
+});
