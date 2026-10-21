@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { Separator } from '@/components/ui/separator';
 import { TranscriptionSettings } from '@/notes/TranscriptionSettings';
+import { ThemeSettings } from '@/themes/ThemeSettings';
 
 /**
  * The single settings surface. Each feature owns one section component and
@@ -34,6 +35,8 @@ export function SettingsDialog() {
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
+          <ThemeSettings />
+          <Separator />
           <TranscriptionSettings />
           <Separator />
           <AudioSettings />
