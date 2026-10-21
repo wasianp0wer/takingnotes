@@ -59,6 +59,15 @@ function elementWithText(text: string): Element | undefined {
   return [...container.querySelectorAll('div')].find((el) => el.textContent === text);
 }
 
+/** The Markdown renderer is lazy-loaded; wait for it to replace the plain fallback. */
+async function rendererLoaded(): Promise<void> {
+  for (let i = 0; i < 50 && !container.querySelector('.katex'); i++) {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+  }
+}
+
 describe('TranscriptPanel', () => {
   it("sets a finished transcript in the theme's transcript font", () => {
     render(page({ markdown: 'Newton: F=ma' }));
@@ -98,5 +107,20 @@ describe('TranscriptPanel', () => {
     // Its panel fills the notes area as a column, so the block has a set height to fill.
     const panel = block.parentElement!.className.split(/\s+/);
     expect(panel).toEqual(expect.arrayContaining(['flex', 'flex-col', 'flex-1', 'min-h-0']));
+  });
+
+  it('renders the finished transcript as Markdown with maths, inside the frame', async () => {
+    render(page({ markdown: '# Causes\n\nwar $\\rightarrow$ amendments' }));
+    await rendererLoaded();
+    const block = container.querySelector('[data-transcript-text]')!;
+    expect(block.querySelector('h1')?.textContent).toBe('Causes');
+    expect(block.querySelector('.katex')).not.toBeNull();
+    expect(block.textContent).not.toContain('$');
+  });
+
+  it('renders a retained previous transcript as Markdown too', async () => {
+    render(page({ status: 'failed', error: 'boom', markdown: '- item $\\leq$ 3' }));
+    await rendererLoaded();
+    expect(container.querySelector('li .katex')).not.toBeNull();
   });
 });

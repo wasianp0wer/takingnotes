@@ -1,6 +1,7 @@
 import { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { LazyTranscriptMarkdown } from '@/notes/LazyTranscriptMarkdown';
 import { isPageFinalized } from '@/storage/pages';
 import type { PageRecord, TranscriptRecord } from '@/storage/types';
 
@@ -36,8 +37,8 @@ function PreviousTranscript({ transcript }: { transcript: TranscriptRecord }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-1 pt-2">
       <p className="shrink-0 text-xs font-medium text-muted-foreground">Previous transcript</p>
-      <div className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap border border-border p-3 font-transcript text-base leading-relaxed text-muted-foreground">
-        {transcript.markdown}
+      <div className="min-h-0 flex-1 overflow-auto border border-border p-3 font-transcript text-base leading-relaxed text-muted-foreground">
+        <LazyTranscriptMarkdown markdown={transcript.markdown} />
       </div>
       <p className="shrink-0 text-xs text-muted-foreground">
         {transcript.model} · {transcript.promptVersion}
@@ -47,9 +48,9 @@ function PreviousTranscript({ transcript }: { transcript: TranscriptRecord }) {
 }
 
 /**
- * The transcript for one page: status, the markdown (plain pre-wrapped text -
- * no Markdown renderer, per F1-A4), and the manual retry path for a failed or
- * never-queued (legacy) page.
+ * The transcript for one page: status, the markdown (rendered with maths by
+ * `TranscriptMarkdown`, which supersedes F1-A4's plain text), and the manual
+ * retry path for a failed or never-queued (legacy) page.
  */
 export function TranscriptPanel({ page, isActivePage, onRetry }: TranscriptPanelProps) {
   // Feedback for a Retry/Transcribe press that the queue silently swallowed
@@ -123,9 +124,9 @@ export function TranscriptPanel({ page, isActivePage, onRetry }: TranscriptPanel
           the text (owner, 2026-10-20). */}
       <div
         data-transcript-text
-        className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap border border-border bg-background p-3 font-transcript text-base leading-relaxed"
+        className="min-h-0 flex-1 overflow-auto border border-border bg-background p-3 font-transcript text-base leading-relaxed"
       >
-        {transcript.markdown ? transcript.markdown : 'Blank page'}
+        {transcript.markdown ? <LazyTranscriptMarkdown markdown={transcript.markdown} /> : 'Blank page'}
       </div>
       <p className="shrink-0 text-xs text-muted-foreground">
         {transcript.model} · {transcript.promptVersion}

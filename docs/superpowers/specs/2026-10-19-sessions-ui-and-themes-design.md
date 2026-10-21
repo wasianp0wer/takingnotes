@@ -148,7 +148,8 @@ A border separates the sidebar from the main view, and each of the two halves
     The transcribed text itself sits in a bordered block of a set size (it fills
     the area above the gaps strip and scrolls inside itself), set in the theme's
     transcript font (a serif stack in every built-in) so it is clearly content.
-    **(owner, 2026-10-20)**
+    It renders as Markdown with LaTeX maths (KaTeX), since Gemma writes `$…$`
+    maths. **(owner, 2026-10-20)**
 - **Page navigation** ("‹ Page N of M ›") sits centred just below the switch,
   with the `NoteToolbar` actions (Type page and the rest) nearby.
 - **Blank when there are no pages.** The owner can Resume and type a page.

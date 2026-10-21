@@ -18,7 +18,7 @@ tints instead of resting borders, hover-only affordances, element-kind colour
 classes. Task 18 restyled Triage to match and swept the remaining
 `rounded-md|lg|xl` and resting borders.
 
-**Tests.** `npm test`: 1879 tests in 146 files (after the final-review fixes and the owner's 2026-10-20 follow-ups), against the 1614 / 119 baseline.
+**Tests.** `npm test`: 1889 tests in 147 files (after the final-review fixes and the owner's 2026-10-20 follow-ups), against the 1614 / 119 baseline.
 `npx tsc -b` clean, `npm run lint` 0 errors, `npm run build` succeeds.
 
 **Decisions taken on the owner's behalf.**
@@ -42,6 +42,16 @@ classes. Task 18 restyled Triage to match and swept the remaining
   Palatino, Georgia, ui-serif, serif`, all system fonts, nothing downloaded) so it
   reads as content. That font also applies to typed pages and audio transcript
   segments, since the theme's transcript font covers all three.
+- Transcripts render as Markdown with LaTeX maths (owner, 2026-10-20;
+  supersedes F1-A4's plain text). Gemma writes `$…$` maths such as
+  `$\rightarrow$`. `src/notes/TranscriptMarkdown.tsx` uses react-markdown with
+  remark-gfm, remark-math, remark-breaks (a page's line breaks are kept) and
+  rehype-katex, configured not to throw on bad LaTeX. Raw HTML is never rendered.
+  The renderer (~440 kB) is lazy-loaded, so startup is unchanged and the text
+  shows plain for a moment. Only the display changed: the stored transcript, and
+  so search and gap analysis, still read the raw text. Note that `$$…$$` on one
+  line typesets inline; it is displayed as a block only on its own lines. The
+  Gemma prompt was not changed.
 - The sidebar's regex filter is stale-while-revalidate: while the same patterns
   re-run against a rebuilt catalog (every page turn during live capture), the
   last settled matches keep filtering, so the list does not flicker.

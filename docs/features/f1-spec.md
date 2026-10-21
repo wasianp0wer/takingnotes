@@ -273,7 +273,7 @@ UI (component tests, `createRoot` + `act`):
   when unknown (the live stream carries no serial number). Page dims default
   to the Huion A5 logical page (1409×1869); A4 is not detected from the live
   stream here.
-- F1-A4 Transcripts are shown as pre-wrapped plain text; no Markdown renderer
+- F1-A4 *(Superseded 2026-10-20: transcripts now render as Markdown with LaTeX maths via `src/notes/TranscriptMarkdown.tsx`; see `docs/session-handoff.md`.)* Transcripts are shown as pre-wrapped plain text; no Markdown renderer
   dependency is added.
 - F1-A5 Legacy (ROM) pages are not transcribed automatically; the page view
   offers "Transcribe" for them.
