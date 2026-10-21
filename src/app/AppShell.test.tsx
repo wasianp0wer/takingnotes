@@ -301,6 +301,34 @@ describe('AppShell', () => {
     expect(selectedEntryKey()).toBe(`note:${activeId}`);
   });
 
+  it('advanced search opens full screen from the quick search, and a hit opens its session', async () => {
+    const note = await seedSession('Bureau seminar', 1000, 0);
+    await renderShell();
+    await click(byLabel('Search'));
+    const quick = byLabel('Quick search') as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(quick, 'bureau');
+      quick.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      quick.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    await settle();
+    expect(container.querySelectorAll('[role="dialog"][aria-label="Advanced search"]')).toHaveLength(1);
+    expect((byLabel('Search query') as HTMLInputElement).value).toBe('bureau');
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    await settle();
+    const dialog = container.querySelector('[role="dialog"]')!;
+    const open = [...dialog.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Open')!;
+    await click(open);
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(tab('Sessions').getAttribute('data-state')).toBe('active');
+    expect(selectedEntryKey()).toBe(`note:${note.id}`);
+  });
+
   it('the legacy migration runs once', async () => {
     await renderShell();
     await remountShell();

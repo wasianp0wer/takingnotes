@@ -2,9 +2,18 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { AdvancedSearch } from '@/search/AdvancedSearch';
 import { createFakeTextGenerator } from '@/search/fakeTextGenerator';
-import { SearchView } from '@/search/SearchView';
+import { firstMatches } from '@/search/matcher';
+import { createRegexRunner, TIMEOUT_ERROR } from '@/search/regexRunner';
+import type { RegexRunner, RegexRunResult } from '@/search/regexRunner';
+import { SearchProvider } from '@/search/SearchContext';
+import { createSearchStore, EMPTY_SEARCH_FILTERS } from '@/search/searchStore';
+import type { SearchStore } from '@/search/searchStore';
 import type { SmartSearchDeps } from '@/search/smartSearch';
+import { SessionsUiProvider } from '@/sessions/SessionsUiContext';
+import { createSessionsUiStore } from '@/sessions/sessionsUiStore';
+import type { SessionsUiStore } from '@/sessions/sessionsUiStore';
 import { createNote } from '@/storage/notes';
 import { createPage, setPageTranscript } from '@/storage/pages';
 import { createRecording, finalizeRecording, setRecordingTranscript } from '@/storage/recordings';
@@ -16,6 +25,8 @@ declare global {
 
 let container: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
+let search: SearchStore;
+let sessions: SessionsUiStore;
 
 beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -23,11 +34,15 @@ beforeEach(async () => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  search = createSearchStore();
+  search.openAdvanced();
+  sessions = createSessionsUiStore(null);
 });
 
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  vi.restoreAllMocks();
 });
 
 async function settle(rounds = 4): Promise<void> {
@@ -36,6 +51,14 @@ async function settle(rounds = 4): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   }
+}
+
+/** Past FIND_DEBOUNCE_MS (150). */
+async function waitForDebounce(): Promise<void> {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+  await settle();
 }
 
 function buttons(): HTMLButtonElement[] {
@@ -71,34 +94,126 @@ const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
 )!.set!;
 
 function queryInput(): HTMLInputElement {
-  const found = container.querySelector('input');
+  const found = container.querySelector<HTMLInputElement>('input[aria-label="Search query"]');
   if (!found) throw new Error('no query input');
   return found;
 }
 
-async function type(value: string): Promise<void> {
-  const el = queryInput();
+function byLabel<T extends HTMLElement>(label: string): T {
+  const found = container.querySelector<T>(`[aria-label="${label}"]`);
+  if (!found) throw new Error(`nothing labelled ${label}`);
+  return found;
+}
+
+async function setInput(el: HTMLInputElement, value: string): Promise<void> {
   await act(async () => {
     nativeInputValueSetter.call(el, value);
     el.dispatchEvent(new Event('input', { bubbles: true }));
   });
   await settle();
-  // Fix round 3, I4: Find now recomputes from a debounced query
-  // (FIND_DEBOUNCE_MS = 150 in SearchView.tsx) - a real, generous margin
-  // past that so every existing `type()` call site keeps seeing Find's
-  // result without having to know about the debounce itself.
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  });
 }
 
-function render(props: Parameters<typeof SearchView>[0] = {}) {
+async function type(value: string): Promise<void> {
+  await setInput(queryInput(), value);
+  // Find recomputes from a debounced query (FIND_DEBOUNCE_MS = 150): a
+  // generous margin past that so every call site sees Find's result.
+  await waitForDebounce();
+}
+
+function dialog(): HTMLElement | null {
+  return container.querySelector('[role="dialog"]');
+}
+
+function render(props: Parameters<typeof AdvancedSearch>[0] = {}) {
   act(() => {
-    root.render(<SearchView {...props} />);
+    root.render(
+      <SessionsUiProvider store={sessions}>
+        <SearchProvider store={search}>
+          <AdvancedSearch {...props} />
+        </SearchProvider>
+      </SessionsUiProvider>,
+    );
   });
 }
 
-describe('SearchView', () => {
+/** The real runner, matching in-thread (the test runner has no Worker to give it). */
+function inThreadRunner(): RegexRunner {
+  return createRegexRunner({
+    createExecutor: () => ({
+      run: async (pattern, texts) => {
+        const r = firstMatches(pattern, texts);
+        if (!r.ok) throw new Error(r.error);
+        return r.matches;
+      },
+      terminate: () => {},
+    }),
+  });
+}
+
+/** A runner whose runs resolve only when the test says so. */
+function deferredRunner() {
+  const calls: { pattern: string; texts: readonly string[]; resolve(r: RegexRunResult): void }[] = [];
+  const runner: RegexRunner = {
+    run: (pattern, texts) =>
+      new Promise((resolve) => {
+        calls.push({ pattern, texts, resolve });
+      }),
+    dispose: vi.fn(),
+  };
+  return { runner, calls };
+}
+
+async function seedPageText(title: string, text: string, startedAt?: number) {
+  const note = await createNote({ title, deviceId: 'd', pageBaseline: 0, startedAt });
+  const page = await createPage({
+    noteId: note.id,
+    pageIndex: 0,
+    devicePageNum: 1,
+    source: 'live',
+    strokes: [],
+  });
+  await setPageTranscript(page.id, {
+    markdown: text,
+    model: 'gemma4',
+    promptVersion: 'gemma-v1',
+    status: 'done',
+    error: null,
+    updatedAt: 1,
+  });
+  return note;
+}
+
+describe('AdvancedSearch', () => {
+  it('renders nothing while advanced search is closed', async () => {
+    search.closeAdvanced();
+    render();
+    await settle();
+    expect(container.innerHTML).toBe('');
+  });
+
+  it('renders full screen over the app', async () => {
+    render();
+    await settle();
+    const d = dialog();
+    expect(d).not.toBeNull();
+    expect(d!.getAttribute('aria-modal')).toBe('true');
+    const classes = d!.className.split(/\s+/);
+    expect(classes).toContain('fixed');
+    expect(classes).toContain('inset-0');
+    await click(buttonByText('Close'));
+    expect(search.getState().advancedOpen).toBe(false);
+    expect(dialog()).toBeNull();
+  });
+
+  it('Escape closes the overlay', async () => {
+    render();
+    await settle();
+    await act(async () => {
+      dialog()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(search.getState().advancedOpen).toBe(false);
+  });
+
   it('renders the empty-library message and no Smart search button when there is nothing to search', async () => {
     render();
     await settle();
@@ -112,6 +227,7 @@ describe('SearchView', () => {
     await settle();
     await type('thermo');
     expect(container.textContent).toContain('Thermodynamics');
+    expect(container.querySelector('mark.bg-search-highlight')?.textContent).toBe('Thermo');
   });
 
   it('clears Find results when the query is cleared', async () => {
@@ -155,11 +271,6 @@ describe('SearchView', () => {
   });
 
   it('reports a totally unreachable host as "could not be checked", not a thrown error - and stays interactive (fix round 3, I2)', async () => {
-    // Fix round 3, I2 changed the screen stage's failure handling: a
-    // failed screen batch is now caught and counted (like a band
-    // failure), not thrown - so a totally unreachable host surfaces via
-    // uncheckedCount rather than a destructive error paragraph. See
-    // smartSearch.test.ts's own test of this at the function level.
     await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0 });
     const gen = createFakeTextGenerator();
     gen.failWith = new Error('Could not reach Ollama at http://x: fetch failed');
@@ -174,22 +285,7 @@ describe('SearchView', () => {
   });
 
   it('shows the "screened by title and page text or recording" line for a note with no summary but some page text', async () => {
-    const note = await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0 });
-    const page = await createPage({
-      noteId: note.id,
-      pageIndex: 0,
-      devicePageNum: 1,
-      source: 'live',
-      strokes: [],
-    });
-    await setPageTranscript(page.id, {
-      markdown: 'some page text',
-      model: 'gemma4',
-      promptVersion: 'gemma-v1',
-      status: 'done',
-      error: null,
-      updatedAt: 1,
-    });
+    await seedPageText('A', 'some page text');
     const gen = createFakeTextGenerator(['[]']);
     render({ smartSearchDeps: { generator: gen, model: 'm' } });
     await settle();
@@ -209,7 +305,6 @@ describe('SearchView', () => {
     await click(buttonByText('Smart search'));
     expect(container.textContent).toContain('1 note has neither page text nor a recording');
     expect(container.textContent).toContain('screened by title alone');
-    // Must not also claim it was screened by page text - it was not.
     expect(container.textContent).not.toContain('page text or recording content instead');
   });
 
@@ -245,7 +340,7 @@ describe('SearchView', () => {
     expect(container.textContent).toContain('1 note could not be checked');
   });
 
-  it("a Find hit's Open button calls onOpenNotes with the note id and page for a note hit", async () => {
+  it("a page-text Find hit's Open button opens that note at the matching page", async () => {
     const note = await createNote({ title: 'Unique Title', deviceId: 'd', pageBaseline: 0 });
     await createPage({ noteId: note.id, pageIndex: 0, devicePageNum: 1, source: 'live', strokes: [] });
     const page1 = await createPage({
@@ -263,25 +358,25 @@ describe('SearchView', () => {
       error: null,
       updatedAt: 1,
     });
-    const onOpenNotes = vi.fn();
-    const onOpenRecordings = vi.fn();
-    render({ onOpenNotes, onOpenRecordings });
+    const openNote = vi.spyOn(sessions, 'openNote');
+    const openRecording = vi.spyOn(sessions, 'openRecording');
+    render();
     await settle();
     await type('distinctive phrase');
     await click(buttonByText('Open'));
     // Page 1 (pageIndex 1), not page 0 - the hit names the actual matching page.
-    expect(onOpenNotes).toHaveBeenCalledExactlyOnceWith(note.id, 1);
-    expect(onOpenRecordings).not.toHaveBeenCalled();
+    expect(openNote).toHaveBeenCalledExactlyOnceWith(note.id, 1, 'transcription');
+    expect(openRecording).not.toHaveBeenCalled();
   });
 
   it("a Find hit's Open button defaults to page 0 for a note-title hit, which names no specific page", async () => {
     const note = await createNote({ title: 'Unique Title', deviceId: 'd', pageBaseline: 0 });
-    const onOpenNotes = vi.fn();
-    render({ onOpenNotes });
+    const openNote = vi.spyOn(sessions, 'openNote');
+    render();
     await settle();
     await type('unique');
     await click(buttonByText('Open'));
-    expect(onOpenNotes).toHaveBeenCalledExactlyOnceWith(note.id, 0);
+    expect(openNote).toHaveBeenCalledExactlyOnceWith(note.id, 0);
   });
 
   it('a second press while a smart search run is in flight does not start a second run', async () => {
@@ -293,18 +388,15 @@ describe('SearchView', () => {
     const button = buttonByText('Smart search');
     await act(async () => {
       // Both dispatched synchronously, back to back, before either click
-      // handler's first await has a chance to let React re-render and
-      // disable the button - the worst case the `running` state alone
-      // cannot cover, which is exactly what `runningRef` guards against.
+      // handler's first await lets React re-render and disable the button.
       button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await settle();
-    // One screen call, not two: a second run never started.
     expect(gen.calls.length).toBe(1);
   });
 
-  it("a Find hit's Open button calls onOpenRecordings, not onOpenNotes, for an audio-segment hit", async () => {
+  it("an audio-segment Find hit's Open button opens the recording at the matching segment", async () => {
     const recording = await createRecording(
       { title: 'Lecture audio', durationMs: 1000 },
       new Blob(['a']),
@@ -322,16 +414,16 @@ describe('SearchView', () => {
       error: null,
       updatedAt: 1,
     });
-    const onOpenNotes = vi.fn();
-    const onOpenRecordings = vi.fn();
-    render({ onOpenNotes, onOpenRecordings });
+    const openNote = vi.spyOn(sessions, 'openNote');
+    const openRecording = vi.spyOn(sessions, 'openRecording');
+    render();
     await settle();
     await type('distinctive');
     expect(container.textContent).toContain('Lecture audio');
     await click(buttonByText('Open'));
     // The matching segment's own startMs (5000), not the recording's first.
-    expect(onOpenRecordings).toHaveBeenCalledExactlyOnceWith(recording.id, 5000);
-    expect(onOpenNotes).not.toHaveBeenCalled();
+    expect(openRecording).toHaveBeenCalledExactlyOnceWith(recording.id, 5000, null);
+    expect(openNote).not.toHaveBeenCalled();
   });
 
   it("a smart-search hit's Open button opens the recording, not the note, when the note has no page text (fix round 3, C1)", async () => {
@@ -351,9 +443,9 @@ describe('SearchView', () => {
       updatedAt: 1,
     });
     const gen = createFakeTextGenerator(['[1]', '{"band":"strong","reason":"mentions entropy at length"}']);
-    const onOpenNotes = vi.fn();
-    const onOpenRecordings = vi.fn();
-    render({ smartSearchDeps: { generator: gen, model: 'm' }, onOpenNotes, onOpenRecordings });
+    const openNote = vi.spyOn(sessions, 'openNote');
+    const openRecording = vi.spyOn(sessions, 'openRecording');
+    render({ smartSearchDeps: { generator: gen, model: 'm' } });
     await settle();
     await type('entropy');
     await click(buttonByText('Smart search'));
@@ -366,11 +458,12 @@ describe('SearchView', () => {
       (b) => b.textContent?.trim() === 'Open',
     )!;
     await click(openButton);
-    expect(onOpenRecordings).toHaveBeenCalledExactlyOnceWith(recording.id);
-    expect(onOpenNotes).not.toHaveBeenCalled();
+    expect(openRecording).toHaveBeenCalledExactlyOnceWith(recording.id, undefined, note.id);
+    expect(openNote).not.toHaveBeenCalled();
+    expect(search.getState().advancedOpen).toBe(false);
   });
 
-  it('clears a stale smart-search result when the query changes (fix round 3, I6)', async () => {
+  it('labels a smart result with its own query once the query changes, rather than presenting it as the answer (fix round 3, I6)', async () => {
     await createNote({ title: 'Entropy Lecture', deviceId: 'd', pageBaseline: 0 });
     const gen = createFakeTextGenerator(['[1]', '{"band":"strong","reason":"about entropy"}']);
     render({ smartSearchDeps: { generator: gen, model: 'm' } });
@@ -378,31 +471,32 @@ describe('SearchView', () => {
     await type('entropy');
     await click(buttonByText('Smart search'));
     expect(container.textContent).toContain('about entropy');
+    expect(container.textContent).not.toContain('Smart results for');
 
     await type('osmosis');
-    expect(container.textContent).not.toContain('about entropy');
-    expect(container.textContent).not.toContain('Strong');
+    expect(container.textContent).toContain('Smart results for "entropy"');
+    expect(container.textContent).toContain('about entropy');
   });
 
   it('clears a smart-search error when the query changes', async () => {
     await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0 });
     const gen = createFakeTextGenerator();
-    gen.failWith = new Error('boom');
+    // Only an abort escapes runSmartSearch; any other failure is counted.
+    gen.failWith = Object.assign(new Error('the run was stopped'), { name: 'AbortError' });
     render({ smartSearchDeps: { generator: gen, model: 'm' } });
     await settle();
     await type('entropy');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('could not be checked');
+    expect(container.textContent).toContain('the run was stopped');
 
     await type('osmosis');
-    expect(container.textContent).not.toContain('could not be checked');
+    expect(container.textContent).not.toContain('the run was stopped');
   });
 
-  it('shows a loading state, with the Search landmark already present, before the corpus has resolved (fix round 3, I5)', () => {
+  it('shows a loading state, inside the dialog, before the corpus has resolved (fix round 3, I5)', () => {
     render();
-    // Deliberately no `await settle()` - this checks the render that
-    // happens *before* loadSearchCorpus() has had a chance to resolve.
-    expect(container.querySelector('[aria-label="Search"]')).not.toBeNull();
+    // Deliberately no `await settle()`: the render before loadSearchCorpus() resolves.
+    expect(dialog()).not.toBeNull();
     expect(container.textContent).toContain('Loading');
   });
 
@@ -418,49 +512,28 @@ describe('SearchView', () => {
     await createNote({ title: 'Thermodynamics', deviceId: 'd', pageBaseline: 0 });
     render();
     await settle();
-
-    const input = queryInput();
-    await act(async () => {
-      nativeInputValueSetter.call(input, 'thermo');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    await settle(); // flushes microtasks, but not the 150ms debounce timer
+    await setInput(queryInput(), 'thermo'); // flushes microtasks, not the 150ms timer
     expect(container.textContent).not.toContain('Thermodynamics');
-
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    });
+    await waitForDebounce();
     expect(container.textContent).toContain('Thermodynamics');
   });
 
-  // The test above also passes if `hits` is computed straight from `query`
-  // (undebounced), because the surrounding block is separately gated on
-  // `debouncedQuery.trim() !== ''` - while that gate is still empty, no
-  // hits can show regardless of what `hits` itself was computed from. This
-  // test forces `debouncedQuery` to be *non-empty but stale* (a completed,
-  // older debounce cycle) at the moment `query` changes again, which is
-  // the only state in which the two possible implementations disagree.
+  // Forces the debounced query to be non-empty but stale when the query
+  // changes again: the only state in which a debounced recompute and an
+  // undebounced one disagree.
   it("debounces Find's own recompute, not just the surrounding block's visibility", async () => {
     await createNote({ title: 'Thermo Lecture', deviceId: 'd', pageBaseline: 0 });
     await createNote({ title: 'Wave Lecture', deviceId: 'd', pageBaseline: 0 });
     render();
     await settle();
-
-    await type('thermo'); // type()'s own wait lets this debounce cycle complete
+    await type('thermo');
     expect(container.textContent).toContain('Thermo Lecture');
 
-    const input = queryInput();
-    await act(async () => {
-      nativeInputValueSetter.call(input, 'wave');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    await settle(); // debouncedQuery is still 'thermo' here - a stale, non-empty value
+    await setInput(queryInput(), 'wave');
     expect(container.textContent).toContain('Thermo Lecture');
     expect(container.textContent).not.toContain('Wave Lecture');
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    });
+    await waitForDebounce();
     expect(container.textContent).toContain('Wave Lecture');
     expect(container.textContent).not.toContain('Thermo Lecture');
   });
@@ -476,7 +549,7 @@ describe('SearchView', () => {
     expect(container.textContent).toContain('Showing first 50 of 60 matches.');
   });
 
-  it("aborts an in-flight smart search when the view unmounts, rather than letting it keep making calls (fix round 3, M2)", async () => {
+  it('aborts an in-flight smart search when the overlay unmounts, rather than letting it keep making calls (fix round 3, M2)', async () => {
     await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0 });
     let capturedSignal: AbortSignal | undefined;
     let callCount = 0;
@@ -485,8 +558,6 @@ describe('SearchView', () => {
       generateJson: async (_prompt, opts) => {
         callCount += 1;
         capturedSignal = opts.signal;
-        // Never resolves within the test - the point is to catch the
-        // run mid-flight, not to let it finish.
         return new Promise(() => {});
       },
     };
@@ -503,6 +574,164 @@ describe('SearchView', () => {
 
     // A fresh root so afterEach's own unmount is a harmless no-op.
     root = createRoot(container);
+  });
+
+  it('Find honours the regex switch', async () => {
+    await seedPageText('Lecture', 'The Reconstruction era followed.');
+    render({ regexRunner: inThreadRunner() });
+    await settle();
+    await type('reconstr\\w+');
+    expect(container.textContent).not.toContain('Reconstruction era');
+    expect(container.textContent).toContain('No matches');
+
+    await click(byLabel('Regex'));
+    await settle();
+    expect(search.getState().regex).toBe(true);
+    expect(container.textContent).toContain('Reconstruction era');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('an invalid regex shows an inline error and keeps the previous results', async () => {
+    await seedPageText('Lecture', 'The Reconstruction era followed.');
+    search.setRegex(true);
+    render({ regexRunner: inThreadRunner() });
+    await settle();
+    await type('reconstr\\w+');
+    expect(container.textContent).toContain('Reconstruction era');
+
+    await type('reconstr[');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Invalid pattern');
+    expect(container.textContent).toContain('Reconstruction era');
+  });
+
+  it('regex never runs on the main thread: Find sends the filtered texts to the runner and shows a pending state', async () => {
+    await seedPageText('Lecture', 'The Reconstruction era followed.');
+    const { runner, calls } = deferredRunner();
+    search.setRegex(true);
+    render({ regexRunner: runner });
+    await settle();
+    await type('reconstr\\w+');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].pattern).toBe('reconstr\\w+');
+    expect(calls[0].texts).toEqual(['Lecture', 'The Reconstruction era followed.']);
+    expect(container.textContent).toContain('Searching');
+    expect(container.textContent).not.toContain('No matches');
+    // Nothing is matched until the runner answers.
+    expect(container.textContent).not.toContain('Reconstruction era');
+
+    // The hits are the runner's: here it reports the title, not the page.
+    await act(async () => {
+      calls[0].resolve({ ok: true, matches: [{ index: 0, length: 7 }, null] });
+    });
+    await settle();
+    expect(container.textContent).not.toContain('Searching');
+    expect(container.textContent).toContain('Title — Lecture');
+    expect(container.textContent).not.toContain('Reconstruction era');
+  });
+
+  it("a pattern that runs too long shows the runner's error and keeps the previous results", async () => {
+    await seedPageText('Lecture', 'The Reconstruction era followed.');
+    const { runner, calls } = deferredRunner();
+    search.setRegex(true);
+    render({ regexRunner: runner });
+    await settle();
+    await type('reconstr\\w+');
+    await act(async () => {
+      calls[0].resolve({ ok: true, matches: [null, { index: 4, length: 14 }] });
+    });
+    await settle();
+
+    await type('slow');
+    await act(async () => {
+      calls[1].resolve({ ok: false, error: TIMEOUT_ERROR });
+    });
+    await settle();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(TIMEOUT_ERROR);
+    expect(container.textContent).toContain('Reconstruction era');
+  });
+
+  it('filters narrow Find', async () => {
+    await seedPageText('Topic early', 'nothing here', new Date('2026-01-05T12:00:00').getTime());
+    await seedPageText('Later', 'a topic page', new Date('2026-03-10T12:00:00').getTime());
+    render();
+    await settle();
+    await type('topic');
+    expect(container.textContent).toContain('Topic early');
+    expect(container.textContent).toContain('a topic page');
+
+    await setInput(byLabel<HTMLInputElement>('From date'), '2026-02-01');
+    await waitForDebounce();
+    expect(container.textContent).not.toContain('Topic early');
+    expect(container.textContent).toContain('a topic page');
+
+    await setInput(byLabel<HTMLInputElement>('From date'), '');
+    await waitForDebounce();
+    expect(container.textContent).toContain('Topic early');
+
+    await click(byLabel('Pages'));
+    await waitForDebounce();
+    expect(search.getState().filters.sources).not.toContain('page-text');
+    expect(container.textContent).toContain('Topic early');
+    expect(container.textContent).not.toContain('a topic page');
+  });
+
+  it('filters and regex do not reach smart search', async () => {
+    await createNote({ title: 'A', deviceId: 'd', pageBaseline: 0, startedAt: 1000 });
+    await createNote({ title: 'B', deviceId: 'd', pageBaseline: 0, startedAt: 2000 });
+    const gen = createFakeTextGenerator(['[]']);
+    render({ smartSearchDeps: { generator: gen, model: 'm' }, regexRunner: inThreadRunner() });
+    await settle();
+    await type('something');
+    await click(buttonByText('Smart search'));
+    const plainPrompts = gen.calls.map((c) => c.prompt);
+    expect(plainPrompts.length).toBeGreaterThan(0);
+
+    await act(async () => {
+      search.setFilters({
+        ...EMPTY_SEARCH_FILTERS,
+        from: '2030-01-01',
+        tags: ['nothing'],
+        sources: ['audio-segment'],
+      });
+      search.setRegex(true);
+    });
+    await waitForDebounce();
+    await click(buttonByText('Smart search'));
+    expect(gen.calls.map((c) => c.prompt).slice(plainPrompts.length)).toEqual(plainPrompts);
+  });
+
+  it('closing and reopening keeps the query, Find results and smart results without a second model call', async () => {
+    await createNote({ title: 'Entropy Lecture', deviceId: 'd', pageBaseline: 0 });
+    const gen = createFakeTextGenerator(['[1]', '{"band":"strong","reason":"about entropy"}']);
+    render({ smartSearchDeps: { generator: gen, model: 'm' } });
+    await settle();
+    await type('entropy');
+    await click(buttonByText('Smart search'));
+    expect(container.textContent).toContain('about entropy');
+    const callsBefore = gen.calls.length;
+
+    await click(buttonByText('Close'));
+    expect(dialog()).toBeNull();
+
+    await act(async () => search.openAdvanced());
+    await settle();
+    expect(queryInput().value).toBe('entropy');
+    expect(container.textContent).toContain('Entropy Lecture');
+    expect(findButtonByText('Open')).toBeDefined();
+    expect(container.textContent).toContain('about entropy');
+    expect(gen.calls.length).toBe(callsBefore);
+  });
+
+  it('opening a hit closes the overlay and navigates', async () => {
+    const note = await createNote({ title: 'Unique Title', deviceId: 'd', pageBaseline: 0 });
+    render();
+    await settle();
+    await type('unique');
+    await click(buttonByText('Open'));
+    expect(search.getState().advancedOpen).toBe(false);
+    expect(dialog()).toBeNull();
+    expect(sessions.getState().tab).toBe('sessions');
+    expect(sessions.getState().selectedKey).toContain(note.id);
   });
 });
 
@@ -530,15 +759,10 @@ describe('the partial-transcript caveat', () => {
   }
 
   it('warns under Find results that some recordings are not fully transcribed', async () => {
-    // ⚑ Find reads `transcript.segments` with no status gate at all, so it
-    // returns partial hits whether or not anything asked it to. The warning
-    // is what keeps that honest.
     await seedPartialRecording('Lecture', 'mitochondria are the powerhouse');
     render();
     await settle();
-
     await type('mitochondria');
-
     expect(container.textContent).toContain('mitochondria are the powerhouse');
     expect(container.textContent).toContain('not fully transcribed');
   });
@@ -549,10 +773,8 @@ describe('the partial-transcript caveat', () => {
     const gen = createFakeTextGenerator(['[1]', '{"band":"strong","reason":"about cells"}']);
     render({ smartSearchDeps: { generator: gen, model: 'm' } });
     await settle();
-
     await type('mitochondria');
     await click(buttonByText('Smart search'));
-
     expect(container.textContent).toContain('about cells');
     expect(container.textContent).toContain('not fully transcribed');
   });
@@ -574,9 +796,7 @@ describe('the partial-transcript caveat', () => {
     });
     render();
     await settle();
-
     await type('mitochondria');
-
     expect(container.textContent).toContain('mitochondria are the powerhouse');
     expect(container.textContent).not.toContain('not fully transcribed');
   });
@@ -585,7 +805,6 @@ describe('the partial-transcript caveat', () => {
     await seedPartialRecording('Lecture', 'mitochondria are the powerhouse');
     render();
     await settle();
-
     expect(container.textContent).not.toContain('not fully transcribed');
   });
 });

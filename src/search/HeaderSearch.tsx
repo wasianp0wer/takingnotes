@@ -1,10 +1,11 @@
 import { Search } from 'lucide-react';
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import type { KeyboardEvent, ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent } from 'react';
 
 import { Input } from '@/components/ui/input';
 import { HOVER_AFFORDANCE } from '@/components/ui/hover';
 import { findInCorpus, MIN_QUERY_LENGTH } from '@/search/find';
+import { Highlighted } from '@/search/Highlighted';
 import type { FindHit } from '@/search/find';
 import { useSearch } from '@/search/SearchContext';
 import { openHit, QUICK_RESULTS_CAP } from '@/search/searchStore';
@@ -17,33 +18,6 @@ const SOURCE_LABEL: Record<FindHit['source'], string> = {
   'page-text': 'Page',
   'audio-segment': 'Recording',
 };
-
-/** The snippet with each case-insensitive occurrence of `query` highlighted. */
-function Highlighted(props: { text: string; query: string }) {
-  const { text, query } = props;
-  const needle = query.trim().toLowerCase();
-  if (needle === '') return <>{text}</>;
-  const lower = text.toLowerCase();
-  const parts: ReactNode[] = [];
-  let from = 0;
-  for (let at = lower.indexOf(needle); at !== -1; at = lower.indexOf(needle, from)) {
-    if (at > from) parts.push(text.slice(from, at));
-    parts.push(
-      <mark key={at} className="bg-search-highlight text-inherit">
-        {text.slice(at, at + needle.length)}
-      </mark>,
-    );
-    from = at + needle.length;
-  }
-  parts.push(text.slice(from));
-  return (
-    <>
-      {parts.map((part, i) => (
-        <Fragment key={i}>{part}</Fragment>
-      ))}
-    </>
-  );
-}
 
 /** The header's quick search: a plain-text box (never regex) with a short dropdown of hits. */
 export function HeaderSearch() {

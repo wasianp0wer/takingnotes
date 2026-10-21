@@ -70,21 +70,23 @@ export interface FindOptions {
 
 const ALL_SOURCES: readonly FindHitSource[] = ['note-title', 'note-summary', 'page-text', 'audio-segment'];
 
-/**
- * K40's Find mode: immediate, local match over the sources K41 names -
- * case-insensitive substring by default, or a guarded regex (see
- * `compileMatcher`). Pure and synchronous so a `SearchView` can re-run this
- * on every keystroke against an already-loaded `SearchCorpus` without
- * re-reading storage. An invalid or unsafe pattern yields no hits.
- */
-export function findInCorpus(corpus: SearchCorpus, query: string, options: FindOptions = {}): FindHit[] {
-  const regex = options.regex === true;
-  const q = regex ? query : query.trim();
-  if (regex ? q.length === 0 : q.length < MIN_QUERY_LENGTH) return [];
-  const compiled = compileMatcher(q, { regex });
-  if (!compiled.ok) return [];
-  const { matcher } = compiled;
+/** One text Find would match against, with the hit it becomes if it matches (less the snippet). */
+export interface FindCandidate {
+  text: string;
+  hit: Omit<FindHit, 'snippet'>;
+}
 
+/**
+ * The texts Find matches against, in hit order: per note its title, summary
+ * and page texts, then every searchable audio segment. The date, tag and
+ * source filters are applied here, before any matching. Shared by
+ * `findInCorpus` (in-thread) and the advanced search's regex path, which sends
+ * the texts to the regex Worker and builds hits with `hitsFromMatches`.
+ */
+export function collectFindCandidates(
+  corpus: SearchCorpus,
+  options: FindOptions = {},
+): FindCandidate[] {
   const sources = new Set(options.sources ?? ALL_SOURCES);
   const from = options.from ?? null;
   const to = options.to ?? null;
@@ -92,43 +94,42 @@ export function findInCorpus(corpus: SearchCorpus, query: string, options: FindO
   const tagMode = options.tagMode ?? 'or';
   const inRange = (at: number) => (from === null || at >= from) && (to === null || at <= to);
 
-  const hits: FindHit[] = [];
-  const snippetOf = (text: string): string => {
-    const m = matcher.firstMatch(text);
-    return m ? snippetAt(text, m.index, m.length) : text.trim().slice(0, 120);
-  };
-
-  // Fix round 3, I4: hoisted out of the per-segment loop below, which
-  // previously called `corpus.notes.find(...)` - a linear scan - once per
-  // *matching segment* rather than once per `findInCorpus` call.
+  const candidates: FindCandidate[] = [];
+  // Fix round 3, I4: a map, not a `corpus.notes.find(...)` per segment.
   const noteById = new Map(corpus.notes.map((n) => [n.note.id, n.note]));
   const noteAllowed = (note: { startedAt: number } & Parameters<typeof tagsOf>[0]): boolean =>
     inRange(note.startedAt) && matchesTagFilter(tagsOf(note), tags, tagMode);
 
   for (const { note, pages } of corpus.notes) {
     if (!noteAllowed(note)) continue;
-    if (sources.has('note-title') && matcher.test(note.title)) {
-      hits.push({ source: 'note-title', noteId: note.id, noteTitle: note.title, snippet: snippetOf(note.title) });
+    if (sources.has('note-title')) {
+      candidates.push({
+        text: note.title,
+        hit: { source: 'note-title', noteId: note.id, noteTitle: note.title },
+      });
     }
-    if (sources.has('note-summary') && note.summary !== null && matcher.test(note.summary)) {
-      hits.push({ source: 'note-summary', noteId: note.id, noteTitle: note.title, snippet: snippetOf(note.summary) });
+    if (sources.has('note-summary') && note.summary !== null) {
+      candidates.push({
+        text: note.summary,
+        hit: { source: 'note-summary', noteId: note.id, noteTitle: note.title },
+      });
     }
     if (!sources.has('page-text')) continue;
     for (const page of pages) {
-      if (matcher.test(page.text)) {
-        hits.push({
+      candidates.push({
+        text: page.text,
+        hit: {
           source: 'page-text',
           noteId: note.id,
           noteTitle: note.title,
           pageIndex: page.pageIndex,
           isTyped: page.isTyped,
-          snippet: snippetOf(page.text),
-        });
-      }
+        },
+      });
     }
   }
 
-  if (!sources.has('audio-segment')) return hits;
+  if (!sources.has('audio-segment')) return candidates;
   for (const recording of corpus.recordings) {
     // ⚑ The same predicate smart search uses, rather than no gate at all.
     // Reading `segments` unconditionally returned a *failed* transcript's
@@ -145,21 +146,53 @@ export function findInCorpus(corpus: SearchCorpus, query: string, options: FindO
     } else if (!inRange(recording.startedAt) || tags.length > 0) {
       continue;
     }
-    const segments = recording.transcript?.segments ?? [];
-    for (const segment of segments) {
-      if (matcher.test(segment.text)) {
-        hits.push({
+    for (const segment of recording.transcript?.segments ?? []) {
+      candidates.push({
+        text: segment.text,
+        hit: {
           source: 'audio-segment',
           noteId,
           noteTitle: owner?.title ?? null,
           recordingId: recording.id,
           recordingTitle: recording.title,
           startMs: segment.startMs,
-          snippet: snippetOf(segment.text),
-        });
-      }
+        },
+      });
     }
   }
+  return candidates;
+}
 
+/** The hits for `candidates`, given each one's first match (`null`: no match), in order. */
+export function hitsFromMatches(
+  candidates: readonly FindCandidate[],
+  matches: readonly ({ index: number; length: number } | null)[],
+): FindHit[] {
+  const hits: FindHit[] = [];
+  candidates.forEach((candidate, i) => {
+    const m = matches[i];
+    if (m === null || m === undefined) return;
+    hits.push({ ...candidate.hit, snippet: snippetAt(candidate.text, m.index, m.length) });
+  });
   return hits;
+}
+
+/**
+ * K40's Find mode: immediate, local match over the sources K41 names -
+ * case-insensitive substring by default, or a guarded regex (see
+ * `compileMatcher`). Pure and synchronous so a view can re-run this
+ * on every keystroke against an already-loaded `SearchCorpus` without
+ * re-reading storage. An invalid or unsafe pattern yields no hits. The
+ * advanced search's regex mode does not call this: it runs the same
+ * candidates through the regex Worker instead.
+ */
+export function findInCorpus(corpus: SearchCorpus, query: string, options: FindOptions = {}): FindHit[] {
+  const regex = options.regex === true;
+  const q = regex ? query : query.trim();
+  if (regex ? q.length === 0 : q.length < MIN_QUERY_LENGTH) return [];
+  const compiled = compileMatcher(q, { regex });
+  if (!compiled.ok) return [];
+  const { matcher } = compiled;
+  const candidates = collectFindCandidates(corpus, options);
+  return hitsFromMatches(candidates, candidates.map((c) => matcher.firstMatch(c.text)));
 }

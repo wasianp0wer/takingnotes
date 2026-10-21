@@ -7,6 +7,7 @@ import { SessionControls } from '@/capture/SessionControls';
 import { usePageTurnCapture } from '@/capture/usePageTurnCapture';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useHuionDevice } from '@/device/TabletProvider';
+import { AdvancedSearch } from '@/search/AdvancedSearch';
 import { HeaderSearch } from '@/search/HeaderSearch';
 import { SearchProvider } from '@/search/SearchContext';
 import { createSearchStore } from '@/search/searchStore';
@@ -101,6 +102,8 @@ export function AppShell() {
           <TriageView />
         </TabsContent>
       </Tabs>
+      {/* Mounted once; renders (full screen) only while advanced search is open. */}
+      <AdvancedSearch />
       </SearchProvider>
     </SessionsUiProvider>
   );

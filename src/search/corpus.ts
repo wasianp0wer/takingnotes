@@ -57,7 +57,7 @@ export interface SearchCorpus {
   recordingOwner: Map<string, string>;
   /**
    * How many finished recordings in this corpus are not fully transcribed -
-   * absent, `running` or `paused`. Surfaced so `SearchView` can say results
+   * absent, `running` or `paused`. Surfaced so the advanced search can say results
    * may be incomplete, in **both** modes: since a `running` transcript now
    * carries real segments, Find returns partial hits whether or not anything
    * asked it to.

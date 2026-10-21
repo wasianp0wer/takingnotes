@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SearchCorpus, SearchNote, SearchPage } from '@/search/corpus';
-import { findInCorpus, snippetAround } from '@/search/find';
+import {
+  collectFindCandidates,
+  findInCorpus,
+  hitsFromMatches,
+  snippetAround,
+} from '@/search/find';
+import { firstMatches } from '@/search/matcher';
 import type { NoteRecord, RecordingRecord } from '@/storage/types';
 
 /** A `SearchNote` with fix round 3's `audioText`/`primaryRecordingId` defaulted - Find does not read either. */
@@ -319,22 +325,22 @@ describe('Find and the corpus agree about which transcripts are real', () => {
   });
 });
 
-describe('FindOptions', () => {
-  const recordingWith = (id: string, startedAt: number, text: string): RecordingRecord =>
-    makeRecording({
-      id,
-      startedAt,
-      transcript: {
-        status: 'done',
-        error: null,
-        model: 'm',
-        language: 'en',
-        updatedAt: 0,
-        segments: [{ startMs: 0, endMs: 500, text }],
-        text,
-      },
-    });
+const recordingWith = (id: string, startedAt: number, text: string): RecordingRecord =>
+  makeRecording({
+    id,
+    startedAt,
+    transcript: {
+      status: 'done',
+      error: null,
+      model: 'm',
+      language: 'en',
+      updatedAt: 0,
+      segments: [{ startMs: 0, endMs: 500, text }],
+      text,
+    },
+  });
 
+describe('FindOptions', () => {
   it('regex: true finds page text and the snippet contains the matched word', () => {
     const corpus: SearchCorpus = {
       ...EMPTY,
@@ -426,5 +432,52 @@ describe('FindOptions', () => {
     };
     expect(findInCorpus(corpus, 'topic')).toEqual(findInCorpus(corpus, 'topic', {}));
     expect(findInCorpus(corpus, 'topic').length).toBe(3);
+  });
+});
+
+describe('collectFindCandidates + hitsFromMatches', () => {
+  const corpus: SearchCorpus = {
+    ...EMPTY,
+    notes: [
+      makeSearchNote(
+        makeNote({ id: 'a', title: 'topic a', summary: 'a topic', tags: ['hist'], startedAt: 500 }),
+        [{ pageId: 'p1', pageIndex: 0, text: 'page about the topic', isTyped: false }],
+      ),
+      makeSearchNote(makeNote({ id: 'b', title: 'topic b', startedAt: 100 })),
+    ],
+    recordings: [recordingWith('r1', 500, 'topic spoken')],
+  };
+
+  /** What the advanced search does with the runner's answer, with the matching done in-thread. */
+  function viaCandidates(pattern: string, options: Parameters<typeof findInCorpus>[2] = {}) {
+    const candidates = collectFindCandidates(corpus, options);
+    const r = firstMatches(pattern, candidates.map((c) => c.text));
+    if (!r.ok) throw new Error(r.error);
+    return hitsFromMatches(candidates, r.matches);
+  }
+
+  it('builds exactly the hits findInCorpus builds, in the same order', () => {
+    expect(viaCandidates('top\\w+')).toEqual(findInCorpus(corpus, 'top\\w+', { regex: true }));
+    expect(viaCandidates('top\\w+').length).toBe(5);
+  });
+
+  it('applies the date, tag and source filters before matching', () => {
+    for (const options of [
+      { from: 400 },
+      { tags: ['hist'] },
+      { sources: ['page-text', 'audio-segment'] as const },
+    ]) {
+      const opts = { ...options, sources: options.sources ? [...options.sources] : undefined };
+      expect(viaCandidates('topic', opts)).toEqual(
+        findInCorpus(corpus, 'topic', { ...opts, regex: true }),
+      );
+    }
+    const kept = collectFindCandidates(corpus, { from: 400 });
+    expect(kept.map((c) => c.hit.noteId ?? c.hit.recordingId)).toEqual(['a', 'a', 'a', 'r1']);
+  });
+
+  it('a null match is no hit', () => {
+    const candidates = collectFindCandidates(corpus);
+    expect(hitsFromMatches(candidates, candidates.map(() => null))).toEqual([]);
   });
 });
