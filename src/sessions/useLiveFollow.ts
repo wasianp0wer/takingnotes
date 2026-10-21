@@ -6,9 +6,9 @@ import { noteKey } from './catalog';
 import type { SessionsUiStore } from './sessionsUiStore';
 
 /**
- * Keeps the Sessions UI on what is being written. Mirrors NotesView's
- * previous-value comparisons: only a change after mount counts, so a restored
- * selection is never overridden by the note that was already active on load.
+ * Keeps the Sessions UI on what is being written. Uses the previous-value
+ * comparisons of the removed NotesView: only a change after mount counts, so
+ * a restored selection is never overridden by the note already active on load.
  */
 export function useLiveFollow(store: SessionsUiStore): void {
   const { activeNoteId, pageIndex } = useCaptureState();

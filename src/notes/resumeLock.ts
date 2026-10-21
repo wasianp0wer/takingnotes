@@ -58,10 +58,11 @@ export function createResumeLock(): ResumeLock {
 
 /**
  * Module-level singleton, the same shape `src/transcription/startTranscription.ts`
- * uses for the transcription queue. A plain prop or a React context would need
- * `AppShell`/`main.tsx` to grow a provider - `SessionControls` and `NotesView`
- * are mounted as siblings there, not one inside the other - for a value this
- * small, and both files are outside this unit's ownership.
+ * uses for the transcription queue. Its users (`SessionControls` in the
+ * AppShell header, `ResumeButton` in the Sessions header, and
+ * `NotesHalf`'s New note) sit in separate subtrees, and a plain prop or a React
+ * context would need a provider threaded through `AppShell` for a value this
+ * small.
  */
 let instance: ResumeLock | null = null;
 

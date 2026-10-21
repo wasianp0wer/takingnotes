@@ -20,7 +20,7 @@ async function loadFromStorage(): Promise<{
 
 /**
  * Loads and groups the library, reloading on capture-state changes and on any
- * of the three queue signals. A sequence counter (ported from
+ * of the three queue signals. A sequence counter (ported from the removed
  * `RecordingsView`) makes an older load that resolves after a newer one
  * discard its result.
  *

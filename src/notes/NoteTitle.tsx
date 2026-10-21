@@ -36,8 +36,8 @@ export function NoteTitle({ noteId, title, onRenamed }: NoteTitleProps) {
   // title prop: the displayed draft should track it whenever not mid-edit.
   // Done during render, comparing against the previous render's prop - not
   // in an effect, which would call setState synchronously inside an effect
-  // body and trigger a needless extra render (the same pattern NotesView
-  // itself uses for its own active-note tracking).
+  // body and trigger a needless extra render (React's documented "adjusting
+  // state when a prop changes" pattern).
   const [prevTitle, setPrevTitle] = useState(title);
   if (title !== prevTitle) {
     setPrevTitle(title);
