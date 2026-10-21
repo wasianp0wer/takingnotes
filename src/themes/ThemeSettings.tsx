@@ -1,6 +1,7 @@
 import { useRef, useState, type ChangeEvent } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { ThemeBuilderDialog } from './ThemeBuilderDialog'
 import { useThemes } from './ThemeProvider'
 import { lightTheme } from './builtins'
 import { importThemeText, themeFileName, themeToJson } from './themeFile'
@@ -8,9 +9,11 @@ import { uniqueThemeId } from './themeStore'
 import type { Theme } from './types'
 
 export interface ThemeSettingsProps {
-  /** Task 17 wires the builder; until then New/Edit/Duplicate are no-ops. */
+  /** Overrides the built-in builder dialog (used by tests). */
   onOpenBuilder?(initial: Theme, mode: 'new' | 'edit'): void
 }
+
+const MAX_IMPORT_BYTES = 256 * 1024
 
 function downloadTheme(theme: Theme) {
   const blob = new Blob([themeToJson(theme)], { type: 'application/json' })
@@ -33,6 +36,9 @@ export function ThemeSettings({ onOpenBuilder }: ThemeSettingsProps = {}) {
   const fileRef = useRef<HTMLInputElement>(null)
   const [error, setError] = useState<string | null>(null)
   const [warnings, setWarnings] = useState<string[]>([])
+  const [builder, setBuilder] = useState<{ initial: Theme; mode: 'new' | 'edit' } | null>(null)
+  const openBuilder = (initial: Theme, mode: 'new' | 'edit') =>
+    onOpenBuilder ? onOpenBuilder(initial, mode) : setBuilder({ initial, mode })
 
   const takenIds = [...builtIns, ...custom].map((t) => t.id)
 
@@ -42,6 +48,10 @@ export function ThemeSettings({ onOpenBuilder }: ThemeSettingsProps = {}) {
     if (!file) return
     setError(null)
     setWarnings([])
+    if (file.size > MAX_IMPORT_BYTES) {
+      setError('Not a theme file: too large')
+      return
+    }
     let text: string
     try {
       text = await file.text()
@@ -54,7 +64,12 @@ export function ThemeSettings({ onOpenBuilder }: ThemeSettingsProps = {}) {
       setError(result.error)
       return
     }
-    await saveCustom(result.theme)
+    try {
+      await saveCustom(result.theme)
+    } catch {
+      setError('Could not save the imported theme.')
+      return
+    }
     setWarnings(result.warnings)
   }
 
@@ -65,12 +80,12 @@ export function ThemeSettings({ onOpenBuilder }: ThemeSettingsProps = {}) {
 
   function duplicate(theme: Theme) {
     const id = uniqueThemeId(`${theme.id}-copy`.slice(0, 40), takenIds)
-    onOpenBuilder?.({ ...theme, id, name: `${theme.name} copy`.slice(0, 60), builtIn: false }, 'new')
+    openBuilder({ ...theme, id, name: `${theme.name} copy`.slice(0, 60), builtIn: false }, 'new')
   }
 
   function create() {
     const id = uniqueThemeId('my-theme', takenIds)
-    onOpenBuilder?.({ ...lightTheme(), id, name: 'My theme', builtIn: false }, 'new')
+    openBuilder({ ...lightTheme(), id, name: 'My theme', builtIn: false }, 'new')
   }
 
   return (
@@ -103,7 +118,7 @@ export function ThemeSettings({ onOpenBuilder }: ThemeSettingsProps = {}) {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => onOpenBuilder?.(theme, 'edit')}
+                onClick={() => openBuilder(theme, 'edit')}
                 aria-label={`Edit ${theme.name}`}
               >
                 Edit
@@ -166,6 +181,14 @@ export function ThemeSettings({ onOpenBuilder }: ThemeSettingsProps = {}) {
             <li key={w}>{w}</li>
           ))}
         </ul>
+      ) : null}
+      {builder ? (
+        <ThemeBuilderDialog
+          open
+          initial={builder.initial}
+          mode={builder.mode}
+          onClose={() => setBuilder(null)}
+        />
       ) : null}
     </section>
   )

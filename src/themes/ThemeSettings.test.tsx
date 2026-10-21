@@ -136,10 +136,53 @@ describe('ThemeSettings', () => {
       names.push(this.download)
     })
     await act(async () => button('Export Dark')!.click())
+    await settle()
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:x')
     expect(names).toEqual(['dark.theme.json'])
     const parsed = JSON.parse(await blob!.text())
     expect(parsed.id).toBe('dark')
     expect(parsed.colors.background).toBe(BUILT_IN_THEMES.find((t) => t.id === 'dark')!.colors.background)
+  })
+
+  it('deleting the active custom theme falls back to Light', async () => {
+    await mount()
+    await act(async () => latest.ctx!.saveCustom(mine))
+    expect(latest.ctx!.active.id).toBe('mine')
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await act(async () => button('Delete Mine')!.click())
+    await settle()
+    expect(latest.ctx!.active.id).toBe('light')
+    expect(latest.ctx!.custom).toHaveLength(0)
+  })
+
+  it('an import file over 256 KB is refused before it is read', async () => {
+    await mount()
+    const text = vi.spyOn(File.prototype, 'text')
+    await importFile(' '.repeat(256 * 1024 + 1))
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe('Not a theme file: too large')
+    expect(text).not.toHaveBeenCalled()
+    expect(latest.ctx!.custom).toHaveLength(0)
+  })
+
+  it('a rejected save during import shows an alert', async () => {
+    await mount()
+    const dark = BUILT_IN_THEMES.find((t) => t.id === 'dark')!
+    const mod = await import('./themeStore')
+    vi.spyOn(mod, 'saveCustomTheme').mockRejectedValueOnce(new Error('disk full'))
+    await importFile(themeToJson({ ...dark, id: 'x', name: 'X', builtIn: false }))
+    expect(container.querySelector('[role="alert"]')!.textContent).toMatch(/Could not save/)
+  })
+
+  it('New opens the builder dialog and Cancel closes it', async () => {
+    await mount()
+    const create = [...container.querySelectorAll('button')].find((b) => b.textContent === 'New theme')!
+    await act(async () => create.click())
+    expect(document.body.querySelector('input[aria-label="Theme name"]')).not.toBeNull()
+    const cancel = [...document.body.querySelectorAll('[data-slot="dialog-footer"] button')].find(
+      (b) => b.textContent === 'Cancel',
+    ) as HTMLButtonElement
+    await act(async () => cancel.click())
+    expect(document.body.querySelector('input[aria-label="Theme name"]')).toBeNull()
   })
 
   it('a bad import file shows an alert and adds nothing', async () => {
