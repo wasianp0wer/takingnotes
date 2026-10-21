@@ -192,4 +192,55 @@ describe('HeaderSearch', () => {
     await type(input, 'b');
     expect(container.querySelector('[role="listbox"]')).toBeNull();
   });
+
+  it('Escape collapses the box, and re-opening reloads the corpus', async () => {
+    await mount();
+    let input = await openBox();
+    await type(input, 'bureau');
+    expect(options()).toHaveLength(1);
+    await key(input, 'Escape');
+    expect(container.querySelector('input[aria-label="Quick search"]')).toBeNull();
+    corpus = makeCorpus(['the bureau met', 'another bureau page']);
+    input = await openBox();
+    expect(options()).toHaveLength(2);
+  });
+
+  it('collapses when focus leaves the widget', async () => {
+    await mount();
+    const input = await openBox();
+    await type(input, 'bureau');
+    await act(async () => {
+      input.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: document.body }));
+    });
+    expect(container.querySelector('input[aria-label="Quick search"]')).toBeNull();
+    expect(container.querySelector('[role="listbox"]')).toBeNull();
+  });
+
+  it('points aria-activedescendant at the highlighted option', async () => {
+    await mount();
+    const input = await openBox();
+    expect(input.getAttribute('aria-controls')).toBeNull();
+    await type(input, 'bureau');
+    expect(input.getAttribute('aria-autocomplete')).toBe('list');
+    expect(input.getAttribute('aria-controls')).toBe('quick-search-results');
+    expect(input.getAttribute('aria-activedescendant')).toBeNull();
+    await key(input, 'ArrowDown');
+    const id = input.getAttribute('aria-activedescendant');
+    expect(id).toBe('quick-search-opt-0');
+    expect(options()[0]!.id).toBe(id);
+  });
+
+  it('clicking an option opens it', async () => {
+    const openNote = vi.spyOn(sessions, 'openNote');
+    await mount();
+    const input = await openBox();
+    await type(input, 'bureau');
+    const row = options()[0]!;
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      (row as HTMLElement).click();
+    });
+    expect(openNote).toHaveBeenCalledWith('n1', 0, 'transcription');
+    expect(container.querySelector('[role="listbox"]')).toBeNull();
+  });
 });

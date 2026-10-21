@@ -51,7 +51,11 @@ export function HeaderSearch() {
   const [, sessions] = useSessionsUi();
   const [expanded, setExpanded] = useState(false);
   const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [highlighted, setHighlighted] = useState(-1);
+  // The index belongs to the result set it was made against; a new set resets it.
+  const [highlight, setHighlightState] = useState<{ hits: FindHit[] | null; index: number }>({
+    hits: null,
+    index: -1,
+  });
   const inputRef = useRef<HTMLInputElement>(null);
   const corpus = useSearchCorpus(expanded);
   const quick = search.quickQuery;
@@ -68,15 +72,25 @@ export function HeaderSearch() {
         : findInCorpus(corpus, quick).slice(0, QUICK_RESULTS_CAP),
     [corpus, quick],
   );
+  const collapse = (): void => {
+    setExpanded(false);
+    setDropdownOpen(false);
+    setHighlighted(-1);
+  };
+  const highlighted = highlight.hits === hits ? highlight.index : -1;
+  const setHighlighted = (next: number | ((i: number) => number)): void =>
+    setHighlightState({ hits, index: typeof next === 'function' ? next(highlighted) : next });
   const showList = expanded && dropdownOpen && quick.trim().length >= MIN_QUERY_LENGTH;
 
   const open = (hit: FindHit): void => {
     openHit(hit, sessions);
     setDropdownOpen(false);
+    setHighlighted(-1);
   };
   const openAdvanced = (): void => {
     searchStore.openAdvanced(quick);
     setDropdownOpen(false);
+    setHighlighted(-1);
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
@@ -93,8 +107,7 @@ export function HeaderSearch() {
       if (hit !== undefined) open(hit);
       else openAdvanced();
     } else if (event.key === 'Escape') {
-      setDropdownOpen(false);
-      setHighlighted(-1);
+      collapse();
     }
   };
 
@@ -115,13 +128,21 @@ export function HeaderSearch() {
   }
 
   return (
-    <div className="relative">
+    <div
+      className="relative"
+      onBlur={(e) => {
+        // Focus left the whole widget (tabbed away or clicked elsewhere).
+        if (!e.currentTarget.contains(e.relatedTarget)) collapse();
+      }}
+    >
       <Input
         ref={inputRef}
         aria-label="Quick search"
         role="combobox"
         aria-expanded={showList}
-        aria-controls="quick-search-results"
+        aria-autocomplete="list"
+        aria-controls={showList ? 'quick-search-results' : undefined}
+        aria-activedescendant={showList && highlighted >= 0 ? `quick-search-opt-${highlighted}` : undefined}
         className="h-8 w-64"
         placeholder="Search"
         value={quick}
@@ -138,6 +159,7 @@ export function HeaderSearch() {
             {hits.map((hit, i) => (
               <li
                 key={`${hit.source}-${hit.noteId}-${hit.pageIndex}-${hit.recordingId}-${hit.startMs}`}
+                id={`quick-search-opt-${i}`}
                 role="option"
                 aria-selected={i === highlighted}
                 className={`flex cursor-pointer flex-col gap-0.5 px-3 py-1.5 text-sm ${HOVER_AFFORDANCE} ${
