@@ -62,7 +62,7 @@ async function waitForDebounce(): Promise<void> {
 }
 
 function buttons(): HTMLButtonElement[] {
-  return Array.from(container.querySelectorAll('button'));
+  return Array.from(document.body.querySelectorAll('button'));
 }
 
 function findButtonByText(text: string): HTMLButtonElement | undefined {
@@ -94,13 +94,13 @@ const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
 )!.set!;
 
 function queryInput(): HTMLInputElement {
-  const found = container.querySelector<HTMLInputElement>('input[aria-label="Search query"]');
+  const found = document.body.querySelector<HTMLInputElement>('input[aria-label="Search query"]');
   if (!found) throw new Error('no query input');
   return found;
 }
 
 function byLabel<T extends HTMLElement>(label: string): T {
-  const found = container.querySelector<T>(`[aria-label="${label}"]`);
+  const found = document.body.querySelector<T>(`[aria-label="${label}"]`);
   if (!found) throw new Error(`nothing labelled ${label}`);
   return found;
 }
@@ -120,8 +120,9 @@ async function type(value: string): Promise<void> {
   await waitForDebounce();
 }
 
+/** The overlay is a Radix Dialog, portalled to document.body: queries above read the page. */
 function dialog(): HTMLElement | null {
-  return container.querySelector('[role="dialog"]');
+  return document.body.querySelector('[role="dialog"]');
 }
 
 function render(props: Parameters<typeof AdvancedSearch>[0] = {}) {
@@ -188,6 +189,7 @@ describe('AdvancedSearch', () => {
     search.closeAdvanced();
     render();
     await settle();
+    expect(dialog()).toBeNull();
     expect(container.innerHTML).toBe('');
   });
 
@@ -209,15 +211,54 @@ describe('AdvancedSearch', () => {
     render();
     await settle();
     await act(async () => {
-      dialog()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      dialog()!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     });
     expect(search.getState().advancedOpen).toBe(false);
+  });
+
+  it('Escape closes the overlay while the corpus is still loading', async () => {
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    opener.focus();
+    render();
+    // Deliberately no settle: the corpus has not loaded, so there is no query input yet.
+    expect(document.body.textContent).toContain('Loading');
+    await act(async () => {
+      (document.activeElement ?? document.body).dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      );
+    });
+    expect(search.getState().advancedOpen).toBe(false);
+    opener.remove();
+  });
+
+  it('moves focus into the overlay, hides the app behind it, and returns focus to the opener on close', async () => {
+    await createNote({ title: 'Thermodynamics', deviceId: 'd', pageBaseline: 0 });
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    search.closeAdvanced();
+    render();
+    await settle();
+    opener.focus();
+    await act(async () => search.openAdvanced());
+    await settle();
+    expect(dialog()!.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(queryInput());
+    expect(container.getAttribute('aria-hidden')).toBe('true');
+    expect(opener.getAttribute('aria-hidden')).toBe('true');
+
+    await click(buttonByText('Close'));
+    await settle();
+    expect(dialog()).toBeNull();
+    expect(document.activeElement).toBe(opener);
+    expect(container.getAttribute('aria-hidden')).toBeNull();
+    opener.remove();
   });
 
   it('renders the empty-library message and no Smart search button when there is nothing to search', async () => {
     render();
     await settle();
-    expect(container.textContent).toContain('Nothing to search yet');
+    expect(document.body.textContent).toContain('Nothing to search yet');
     expect(findButtonByText('Smart search')).toBeUndefined();
   });
 
@@ -226,8 +267,8 @@ describe('AdvancedSearch', () => {
     render();
     await settle();
     await type('thermo');
-    expect(container.textContent).toContain('Thermodynamics');
-    expect(container.querySelector('mark.bg-search-highlight')?.textContent).toBe('Thermo');
+    expect(document.body.textContent).toContain('Thermodynamics');
+    expect(document.body.querySelector('mark.bg-search-highlight')?.textContent).toBe('Thermo');
   });
 
   it('clears Find results when the query is cleared', async () => {
@@ -235,9 +276,9 @@ describe('AdvancedSearch', () => {
     render();
     await settle();
     await type('thermo');
-    expect(container.textContent).toContain('Thermodynamics');
+    expect(document.body.textContent).toContain('Thermodynamics');
     await type('');
-    expect(container.querySelectorAll('li').length).toBe(0);
+    expect(document.body.querySelectorAll('li').length).toBe(0);
   });
 
   it('Smart search is disabled for a blank query and enabled once a query is typed', async () => {
@@ -256,8 +297,8 @@ describe('AdvancedSearch', () => {
     await settle();
     await type('something');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('Strong');
-    expect(container.textContent).toContain('it matches');
+    expect(document.body.textContent).toContain('Strong');
+    expect(document.body.textContent).toContain('it matches');
   });
 
   it("does not render a 'none' band candidate anywhere", async () => {
@@ -267,7 +308,7 @@ describe('AdvancedSearch', () => {
     await settle();
     await type('something');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).not.toContain('unrelated');
+    expect(document.body.textContent).not.toContain('unrelated');
   });
 
   it('reports a totally unreachable host as "could not be checked", not a thrown error - and stays interactive (fix round 3, I2)', async () => {
@@ -278,8 +319,8 @@ describe('AdvancedSearch', () => {
     await settle();
     await type('something');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('1 note could not be checked');
-    expect(container.textContent).not.toContain('Could not reach Ollama');
+    expect(document.body.textContent).toContain('1 note could not be checked');
+    expect(document.body.textContent).not.toContain('Could not reach Ollama');
     await type('still works');
     expect(queryInput().value).toBe('still works');
   });
@@ -291,9 +332,9 @@ describe('AdvancedSearch', () => {
     await settle();
     await type('x');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('1 note has no');
-    expect(container.textContent).toContain('page text or recording content instead');
-    expect(container.textContent).not.toContain('screened by title alone');
+    expect(document.body.textContent).toContain('1 note has no');
+    expect(document.body.textContent).toContain('page text or recording content instead');
+    expect(document.body.textContent).not.toContain('screened by title alone');
   });
 
   it('shows the "screened by title alone" line for a note with no summary, no page text and no recording (fix round 3, I1)', async () => {
@@ -303,9 +344,9 @@ describe('AdvancedSearch', () => {
     await settle();
     await type('x');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('1 note has neither page text nor a recording');
-    expect(container.textContent).toContain('screened by title alone');
-    expect(container.textContent).not.toContain('page text or recording content instead');
+    expect(document.body.textContent).toContain('1 note has neither page text nor a recording');
+    expect(document.body.textContent).toContain('screened by title alone');
+    expect(document.body.textContent).not.toContain('page text or recording content instead');
   });
 
   it('reports both the hits it got and the count it could not check when some band calls fail', async () => {
@@ -323,8 +364,8 @@ describe('AdvancedSearch', () => {
     await settle();
     await type('something');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('it matches');
-    expect(container.textContent).toContain('1 note could not be checked');
+    expect(document.body.textContent).toContain('it matches');
+    expect(document.body.textContent).toContain('1 note could not be checked');
   });
 
   it("does not read as 'no matches' when every band call fails", async () => {
@@ -337,7 +378,7 @@ describe('AdvancedSearch', () => {
     await settle();
     await type('something');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('1 note could not be checked');
+    expect(document.body.textContent).toContain('1 note could not be checked');
   });
 
   it("a page-text Find hit's Open button opens that note at the matching page", async () => {
@@ -419,7 +460,7 @@ describe('AdvancedSearch', () => {
     render();
     await settle();
     await type('distinctive');
-    expect(container.textContent).toContain('Lecture audio');
+    expect(document.body.textContent).toContain('Lecture audio');
     await click(buttonByText('Open'));
     // The matching segment's own startMs (5000), not the recording's first.
     expect(openRecording).toHaveBeenCalledExactlyOnceWith(recording.id, 5000, null);
@@ -449,9 +490,9 @@ describe('AdvancedSearch', () => {
     await settle();
     await type('entropy');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('Lecture with no writing');
+    expect(document.body.textContent).toContain('Lecture with no writing');
 
-    const strongSection = [...container.querySelectorAll('div')].find((d) =>
+    const strongSection = [...document.body.querySelectorAll('div')].find((d) =>
       d.textContent?.startsWith('Strong'),
     )!;
     const openButton = [...strongSection.querySelectorAll('button')].find(
@@ -470,12 +511,15 @@ describe('AdvancedSearch', () => {
     await settle();
     await type('entropy');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('about entropy');
-    expect(container.textContent).not.toContain('Smart results for');
+    expect(document.body.textContent).toContain('about entropy');
+    expect(document.body.textContent).not.toContain('Smart results for');
+
+    await type('  entropy ');
+    expect(document.body.textContent).not.toContain('Smart results for');
 
     await type('osmosis');
-    expect(container.textContent).toContain('Smart results for "entropy"');
-    expect(container.textContent).toContain('about entropy');
+    expect(document.body.textContent).toContain('Smart results for "entropy"');
+    expect(document.body.textContent).toContain('about entropy');
   });
 
   it('clears a smart-search error when the query changes', async () => {
@@ -487,17 +531,17 @@ describe('AdvancedSearch', () => {
     await settle();
     await type('entropy');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('the run was stopped');
+    expect(document.body.textContent).toContain('the run was stopped');
 
     await type('osmosis');
-    expect(container.textContent).not.toContain('the run was stopped');
+    expect(document.body.textContent).not.toContain('the run was stopped');
   });
 
   it('shows a loading state, inside the dialog, before the corpus has resolved (fix round 3, I5)', () => {
     render();
     // Deliberately no `await settle()`: the render before loadSearchCorpus() resolves.
     expect(dialog()).not.toBeNull();
-    expect(container.textContent).toContain('Loading');
+    expect(document.body.textContent).toContain('Loading');
   });
 
   it('does not search below MIN_QUERY_LENGTH, even in the UI (fix round 3, I4)', async () => {
@@ -505,7 +549,7 @@ describe('AdvancedSearch', () => {
     render();
     await settle();
     await type('a');
-    expect(container.textContent).not.toContain('Anything');
+    expect(document.body.textContent).not.toContain('Anything');
   });
 
   it('debounces Find: a hit is not yet shown immediately after typing, only once the debounce elapses (fix round 3, I4)', async () => {
@@ -513,9 +557,9 @@ describe('AdvancedSearch', () => {
     render();
     await settle();
     await setInput(queryInput(), 'thermo'); // flushes microtasks, not the 150ms timer
-    expect(container.textContent).not.toContain('Thermodynamics');
+    expect(document.body.textContent).not.toContain('Thermodynamics');
     await waitForDebounce();
-    expect(container.textContent).toContain('Thermodynamics');
+    expect(document.body.textContent).toContain('Thermodynamics');
   });
 
   // Forces the debounced query to be non-empty but stale when the query
@@ -527,15 +571,15 @@ describe('AdvancedSearch', () => {
     render();
     await settle();
     await type('thermo');
-    expect(container.textContent).toContain('Thermo Lecture');
+    expect(document.body.textContent).toContain('Thermo Lecture');
 
     await setInput(queryInput(), 'wave');
-    expect(container.textContent).toContain('Thermo Lecture');
-    expect(container.textContent).not.toContain('Wave Lecture');
+    expect(document.body.textContent).toContain('Thermo Lecture');
+    expect(document.body.textContent).not.toContain('Wave Lecture');
 
     await waitForDebounce();
-    expect(container.textContent).toContain('Wave Lecture');
-    expect(container.textContent).not.toContain('Thermo Lecture');
+    expect(document.body.textContent).toContain('Wave Lecture');
+    expect(document.body.textContent).not.toContain('Thermo Lecture');
   });
 
   it('caps rendered Find hits and states the true total (fix round 3, I4)', async () => {
@@ -545,8 +589,8 @@ describe('AdvancedSearch', () => {
     render();
     await settle();
     await type('match');
-    expect(container.querySelectorAll('li').length).toBeLessThanOrEqual(51); // 50 hits + the "showing" line
-    expect(container.textContent).toContain('Showing first 50 of 60 matches.');
+    expect(document.body.querySelectorAll('li').length).toBeLessThanOrEqual(51); // 50 hits + the "showing" line
+    expect(document.body.textContent).toContain('Showing first 50 of 60 matches.');
   });
 
   it('aborts an in-flight smart search when the overlay unmounts, rather than letting it keep making calls (fix round 3, M2)', async () => {
@@ -581,14 +625,60 @@ describe('AdvancedSearch', () => {
     render({ regexRunner: inThreadRunner() });
     await settle();
     await type('reconstr\\w+');
-    expect(container.textContent).not.toContain('Reconstruction era');
-    expect(container.textContent).toContain('No matches');
+    expect(document.body.textContent).not.toContain('Reconstruction era');
+    expect(document.body.textContent).toContain('No matches');
 
     await click(byLabel('Regex'));
     await settle();
     expect(search.getState().regex).toBe(true);
-    expect(container.textContent).toContain('Reconstruction era');
-    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(document.body.textContent).toContain('Reconstruction era');
+    expect(document.body.querySelector('[role="alert"]')).toBeNull();
+    // Highlighted from the runner's match range, not by re-running the pattern.
+    expect(document.body.querySelector('mark.bg-search-highlight')?.textContent).toBe('Reconstruction');
+  });
+
+  it('turning regex off drops its hits, so turning it back on shows none of them while the new run is pending', async () => {
+    await seedPageText('Lecture', 'The Reconstruction era followed.');
+    const { runner, calls } = deferredRunner();
+    search.setRegex(true);
+    render({ regexRunner: runner });
+    await settle();
+    await type('reconstr\\w+');
+    await act(async () => {
+      calls[0].resolve({ ok: true, matches: [null, { index: 4, length: 14 }] });
+    });
+    await settle();
+    expect(document.body.textContent).toContain('Reconstruction era');
+
+    await click(byLabel('Regex'));
+    expect(document.body.textContent).not.toContain('Reconstruction era');
+    await click(byLabel('Regex'));
+    expect(calls).toHaveLength(2);
+    expect(document.body.textContent).toContain('Searching');
+    expect(document.body.textContent).not.toContain('Reconstruction era');
+  });
+
+  it('Clear empties the query and drops the regex results', async () => {
+    await seedPageText('Lecture', 'The Reconstruction era followed.');
+    const { runner, calls } = deferredRunner();
+    search.setRegex(true);
+    render({ regexRunner: runner });
+    await settle();
+    await type('reconstr\\w+');
+    await act(async () => {
+      calls[0].resolve({ ok: true, matches: [null, { index: 4, length: 14 }] });
+    });
+    await settle();
+    expect(document.body.textContent).toContain('Reconstruction era');
+
+    await click(buttonByText('Clear'));
+    await waitForDebounce();
+    expect(queryInput().value).toBe('');
+    await click(byLabel('Regex'));
+    await type('other');
+    expect(calls).toHaveLength(2);
+    expect(document.body.textContent).toContain('Searching');
+    expect(document.body.textContent).not.toContain('Reconstruction era');
   });
 
   it('an invalid regex shows an inline error and keeps the previous results', async () => {
@@ -597,11 +687,11 @@ describe('AdvancedSearch', () => {
     render({ regexRunner: inThreadRunner() });
     await settle();
     await type('reconstr\\w+');
-    expect(container.textContent).toContain('Reconstruction era');
+    expect(document.body.textContent).toContain('Reconstruction era');
 
     await type('reconstr[');
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Invalid pattern');
-    expect(container.textContent).toContain('Reconstruction era');
+    expect(document.body.querySelector('[role="alert"]')?.textContent).toContain('Invalid pattern');
+    expect(document.body.textContent).toContain('Reconstruction era');
   });
 
   it('regex never runs on the main thread: Find sends the filtered texts to the runner and shows a pending state', async () => {
@@ -614,19 +704,19 @@ describe('AdvancedSearch', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].pattern).toBe('reconstr\\w+');
     expect(calls[0].texts).toEqual(['Lecture', 'The Reconstruction era followed.']);
-    expect(container.textContent).toContain('Searching');
-    expect(container.textContent).not.toContain('No matches');
+    expect(document.body.textContent).toContain('Searching');
+    expect(document.body.textContent).not.toContain('No matches');
     // Nothing is matched until the runner answers.
-    expect(container.textContent).not.toContain('Reconstruction era');
+    expect(document.body.textContent).not.toContain('Reconstruction era');
 
     // The hits are the runner's: here it reports the title, not the page.
     await act(async () => {
       calls[0].resolve({ ok: true, matches: [{ index: 0, length: 7 }, null] });
     });
     await settle();
-    expect(container.textContent).not.toContain('Searching');
-    expect(container.textContent).toContain('Title — Lecture');
-    expect(container.textContent).not.toContain('Reconstruction era');
+    expect(document.body.textContent).not.toContain('Searching');
+    expect(document.body.textContent).toContain('Title — Lecture');
+    expect(document.body.textContent).not.toContain('Reconstruction era');
   });
 
   it("a pattern that runs too long shows the runner's error and keeps the previous results", async () => {
@@ -646,8 +736,8 @@ describe('AdvancedSearch', () => {
       calls[1].resolve({ ok: false, error: TIMEOUT_ERROR });
     });
     await settle();
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain(TIMEOUT_ERROR);
-    expect(container.textContent).toContain('Reconstruction era');
+    expect(document.body.querySelector('[role="alert"]')?.textContent).toContain(TIMEOUT_ERROR);
+    expect(document.body.textContent).toContain('Reconstruction era');
   });
 
   it('filters narrow Find', async () => {
@@ -656,23 +746,23 @@ describe('AdvancedSearch', () => {
     render();
     await settle();
     await type('topic');
-    expect(container.textContent).toContain('Topic early');
-    expect(container.textContent).toContain('a topic page');
+    expect(document.body.textContent).toContain('Topic early');
+    expect(document.body.textContent).toContain('a topic page');
 
     await setInput(byLabel<HTMLInputElement>('From date'), '2026-02-01');
     await waitForDebounce();
-    expect(container.textContent).not.toContain('Topic early');
-    expect(container.textContent).toContain('a topic page');
+    expect(document.body.textContent).not.toContain('Topic early');
+    expect(document.body.textContent).toContain('a topic page');
 
     await setInput(byLabel<HTMLInputElement>('From date'), '');
     await waitForDebounce();
-    expect(container.textContent).toContain('Topic early');
+    expect(document.body.textContent).toContain('Topic early');
 
     await click(byLabel('Pages'));
     await waitForDebounce();
     expect(search.getState().filters.sources).not.toContain('page-text');
-    expect(container.textContent).toContain('Topic early');
-    expect(container.textContent).not.toContain('a topic page');
+    expect(document.body.textContent).toContain('Topic early');
+    expect(document.body.textContent).not.toContain('a topic page');
   });
 
   it('filters and regex do not reach smart search', async () => {
@@ -707,7 +797,7 @@ describe('AdvancedSearch', () => {
     await settle();
     await type('entropy');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('about entropy');
+    expect(document.body.textContent).toContain('about entropy');
     const callsBefore = gen.calls.length;
 
     await click(buttonByText('Close'));
@@ -716,9 +806,9 @@ describe('AdvancedSearch', () => {
     await act(async () => search.openAdvanced());
     await settle();
     expect(queryInput().value).toBe('entropy');
-    expect(container.textContent).toContain('Entropy Lecture');
+    expect(document.body.textContent).toContain('Entropy Lecture');
     expect(findButtonByText('Open')).toBeDefined();
-    expect(container.textContent).toContain('about entropy');
+    expect(document.body.textContent).toContain('about entropy');
     expect(gen.calls.length).toBe(callsBefore);
   });
 
@@ -763,8 +853,8 @@ describe('the partial-transcript caveat', () => {
     render();
     await settle();
     await type('mitochondria');
-    expect(container.textContent).toContain('mitochondria are the powerhouse');
-    expect(container.textContent).toContain('not fully transcribed');
+    expect(document.body.textContent).toContain('mitochondria are the powerhouse');
+    expect(document.body.textContent).toContain('not fully transcribed');
   });
 
   it('warns alongside smart-search results too', async () => {
@@ -775,8 +865,8 @@ describe('the partial-transcript caveat', () => {
     await settle();
     await type('mitochondria');
     await click(buttonByText('Smart search'));
-    expect(container.textContent).toContain('about cells');
-    expect(container.textContent).toContain('not fully transcribed');
+    expect(document.body.textContent).toContain('about cells');
+    expect(document.body.textContent).toContain('not fully transcribed');
   });
 
   it('says nothing when every recording is fully transcribed', async () => {
@@ -797,14 +887,14 @@ describe('the partial-transcript caveat', () => {
     render();
     await settle();
     await type('mitochondria');
-    expect(container.textContent).toContain('mitochondria are the powerhouse');
-    expect(container.textContent).not.toContain('not fully transcribed');
+    expect(document.body.textContent).toContain('mitochondria are the powerhouse');
+    expect(document.body.textContent).not.toContain('not fully transcribed');
   });
 
   it('says nothing before a query is typed', async () => {
     await seedPartialRecording('Lecture', 'mitochondria are the powerhouse');
     render();
     await settle();
-    expect(container.textContent).not.toContain('not fully transcribed');
+    expect(document.body.textContent).not.toContain('not fully transcribed');
   });
 });

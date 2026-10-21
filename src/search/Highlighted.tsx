@@ -27,3 +27,23 @@ export function Highlighted(props: { text: string; query: string }) {
     </>
   );
 }
+
+/**
+ * The snippet with one known range highlighted: a regex hit's match, located
+ * off the main thread.
+ */
+export function HighlightedRange(props: {
+  text: string;
+  range: { start: number; length: number } | undefined;
+}) {
+  const { text, range } = props;
+  if (range === undefined || range.length <= 0) return <>{text}</>;
+  const end = range.start + range.length;
+  return (
+    <>
+      {text.slice(0, range.start)}
+      <mark className="bg-search-highlight text-inherit">{text.slice(range.start, end)}</mark>
+      {text.slice(end)}
+    </>
+  );
+}

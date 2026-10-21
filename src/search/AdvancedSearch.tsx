@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { formatClock } from '@/audio/format';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { HOVER_AFFORDANCE } from '@/components/ui/hover';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -9,7 +10,7 @@ import { cn } from '@/lib/utils';
 import type { SearchCorpus } from '@/search/corpus';
 import { collectFindCandidates, findInCorpus, hitsFromMatches } from '@/search/find';
 import type { FindCandidate, FindHit, FindHitSource } from '@/search/find';
-import { Highlighted } from '@/search/Highlighted';
+import { Highlighted, HighlightedRange } from '@/search/Highlighted';
 import { SMART_SEARCH_BANDS } from '@/search/prompts';
 import { createRegexRunner, SUPERSEDED_ERROR } from '@/search/regexRunner';
 import type { RegexRunner } from '@/search/regexRunner';
@@ -103,8 +104,9 @@ interface RegexFind {
  * Regex Find, evaluated by the regex runner (a Worker with a time budget),
  * never on the main thread. The candidates are already narrowed by the
  * filters. The last successful hits stay shown while a newer run is pending
- * and when it fails; a superseded run is ignored. A runner created here is
- * disposed on unmount.
+ * and when it fails; a superseded run is ignored. Going inactive (regex off,
+ * or the query cleared) drops them. A runner created here is disposed on
+ * unmount.
  */
 function useRegexFind(
   candidates: readonly FindCandidate[] | null,
@@ -119,6 +121,12 @@ function useRegexFind(
     error: string | null;
   } | null>(null);
   const ownRef = useRef<RegexRunner | null>(null);
+
+  // Adjusting state while rendering, React's pattern for a reset on an input change.
+  if (!active && (hits.length > 0 || settled !== null)) {
+    setHits([]);
+    setSettled(null);
+  }
 
   useEffect(
     () => () => {
@@ -157,19 +165,63 @@ function useRegexFind(
   return { hits, pending: active && !fresh, error: fresh ? settled.error : null };
 }
 
+/** Radix's centred-dialog classes, overridden (via tailwind-merge) to cover the viewport. */
+const FULL_SCREEN = cn(
+  'fixed inset-0 z-50 flex h-full w-full max-w-none sm:max-w-none translate-x-0 translate-y-0',
+  'flex-col gap-0 rounded-none bg-background p-0 text-foreground',
+);
+
 /**
- * The full-screen advanced search (K39-K44, K46, plus regex and filters).
- * Rendered only while `advancedOpen`; everything worth keeping (query,
- * regex, filters, the last smart result) lives in the search store, so
- * closing and reopening shows the same search without another model call.
+ * The full-screen advanced search (K39-K44, K46, plus regex and filters), on
+ * the Radix Dialog: it traps focus, closes on Escape from anywhere, hides the
+ * app behind it from assistive tech, and returns focus to the opener. Its body
+ * mounts only while `advancedOpen`; everything worth keeping (query, regex,
+ * filters, the last smart result) lives in the search store, so closing and
+ * reopening shows the same search without another model call.
  */
 export function AdvancedSearch(props: AdvancedSearchProps = {}) {
-  const [search] = useSearch();
-  if (!search.advancedOpen) return null;
-  return <AdvancedSearchOverlay {...props} />;
+  const [search, store] = useSearch();
+  // Radix's modal dialog returns focus to its Trigger, and this one has none
+  // (it opens from the store), so the opener is remembered here instead.
+  const openerRef = useRef<HTMLElement | null>(null);
+  return (
+    <Dialog
+      open={search.advancedOpen}
+      onOpenChange={(open) => {
+        if (!open) store.closeAdvanced();
+      }}
+    >
+      <DialogContent
+        showCloseButton={false}
+        aria-modal="true"
+        aria-label="Advanced search"
+        aria-describedby={undefined}
+        className={FULL_SCREEN}
+        onOpenAutoFocus={(event) => {
+          // The query input when it is already there; otherwise the dialog
+          // itself (the input autofocuses once the corpus has loaded).
+          event.preventDefault();
+          const active = document.activeElement;
+          openerRef.current = active instanceof HTMLElement ? active : null;
+          const content = event.currentTarget as HTMLElement;
+          (content.querySelector<HTMLElement>(QUERY_INPUT_SELECTOR) ?? content).focus();
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const opener = openerRef.current;
+          openerRef.current = null;
+          if (opener?.isConnected) opener.focus();
+        }}
+      >
+        <AdvancedSearchBody {...props} />
+      </DialogContent>
+    </Dialog>
+  );
 }
 
-function AdvancedSearchOverlay({ smartSearchDeps, regexRunner }: AdvancedSearchProps) {
+const QUERY_INPUT_SELECTOR = 'input[aria-label="Search query"]';
+
+function AdvancedSearchBody({ smartSearchDeps, regexRunner }: AdvancedSearchProps) {
   const [search, store] = useSearch();
   const [, sessions] = useSessionsUi();
   const corpus = useSearchCorpus(true);
@@ -254,17 +306,9 @@ function AdvancedSearchOverlay({ smartSearchDeps, regexRunner }: AdvancedSearchP
   }
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Advanced search"
-      className="fixed inset-0 z-50 flex flex-col bg-background text-foreground"
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') close();
-      }}
-    >
+    <>
       <header className="flex items-center gap-2 bg-surface px-4 py-2">
-        <h2 className="text-sm font-semibold text-heading">Advanced search</h2>
+        <DialogTitle className="text-sm font-semibold text-heading">Advanced search</DialogTitle>
         <div className="ml-auto flex items-center gap-2">
           <Button
             size="sm"
@@ -346,9 +390,9 @@ function AdvancedSearchOverlay({ smartSearchDeps, regexRunner }: AdvancedSearchP
                       Showing first {FIND_RESULTS_CAP} of {hits.length} matches.
                     </li>
                   )}
-                  {visibleHits.map((hit, i) => (
+                  {visibleHits.map((hit) => (
                     <FindHitRow
-                      key={i}
+                      key={hitKey(hit)}
                       hit={hit}
                       highlight={regex ? null : debouncedQuery}
                       onOpen={openFind}
@@ -367,13 +411,18 @@ function AdvancedSearchOverlay({ smartSearchDeps, regexRunner }: AdvancedSearchP
           </div>
         )}
       </div>
-    </div>
+    </>
   );
+}
+
+/** Stable across re-runs: what the hit points at, not its position in the list. */
+function hitKey(hit: FindHit): string {
+  return `${hit.source}-${hit.noteId}-${hit.pageIndex}-${hit.recordingId}-${hit.startMs}`;
 }
 
 function FindHitRow(props: {
   hit: FindHit;
-  /** The plain query to highlight; `null` in regex mode (no re-matching on the main thread). */
+  /** The plain query to highlight; `null` in regex mode, which uses the hit's own match range. */
   highlight: string | null;
   onOpen(hit: FindHit): void;
 }) {
@@ -398,7 +447,11 @@ function FindHitRow(props: {
           </span>
         )}
         <p className="text-muted-foreground">
-          {highlight === null ? hit.snippet : <Highlighted text={hit.snippet} query={highlight} />}
+          {highlight === null ? (
+            <HighlightedRange text={hit.snippet} range={hit.highlight} />
+          ) : (
+            <Highlighted text={hit.snippet} query={highlight} />
+          )}
         </p>
       </div>
       <Button size="sm" variant="ghost" className="text-link" onClick={() => onOpen(hit)}>
@@ -517,7 +570,7 @@ function SmartResults(props: {
 
   return (
     <section aria-label="Smart results" className="space-y-3 bg-surface p-3">
-      {smart.query !== currentQuery && (
+      {smart.query.trim() !== currentQuery.trim() && (
         <p className="text-xs text-muted-foreground">Smart results for &quot;{smart.query}&quot;</p>
       )}
       {screenedByFallback > 0 && (

@@ -1,5 +1,5 @@
 import { Search } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 
 import { Input } from '@/components/ui/input';
@@ -31,11 +31,23 @@ export function HeaderSearch() {
     index: -1,
   });
   const inputRef = useRef<HTMLInputElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  // Set when advanced search opens from here: the box collapses and focus
+  // lands on the Search button, which the advanced search then returns to.
+  const focusToggleRef = useRef(false);
   const corpus = useSearchCorpus(expanded);
   const quick = search.quickQuery;
 
   useEffect(() => {
     if (expanded) inputRef.current?.focus();
+  }, [expanded]);
+
+  // A layout effect, so focus is on the button before the advanced search's
+  // dialog (a passive effect in the same commit) records where focus was.
+  useLayoutEffect(() => {
+    if (expanded || !focusToggleRef.current) return;
+    focusToggleRef.current = false;
+    toggleRef.current?.focus();
   }, [expanded]);
 
   // The quick box ignores the advanced regex/filters: plain text, no options.
@@ -62,9 +74,9 @@ export function HeaderSearch() {
     setHighlighted(-1);
   };
   const openAdvanced = (): void => {
+    focusToggleRef.current = true;
+    collapse();
     searchStore.openAdvanced(quick);
-    setDropdownOpen(false);
-    setHighlighted(-1);
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>): void => {
@@ -88,6 +100,7 @@ export function HeaderSearch() {
   if (!expanded) {
     return (
       <button
+        ref={toggleRef}
         type="button"
         aria-label="Search"
         className={`p-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring ${HOVER_AFFORDANCE}`}

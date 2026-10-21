@@ -28,6 +28,8 @@ export interface FindHit {
   recordingTitle?: string;
   startMs?: number;
   snippet: string;
+  /** Where the match sits within `snippet`, when it is visible there. */
+  highlight?: { start: number; length: number };
 }
 
 /**
@@ -48,11 +50,33 @@ export function snippetAround(text: string, query: string, radius = 60): string 
 
 /** Like `snippetAround`, but for a match already located by index and length. */
 export function snippetAt(text: string, index: number, length: number, radius = 60): string {
+  return snippetWithMatch(text, index, length, radius).snippet;
+}
+
+/**
+ * `snippetAt`, plus where the match sits within the snippet (after the
+ * leading ellipsis and trimming; clamped to the visible text, and absent when
+ * none of it is visible). Lets a regex hit be highlighted without re-running
+ * the pattern.
+ */
+export function snippetWithMatch(
+  text: string,
+  index: number,
+  length: number,
+  radius = 60,
+): { snippet: string; highlight?: { start: number; length: number } } {
   const start = Math.max(0, index - radius);
   const end = Math.min(text.length, index + length + radius);
   const prefix = start > 0 ? '…' : '';
   const suffix = end < text.length ? '…' : '';
-  return `${prefix}${text.slice(start, end).trim()}${suffix}`;
+  const window = text.slice(start, end);
+  const body = window.trim();
+  const snippet = `${prefix}${body}${suffix}`;
+  const lead = window.length - window.trimStart().length;
+  const from = Math.max(index - start - lead, 0);
+  const to = Math.min(index + length - start - lead, body.length);
+  if (to <= from) return { snippet };
+  return { snippet, highlight: { start: prefix.length + from, length: to - from } };
 }
 
 export interface FindOptions {
@@ -172,7 +196,7 @@ export function hitsFromMatches(
   candidates.forEach((candidate, i) => {
     const m = matches[i];
     if (m === null || m === undefined) return;
-    hits.push({ ...candidate.hit, snippet: snippetAt(candidate.text, m.index, m.length) });
+    hits.push({ ...candidate.hit, ...snippetWithMatch(candidate.text, m.index, m.length) });
   });
   return hits;
 }

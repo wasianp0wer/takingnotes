@@ -476,6 +476,24 @@ describe('collectFindCandidates + hitsFromMatches', () => {
     expect(kept.map((c) => c.hit.noteId ?? c.hit.recordingId)).toEqual(['a', 'a', 'a', 'r1']);
   });
 
+  it('each hit carries its match range within the snippet, after the ellipsis and trimming', () => {
+    const text = `${'filler '.repeat(20)}  The Reconstruction era`;
+    const index = text.indexOf('Reconstruction');
+    const candidates = [{ text, hit: { source: 'note-title' as const, noteId: 'n', noteTitle: 't' } }];
+    const [hit] = hitsFromMatches(candidates, [{ index, length: 14 }]);
+    expect(hit.snippet.startsWith('…')).toBe(true);
+    const { start, length } = hit.highlight!;
+    expect(hit.snippet.slice(start, start + length)).toBe('Reconstruction');
+
+    // A match that spans trimmed whitespace is clamped to the visible text.
+    const [edge] = hitsFromMatches([{ ...candidates[0], text: '   abc' }], [{ index: 0, length: 6 }]);
+    expect(edge.snippet).toBe('abc');
+    expect(edge.highlight).toEqual({ start: 0, length: 3 });
+    // Trimmed leading whitespace shifts the range left.
+    const [shifted] = hitsFromMatches([{ ...candidates[0], text: '   abc' }], [{ index: 4, length: 2 }]);
+    expect(shifted.highlight).toEqual({ start: 1, length: 2 });
+  });
+
   it('a null match is no hit', () => {
     const candidates = collectFindCandidates(corpus);
     expect(hitsFromMatches(candidates, candidates.map(() => null))).toEqual([]);
