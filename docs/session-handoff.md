@@ -37,7 +37,7 @@ classes. Task 18 restyled Triage to match and swept the remaining
   notes half in Transcription mode (the transcript scrolls above it; the gap
   strip is capped at 40% of the half and scrolls on its own); a border separates
   the session sidebar, and each half is framed by a border. Transcribed
-  handwriting sits in its own bordered block, and every built-in theme sets
+  handwriting sits in its own bordered block of a set size that scrolls inside itself, and every built-in theme sets
   transcript text in a serif stack (`'Iowan Old Style', 'Palatino Linotype',
   Palatino, Georgia, ui-serif, serif`, all system fonts, nothing downloaded) so it
   reads as content. That font also applies to typed pages and audio transcript
