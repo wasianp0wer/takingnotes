@@ -1,93 +1,288 @@
 # Session handoff
 
-## 2026-10-20: Sessions UI, search and themes (branch `sessions-ui`)
+## 2026-10-19/20 session: Sessions UI, search and themes (branch `sessions-ui`)
 
-Built from local `phase3` HEAD on `sessions-ui` (not merged; `phase3` and `main`
-are unchanged). Spec: `docs/superpowers/specs/2026-10-19-sessions-ui-and-themes-design.md`;
-design reference: `docs/architecture.md` section 9.
+Paste or reference this at the start of the next session. It is the summary of
+record for this work: what is where, how it was run, what was built, what was
+decided on the owner's behalf, and what is still open.
 
-**What was built.** A two-tab shell (Sessions, Triage) that keeps both mounted.
-Sessions is a sidebar of sessions (plus an Uncategorized group) with a text and
-regex filter, beside a split handwriting/transcription view and an audio half
-with seek-to-segment. A header quick search (plain text) and a full-screen
-advanced search (regex, date/tag/source filters, smart search) whose state
-survives closing. A theme system: five built-ins (Light, Dark, Midnight Blue,
-Sakura, Rainbow), a picker with import/export/delete in Settings, and an in-app
-builder with live preview. A shared visual language: square corners, background
-tints instead of resting borders, hover-only affordances, element-kind colour
-classes. Task 18 restyled Triage to match and swept the remaining
-`rounded-md|lg|xl` and resting borders.
+### Where the work is
 
-**Tests.** `npm test`: 1889 tests in 147 files (after the final-review fixes and the owner's 2026-10-20 follow-ups), against the 1614 / 119 baseline.
-`npx tsc -b` clean, `npm run lint` 0 errors, `npm run build` succeeds.
+| Branch | Contents |
+|---|---|
+| `sessions-ui` | **This session's work**: 42 commits on top of `phase3` `a04336a`, HEAD `c17b836`. **Not merged.** |
+| `phase3` | Unchanged since the session began, apart from the design doc commits `bd4d4a0` and `a04336a` made before branching |
+| `main` | Unchanged |
 
-**Decisions taken on the owner's behalf.**
-- Regex safety is two layers: a static guard (fast feedback) plus a Worker runner
-  with a 1000 ms budget; no regex runs on the main thread in production. Cost:
-  regex filtering/Find is asynchronous, with a structured-clone cost per query.
-  The static guard rejects only nested/repeated quantified groups, over-long
-  patterns and bad syntax. There is no cap on the number of `*`/`+` quantifiers
-  (an earlier cap of two refused `\w+\s+\w+`, `\d+:\d+:\d+`, `.*foo.*bar.*`);
-  the Worker's budget is the protection against slow patterns.
-- The notes half defaults to Transcription, and picking a session opens it on
-  its transcript (owner follow-up). Starting capture (Start session, New note,
-  Resume, or the pen starting a note) still switches to Handwriting, so the live
-  page shows ink rather than an empty transcript.
-- Owner follow-ups on 2026-10-20: gap analysis is pinned to the bottom of the
-  notes half in Transcription mode (the transcript scrolls above it; the gap
-  strip is capped at 40% of the half and scrolls on its own); a border separates
-  the session sidebar, and each half is framed by a border. Transcribed
-  handwriting sits in its own bordered block of a set size that scrolls inside itself, and every built-in theme sets
-  transcript text in a serif stack (`'Iowan Old Style', 'Palatino Linotype',
-  Palatino, Georgia, ui-serif, serif`, all system fonts, nothing downloaded) so it
-  reads as content. That font also applies to typed pages and audio transcript
-  segments, since the theme's transcript font covers all three.
-- Transcripts render as Markdown with LaTeX maths (owner, 2026-10-20;
-  supersedes F1-A4's plain text). Gemma writes `$…$` maths such as
-  `$\rightarrow$`. `src/notes/TranscriptMarkdown.tsx` uses react-markdown with
-  remark-gfm, remark-math, remark-breaks (a page's line breaks are kept) and
-  rehype-katex, configured not to throw on bad LaTeX. Raw HTML is never rendered.
-  The renderer (~440 kB) is lazy-loaded, so startup is unchanged and the text
-  shows plain for a moment. Only the display changed: the stored transcript, and
-  so search and gap analysis, still read the raw text. Note that `$$…$$` on one
-  line typesets inline; it is displayed as a block only on its own lines. The
-  Gemma prompt was not changed.
-- The sidebar's regex filter is stale-while-revalidate: while the same patterns
-  re-run against a rebuilt catalog (every page turn during live capture), the
-  last settled matches keep filtering, so the list does not flicker.
-- A theme sets `color-scheme` from its base, so native controls (scrollbars,
-  date pickers) go dark with a dark theme; the theme's transcript font applies
-  to page transcripts, the typed-page editor and recording segments.
-- `useThemes()` outside a provider returns Light with no-op setters, so existing
-  tests stay unwrapped (`main.tsx` wraps the real app).
-- The Switch component's keyboard coverage is "it is a native button"; happy-dom
-  cannot synthesise Space/Enter.
-- The theme builder gained a Base (light/dark) select so custom dark themes get
-  the `.dark` class.
-- Intermediate commits had the search UI unreachable between its removal and
-  rewiring; accepted on a feature branch.
-- Triage keeps its layout; only its styling changed. Commit trailers name the
-  model that wrote each commit.
+Verified at `c17b836`: **1889 tests in 147 files** (baseline 1614 / 119),
+`npx tsc -b` clean, `npm run lint` 0 errors (5 warnings: 4 in
+`src/utils/huionTransport.ts` and 1 `set-state-in-effect` in
+`src/triage/useTriageData.ts`, both pre-existing and untouched), and
+`npm run build` succeeds with no chunk-size warning.
 
-**Owner checks (need a human or the real pad).**
-1. Visual check of all five themes against mockup v3.
-2. Rainbow: confirm the per-element colours read well.
-3. Ink visibility on the dark themes on the real pad (on-screen ink uses the
-   theme `ink` token; the OCR raster stays white/black).
-4. Triage is now always mounted, so its data refreshes on `useTriageData`'s
-   60 s interval and on window focus rather than on tab entry; confirm that is
-   acceptable.
-5. Recording rename and delete differ from the spec's "(call)" of a small menu
-   by the recording arrows: rename is click-the-title (inline edit) and Delete
-   stays inside the recording detail, as a button beside the title. Confirm or
-   ask for the menu.
-6. The theme builder's live preview does not reach the page canvas: editing
-   `canvas-bg` or `ink` recolours the rest of the UI, but `InkCanvas` draws
-   with the *active* (saved) theme, so the ink colours show on the canvas only
-   after saving. Left as is: `preview()` writes CSS variables only, and making
-   the canvas follow it would mean putting the previewed theme into the theme
-   context, re-rendering every consumer on each keystroke in the builder.
+Key docs:
+- spec `docs/superpowers/specs/2026-10-19-sessions-ui-and-themes-design.md`
+- plan `docs/superpowers/plans/2026-10-19-sessions-ui-and-themes.md` (18 tasks)
+- contract `docs/architecture.md` §9; earlier sections it replaces carry a "superseded by §9" note
+- the approved mockup, which is local and untracked:
+  `.superpowers/brainstorm/84846-1792455913/content/sessions-layout-v3.html`
 
+**Next step is the owner's:** merge `sessions-ui` into `phase3` locally, push and
+open a PR, or keep it. Nothing has ever been pushed (see the `origin/main` trap
+below). A PR from this branch would carry Phases 1–3 as well.
+
+### How the session ran
+
+1. **Interview.** Brainstorming with one question at a time and browser mockups
+   (v1 → v3). The owner set the shape: two big tabs; a sessions sidebar with
+   quick and advanced filters and an Uncategorized group; notes and transcript
+   side by side; a header search with an expandable advanced view and regex;
+   sharp, mostly borderless, hover-only styling; themes as JSON, with a builder in
+   Settings. A reviewer read the design as a builder would and raised three
+   questions. The owner answered two: live capture jumps to the live session, and
+   advanced-search filters narrow Find only. The third (fonts) was a designer's
+   call.
+2. **Plan.** 18 TDD tasks, pre-flight scanned for cross-task conflicts. Two were
+   ruled on before starting (see the rulings below).
+3. **Build.** Subagent-driven: one fresh implementer per task, then a task review,
+   then fix rounds with scoped re-reviews. Opus did the integration tasks (13, 15)
+   and the risky reviews; Sonnet did the rest; Haiku did small re-reviews.
+   Every task passed review, most after one fix round.
+4. **Final whole-branch review** on Opus, then one fix wave of five Important
+   findings plus docs, and a scoped re-review. Clean.
+5. **Owner follow-ups on 2026-10-20**, built directly with TDD in this session
+   (see *Follow-ups* below).
+6. The app was run with Playwright and checked by screenshot in all five
+   themes, in Triage and Settings, and with seeded long and Markdown/LaTeX
+   transcripts.
+
+### What was built
+
+- **Shell.**
+  - Two tabs, Sessions and Triage, centred in the header with Start session
+    beside them. Search, pad status, Record and Settings sit on the right.
+  - Both tabs stay mounted (`forceMount`), so nothing is lost on a tab switch.
+- **Sessions view.**
+  - **Sidebar:**
+    - a quick filter on title and tags, always plain text
+    - an advanced filter: date range, tags any/all, title, text, has recording,
+      has typed page, status, and a Regex switch
+    - Sessions and Uncategorized groups with counts, and a "Live" marker on the
+      note being written
+  - **Header:** inline title and tags, Resume, and the writing-destination banner.
+  - **Notes half:** the Handwriting/Transcription switch, page arrows, New
+    note / End note / Type page, and gap analysis.
+  - **Audio half:** ‹ Recording N of M ›, the player, transcription status above
+    the transcript, clickable timestamps, rename by clicking the title, and Delete.
+  - Selection, page, recording and notes mode persist across tab switches and
+    reloads (`takingnotes.sessionsUi`, versioned). Filters persist across tab
+    switches only.
+  - A stale or unknown saved key falls back quietly: active note, then newest
+    session, then newest uncategorized entry.
+  - Live capture jumps to the live session, even from Triage.
+- **Search.**
+  - **Header quick search:** plain text, with a dropdown of up to 8 hits.
+    Keyboard navigation and full combobox ARIA. It collapses on Escape or blur
+    and reloads the corpus each time it reopens.
+  - **Full-screen advanced search** is built on the Radix Dialog, so focus is
+    trapped, the app behind is hidden from screen readers, Escape works from
+    anywhere and focus returns to the opener.
+    - Filters (date, tags, sources) narrow Find only.
+    - With Regex on, matching runs in a Worker with a 1 s budget.
+    - Smart search is unchanged.
+    - Query and results survive closing (resolves S6-A9).
+  - Opening a hit selects its session and page (in Transcription mode) or seeks
+    the player to an audio segment. Phase 3 had declined the seek.
+- **Themes.**
+  - JSON themes: 41 colour tokens per element kind, plus shape and fonts. They are
+    validated by `parseTheme` and applied as CSS variables; tokens are HSL
+    triplets, so Tailwind's `/alpha` works.
+  - Five built-ins: Light (the new default), Dark, Midnight Blue, Rainbow (one
+    colour per element kind, in the spirit of Hiberbee) and Sakura.
+  - The active theme is mirrored to `localStorage` and painted before React
+    loads, with no Light flash.
+  - Settings has a picker with swatches, plus New / Edit / Duplicate / Delete and
+    Import / Export as `.json`. Imports are capped at 256 KB and their ids are
+    made unique against the built-ins.
+  - A builder with live preview: Cancel restores the previous theme, and it warns
+    on low ink contrast.
+  - A theme sets `color-scheme` from its base, so native controls go dark with a
+    dark theme.
+- **Ink.** The on-screen canvas uses the theme's `canvas-bg` and `ink` colours.
+  The OCR raster (`rasterize.ts`) stays white and black always (`RASTER_INK`),
+  because theming it would change what the model reads.
+- **Visual language.**
+  - Square corners and background tints instead of resting borders.
+  - Outline and fill appear on hover only.
+  - `focus-visible` rings are always present.
+  - Element-kind colour classes: `text-heading`, `text-session-title`,
+    `text-tag`, `text-timestamp`, `text-date`, `text-link`,
+    `bg-search-highlight`.
+  - A guard test fails on any hard-coded colour in `.tsx` or `index.css`.
+  - Triage keeps its layout and is restyled only.
+
+### Follow-ups the owner asked for after the build (2026-10-20)
+
+1. **The notes half defaults to Transcription,** and picking a session opens it
+   on its transcript. Starting capture (Start session, New note, Resume, or the pen
+   starting a note) still switches to Handwriting, because a live page has no
+   transcript yet. *Changing that is a one-line change if the owner wants
+   Transcription there too.*
+2. **Gap analysis is pinned to the bottom of the notes half** in Transcription
+   mode. The transcript scrolls above it, and the strip is capped at 40% of the
+   half and scrolls on its own. (The original design had it above the transcript.)
+3. **Borders**: one separates the session sidebar from the main view, and each
+   half (notes, audio) is framed.
+4. **Transcribed handwriting sits in its own bordered box.** The box has a set
+   size between the page controls and the gaps strip, and scrolls inside itself.
+   The model/prompt line sits outside the box.
+5. **A serif transcript font in every built-in**: `'Iowan Old Style',
+   'Palatino Linotype', Palatino, Georgia, ui-serif, serif`. These are system
+   fonts, so nothing is downloaded. A theme has one transcript font, so typed
+   pages and audio segments use it too.
+6. **Transcripts render as Markdown with LaTeX maths.**
+   - **Why:** Gemma writes `$…$` maths such as `$\rightarrow$`. Our Gemma prompt
+     (`src/transcription/prompts.ts`) asks for Markdown but says nothing about
+     maths. The prompt was not changed.
+   - **How:** `src/notes/TranscriptMarkdown.tsx` uses react-markdown with
+     remark-gfm, remark-math, remark-breaks (which keeps a page's line breaks)
+     and rehype-katex (`throwOnError: false`). Raw HTML is never rendered.
+   - **Loading:** it is lazy-loaded (`LazyTranscriptMarkdown.tsx`, about 440 kB),
+     so the startup bundle is unchanged at 484 kB. The text shows plain for a
+     moment first.
+   - **Scope:** display only. The stored transcript, and so search and gap
+     analysis, read the raw text.
+   - **Limit:** `$$…$$` on one line typesets inline; only on its own lines is it
+     a block.
+   - Supersedes F1-A4 (marked in `docs/features/f1-spec.md`).
+
+### What the review process caught
+
+These are worth knowing: each would have reached the owner, and none was caught
+by the implementing task's own tests.
+
+- **Patterns of a dozen characters or fewer froze the tab.** `.*.*.*.*z` and
+  `(\w+\s?){12}$` got past the first regex guard and hung on ordinary prose.
+  This is why regex runs in a Worker with a budget, not on the main thread.
+- **The early theme paint was undone.** The provider repainted Light on every
+  launch and overwrote the saved mirror before the stored choice loaded.
+- **Typed text could be overwritten.** Flipping Handwriting/Transcription on a
+  typed page remounted its editor from stale text, so the next keystroke would
+  overwrite what was saved.
+- **Quick search loaded its corpus once per session.** New notes never appeared
+  until a reload. It also lacked `aria-activedescendant`.
+- **The advanced-search modal didn't manage focus.** Escape didn't work while the
+  search was loading, Tab reached the hidden app behind it, and focus wasn't
+  restored on close.
+- **The final review found five more:**
+  - a saved Transcription mode hid live ink when capture started
+  - the theme's transcript font was used nowhere
+  - dark themes left native controls light
+  - the regex quantifier cap refused `\w+\s+\w+`
+  - the sidebar regex filter flickered on every page turn during capture
+- **Tests that couldn't fail:**
+  - Switch tests that a hard-coded Switch passed
+  - catalog reload tests that couldn't tell their three triggers apart
+  - a Task 6 guard that was redundant once the effect keyed on the token
+
+  Each was strengthened and mutation-checked.
+
+### Decisions taken on the owner's behalf
+
+Each is listed with what it costs if it's wrong.
+
+- **Regex safety is two layers:** a static guard (instant rejection of nested
+  or repeated quantified groups, over-long patterns and bad syntax) plus a Worker
+  runner with a 1000 ms budget. No regex runs on the main thread in production.
+  - *Cost:* regex filtering and Find are asynchronous, with a structured-clone
+    cost per query.
+  - An interim cap of two `*`/`+` quantifiers was removed after the final review,
+    because it refused ordinary patterns. *Cost:* a pathological pattern now takes
+    1 s and then errors, rather than being refused instantly.
+- **The sidebar regex filter is stale-while-revalidate.** While the same
+  patterns re-run against a rebuilt catalog, the last matches keep filtering.
+- **Theme colours in JSON are `#rrggbb` only.** *Cost:* no `rgb()` or named
+  colours in custom themes.
+- **`useThemes()` outside a provider returns Light with no-op setters,** so
+  existing tests stay unwrapped. `main.tsx` wraps the real app.
+- **The theme builder has a Base (light/dark) select.** A custom dark theme needs
+  it to get the `.dark` class.
+- **The Switch's keyboard coverage is "it is a native button".** happy-dom
+  cannot synthesise Space or Enter.
+- **Commit trailers name the model that wrote each commit** (Sonnet, Opus or
+  Haiku).
+- **Intermediate commits had search unreachable between Task 13 and Task 15.**
+  This is on a feature branch only.
+- **Triage is always mounted, as a consequence of `forceMount`.** It refreshes
+  on `useTriageData`'s 60 s interval and on window focus, not on tab entry.
+
+### Owner checks (need a human or the real pad)
+
+1. Ink visibility on the dark themes, on the real pad. On-screen ink uses the
+   theme's `ink`; the OCR raster stays white and black.
+2. A real Gemma transcription, rendered: maths, headings and lists in the bordered
+   box.
+3. Whether the five palettes and the Rainbow per-element colours read well.
+4. Triage refreshing every 60 s or on window focus, rather than on tab entry.
+5. Recording rename and delete. The spec suggested a small menu by the recording
+   arrows; the build has click-the-title rename, and Delete stays inside the
+   recording detail. Confirm, or ask for the menu.
+6. The theme builder's preview doesn't reach the page canvas. Editing `canvas-bg`
+   or `ink` recolours the rest of the UI, but `InkCanvas` draws with the saved
+   theme until you save. Making the canvas follow the preview would re-render
+   every theme consumer on each keystroke.
+7. `.font-mono` now uses the theme's mono font instead of being forced to the UI
+   font. Check that digit-aligned UI still looks right.
+8. Removed dividers that have no replacement tint: rows in the syllabus
+   `ReviewTable`, and the `TaskList` add-task form. Confirm the separation is
+   enough.
+
+### Known limitations and deferred minors
+
+None of these block a merge; the final review triaged all of them as
+OK-TO-DEFER.
+
+- **Regex:**
+  - A zero-length first match counts as no match, so `x*` on `axxb` reports
+    nothing.
+  - A Worker that fails to load is reused until its 1 s budget expires.
+  - Loading the module Worker under Electron or `file://` is untested.
+- **Search:**
+  - Escape in quick search drops focus to the page body rather than the Search
+    button.
+  - A recording with two segments starting at the same millisecond gives a
+    duplicate React key.
+- **Themes:**
+  - Saving and deleting custom themes rewrite the stored list, so malformed
+    stored entries are dropped permanently.
+  - Two theme saves within one IndexedDB round trip could lose one.
+  - Escape during an in-flight builder save still activates the theme.
+- **Live follow:**
+  - `useLiveFollow` is a passive effect, so a page turn can show the previous
+    page for one frame. `useLayoutEffect` would fix that.
+  - `openRecording` resets the page to 0 even when you're on the same note.
+- **Sidebar:** the checkboxes are native, styled only by `accent-color`.
+- **Tag-mode defaults differ:** the sidebar defaults to AND, advanced search to
+  OR.
+- **Pre-existing:** `setPageText` sends no change signal, so other views of a
+  typed page refresh only on the next reload trigger.
+
+### Environment notes from this session
+
+- **Node 25 shadows happy-dom's `localStorage`** with a global that has no
+  methods. Tests that touch `localStorage` stub a Map-backed Storage. See
+  `src/themes/ThemeProvider.test.tsx`.
+- **The machine is sometimes very heavily loaded** (load average 80). At that
+  level `npm test` shows random timeouts in untouched files, and one run took 51
+  minutes. Check `uptime` and re-run before believing a failure. A quiet run
+  takes about 17 s.
+- **The repo has no Prettier config.** Running Prettier with defaults switches
+  files to double quotes. House style is single quotes, width 100.
+- **To screenshot the app:** start `PORT=5199 HOST=127.0.0.1 npm run dev`, then
+  run `playwright-core` against the cached Chromium in
+  `~/Library/Caches/ms-playwright`. It isn't a project dependency; it was
+  installed in the session scratchpad. Consider `/run-skill-generator` to
+  capture this as a project skill.
 ---
 
 ## Phase 3 complete
