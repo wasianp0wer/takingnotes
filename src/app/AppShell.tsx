@@ -7,6 +7,9 @@ import { SessionControls } from '@/capture/SessionControls';
 import { usePageTurnCapture } from '@/capture/usePageTurnCapture';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useHuionDevice } from '@/device/TabletProvider';
+import { HeaderSearch } from '@/search/HeaderSearch';
+import { SearchProvider } from '@/search/SearchContext';
+import { createSearchStore } from '@/search/searchStore';
 import { SessionsUiProvider } from '@/sessions/SessionsUiContext';
 import { SessionsView } from '@/sessions/SessionsView';
 import { createSessionsUiStore } from '@/sessions/sessionsUiStore';
@@ -53,6 +56,7 @@ export function AppShell() {
   // recording and mode live here, above the tabs, so a tab switch never loses
   // them, and the persisted part survives a reload.
   const [store] = useState(() => createSessionsUiStore(safeLocalStorage()));
+  const [searchStore] = useState(() => createSearchStore());
   const tab = useSyncExternalStore(store.subscribe, () => store.getState().tab);
 
   // Mounted exactly once, here: it owns the controller's capture lifecycle
@@ -64,6 +68,7 @@ export function AppShell() {
 
   return (
     <SessionsUiProvider store={store}>
+      <SearchProvider store={searchStore}>
       <Tabs
         value={tab}
         onValueChange={(value) => store.setTab(value as MainTab)}
@@ -80,8 +85,7 @@ export function AppShell() {
             <SessionControls />
           </div>
           <div className="flex items-center justify-end gap-2">
-            {/* Search slot: the header's quick search lands here. */}
-            <div data-slot="header-search" />
+            <HeaderSearch />
             <DeviceStatus controller={controller} state={state} />
             <RecorderControl />
             <SettingsDialog />
@@ -97,6 +101,7 @@ export function AppShell() {
           <TriageView />
         </TabsContent>
       </Tabs>
+      </SearchProvider>
     </SessionsUiProvider>
   );
 }
