@@ -192,7 +192,7 @@ describe('NotesHalf', () => {
     expect(container.querySelector('canvas[aria-label="Page ink"]')).toBeNull();
   });
 
-  it('Transcription mode shows gap analysis above the transcript', async () => {
+  it('Transcription mode shows gap analysis below the transcript', async () => {
     const { entry, note } = await seedNoteEntry();
     const pages = [await inkPage(note.id, 0)];
     await renderWith({ entry, pages, mode: 'transcription' });
@@ -206,7 +206,7 @@ describe('NotesHalf', () => {
     );
     expect(gap).toBeTruthy();
     expect(transcript).toBeTruthy();
-    expect(gap!.compareDocumentPosition(transcript!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(gap!.compareDocumentPosition(transcript!) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
     expect(container.textContent).toContain('This page has not been transcribed yet.');
     expect(container.querySelector('canvas')).toBeNull();
   });

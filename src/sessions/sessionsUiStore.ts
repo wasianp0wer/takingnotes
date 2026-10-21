@@ -55,7 +55,9 @@ const DEFAULTS: SessionsUiState = {
   selectedKey: null,
   pageIndex: 0,
   recordingId: null,
-  notesMode: 'handwriting',
+  // The transcript is the default view (owner, 2026-10-20); live capture
+  // switches to Handwriting itself, since a live page has no transcript yet.
+  notesMode: 'transcription',
   seek: null,
   sidebarFilter: EMPTY_SIDEBAR_FILTER,
   advancedFilterOpen: false,
@@ -126,7 +128,9 @@ export function createSessionsUiStore(
       };
     },
     setTab: (tab) => update({ tab }),
-    selectEntry: (key) => update({ selectedKey: key, pageIndex: 0, recordingId: null }),
+    // Picking a session opens it on its transcript, whatever mode the last one was left in.
+    selectEntry: (key) =>
+      update({ selectedKey: key, pageIndex: 0, recordingId: null, notesMode: 'transcription' }),
     goToPage: (pageIndex) => update({ pageIndex }),
     selectRecording: (recordingId) => update({ recordingId }),
     setNotesMode: (notesMode) => update({ notesMode }),

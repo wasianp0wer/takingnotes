@@ -110,7 +110,7 @@ export function SessionSidebar({
 }: SessionSidebarProps) {
   const liveKey = activeNoteId === null ? null : noteKey(activeNoteId);
   return (
-    <aside className="bg-surface text-surface-foreground flex h-full w-60 shrink-0 flex-col p-2.5">
+    <aside className="border-r border-border bg-surface text-surface-foreground flex h-full w-60 shrink-0 flex-col p-2.5">
       <input
         type="text"
         aria-label="Filter sessions"

@@ -394,6 +394,8 @@ describe('SessionsView', () => {
     await seedPage(note.id, 0);
     await seedRecording({ title: 'Lecture audio', sessionId: 's1', noteId: note.id });
     await render();
+    // Sessions open on the transcript by default; show the ink for this check.
+    await click(container.querySelector<HTMLElement>('[role="switch"]')!);
 
     const notes = container.querySelector('[data-half="notes"]')!;
     const audio = container.querySelector('[data-half="audio"]')!;
@@ -587,6 +589,7 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
     });
 
     await render();
+    await click(container.querySelector<HTMLElement>('[role="switch"]')!);
 
     expect(selectedEntryKey()).toBe(`note:${note.id}`);
     expect(container.textContent).toContain('Page 1 of 1');

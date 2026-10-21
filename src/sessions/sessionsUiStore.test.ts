@@ -54,7 +54,7 @@ describe('sessionsUiStore', () => {
     expect(s.getState().selectedKey).toBeNull();
     expect(() => s.selectEntry('note:a')).not.toThrow();
     const n = createSessionsUiStore(null);
-    expect(n.getState().notesMode).toBe('handwriting');
+    expect(n.getState().notesMode).toBe('transcription');
     expect(() => n.selectEntry('note:a')).not.toThrow();
   });
 
@@ -109,6 +109,17 @@ describe('sessionsUiStore', () => {
       pageIndex: 3,
       notesMode: 'transcription',
     });
+  });
+
+  it('a fresh store defaults the notes half to Transcription', () => {
+    expect(createSessionsUiStore(memoryStorage()).getState().notesMode).toBe('transcription');
+  });
+
+  it('selecting a session opens it on its transcript', () => {
+    const s = createSessionsUiStore(memoryStorage());
+    s.setNotesMode('handwriting');
+    s.selectEntry('note:b');
+    expect(s.getState().notesMode).toBe('transcription');
   });
 
   it('followActiveNote switches the notes half back to Handwriting so live ink shows', () => {

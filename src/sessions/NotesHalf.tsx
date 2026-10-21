@@ -119,14 +119,6 @@ export function NotesHalf({
         // (typing sends no change signal) and a later keystroke would then
         // overwrite the saved text.
         <div className="flex flex-1 flex-col overflow-auto">
-          {/* Gap analysis sits above the transcript (owner decision). */}
-          {mode === 'transcription' && (
-            <GapPanel
-              key={`gaps-${viewedPage.id}`}
-              noteId={viewedPage.noteId}
-              pageId={viewedPage.id}
-            />
-          )}
           {isTypedPage(viewedPage) ? (
             <TypedPageEditor
               key={viewedPage.id}
@@ -147,6 +139,16 @@ export function NotesHalf({
               page={viewedPage}
               isActivePage={viewedPage.id === state.activePageId}
               onRetry={(pageId) => transcriptionQueue.retry(pageId)}
+            />
+          )}
+          {/* Gap analysis sits at the bottom of the transcription view (owner,
+              2026-10-20). It comes after the editor, so the editor keeps its
+              place in the tree across a mode toggle. */}
+          {mode === 'transcription' && (
+            <GapPanel
+              key={`gaps-${viewedPage.id}`}
+              noteId={viewedPage.noteId}
+              pageId={viewedPage.id}
             />
           )}
         </div>

@@ -291,8 +291,11 @@ describe('AppShell', () => {
     await click(container.querySelector(`aside button[data-entry-key="note:${b.id}"]`)!);
     await click(byLabel('Next page'));
     await click(byLabel('Next recording'));
-    await click(byLabel('Notes view'));
+    // Sessions open on the transcript (owner default); flip to Handwriting so
+    // the reload has a non-default mode to restore.
     expect(byLabel('Notes view').getAttribute('aria-checked')).toBe('true');
+    await click(byLabel('Notes view'));
+    expect(byLabel('Notes view').getAttribute('aria-checked')).toBe('false');
 
     await remountShell();
 
@@ -301,7 +304,7 @@ describe('AppShell', () => {
     expect(container.textContent).toContain('Page 2 of 2');
     expect(container.textContent).toContain('Recording 2 of 2');
     expect(container.textContent).toContain('Second take');
-    expect(byLabel('Notes view').getAttribute('aria-checked')).toBe('true');
+    expect(byLabel('Notes view').getAttribute('aria-checked')).toBe('false');
   });
 
   it('starting capture while on Triage switches to Sessions and selects the live note', async () => {

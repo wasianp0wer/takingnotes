@@ -122,6 +122,12 @@ describe('SessionSidebar list', () => {
     expect(text).toContain('Uncategorized · 2');
   });
 
+  it('is separated from the main view by a border on its right edge', () => {
+    mount();
+    const aside = q<HTMLElement>('aside');
+    expect(aside.className.split(/\s+/)).toEqual(expect.arrayContaining(['border-r', 'border-border']));
+  });
+
   it('renders an empty group heading with 0', () => {
     mount({ outcome: outcomeOf({ sessions: [] }) });
     expect(host.textContent).toContain('Sessions · 0');

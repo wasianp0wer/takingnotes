@@ -102,6 +102,8 @@ A sidebar entry is a **note**. In practice a note and its `SessionRecord` are
 
 ### Left sidebar
 
+A border separates the sidebar from the main view. **(owner, 2026-10-20)**
+
 - **Quick filter box.** Narrows the list as you type, by title or tag, as plain
   substring matching. **(owner)**
 - **"Advanced filter"** expands an inline panel below the quick filter.
@@ -133,10 +135,14 @@ A sidebar entry is a **note**. In practice a note and its `SessionRecord` are
 ### Notes half (left)
 
 - **Handwriting/Transcription switch.** A single toggle switch, not two buttons,
-  centred at the top of the half. **(owner)** It defaults to Handwriting.
+  centred at the top of the half. **(owner)** It defaults to Transcription, and
+  picking a session opens it on its transcript (owner, 2026-10-20; was
+  Handwriting). Live capture still switches to Handwriting, since a live page
+  has no transcript yet.
   - **Handwriting** shows `InkCanvas`, or `TypedPageEditor` for a typed page.
-  - **Transcription** shows **gap analysis** (`GapPanel`, with its button)
-    *above* the page's OCR transcript (`TranscriptPanel`). **(owner)**
+  - **Transcription** shows the page's OCR transcript (`TranscriptPanel`), with
+    **gap analysis** (`GapPanel`, with its button) at the *bottom*. **(owner,
+    2026-10-20; was above the transcript)**
 - **Page navigation** ("‹ Page N of M ›") sits centred just below the switch,
   with the `NoteToolbar` actions (Type page and the rest) nearby.
 - **Blank when there are no pages.** The owner can Resume and type a page.
