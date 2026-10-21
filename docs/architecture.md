@@ -18,6 +18,10 @@ main.tsx
              └─ Triage tab     → TriageView       (F3)
 ```
 
+> **Superseded by §9.** The shell now has two tabs, Sessions and Triage.
+> `NotesView` and `RecordingsView` are gone; `SessionsView` (sidebar, notes
+> half, audio half) replaces both. The diagram above is the Phase 0 shape.
+
 - No router, no global store. State lives in IndexedDB plus small
   subscribe/getState objects exposed through React context and read with
   `useSyncExternalStore` (the pattern `TabletProvider` already uses).
@@ -369,7 +373,8 @@ export interface AudioTranscriber {
   `controller.subscribePageTurn` event to `engine.newPage('device-turn')`.
 - `PageTurnControls`: the on-screen "New page" button (`newPage('manual')`)
   plus a transient "Page N" indicator. It is mounted in the NotesView page
-  toolbar.
+  toolbar. *(Superseded by §9: it now sits in `NoteToolbar` inside the
+  Sessions view's notes half, `src/sessions/NotesHalf.tsx`.)*
 
 ## 4. File ownership (for parallel work)
 
@@ -389,6 +394,10 @@ Phase 0 creates a placeholder component for each mount point:
 `src/notes/TranscriptionSettings.tsx`, `src/audio/AudioSettings.tsx`. Each
 feature replaces its own placeholders' bodies and keeps their export names.
 `NotesView` must keep rendering `<PageTurnControls />` in its page toolbar.
+
+> **Superseded by §9.** `NotesView.tsx` and `RecordingsView.tsx` no longer
+> exist. `<PageTurnControls />` is now rendered by `NoteToolbar`, which
+> `NotesHalf` mounts in the Sessions view; that is F4's mount point today.
 
 ## 5. Testing conventions
 
@@ -673,6 +682,10 @@ today's shape and no behaviour change - P3 replaces it with the real flow, and
 | `syllabus.termStart` | number \| null | `null` | P2 |
 
 ### 6.7 File ownership (Phase 2)
+
+> **Superseded by §9** for the mount points below: `NotesView` is gone, and
+> `GapPanel` is mounted by `NotesHalf` (`src/sessions/NotesHalf.tsx`) above the
+> transcript in Transcription mode, still keyed per page.
 
 | Path | Owner |
 |------|-------|
@@ -1043,6 +1056,12 @@ Implemented in `src/capture/engine.ts`. Behavioral rules Wave 2 relies on:
 
 ### 8.4 Wave 2 mount points
 
+> **Superseded by §9.** `NotesView.tsx` and `NoteList.tsx` are gone: the
+> Sessions sidebar (`src/sessions/SessionSidebar.tsx`) replaces the note list,
+> and Resume, the inline title, the tag editor and the writing-destination
+> banner moved into `SessionHeader`. `NoteToolbar` survives in `NotesHalf`. The
+> `NoteList` contract below is historical.
+
 `NotesView` was split in Task 6 into `src/notes/NoteList.tsx` and
 `src/notes/NoteToolbar.tsx`, each exposing slots as `ReactNode` (or
 `ReactNode`-returning) props. **A Wave 2 unit adds to a slot it owns; it does
@@ -1377,8 +1396,11 @@ and writes it as `--<token>` on `<html>`, so Tailwind's `/alpha` modifier works
 (`hsl(var(--heading) / <alpha-value>)`); a few tokens also write the shadcn
 aliases (`surface` also sets `--card` and `--sidebar-background`, `focus-ring`
 sets `--ring`). It also sets `--radius`, `--border-width`, `--font-ui`,
-`--font-mono`, `--font-transcript`, `data-theme-base` and toggles the `.dark`
-class from `base`.
+`--font-mono`, `--font-transcript`, `data-theme-base`, `color-scheme` (so native
+controls follow a dark theme; `index.css` declares `color-scheme: light` and
+`accent-color: hsl(var(--primary))` on `:root` for first paint) and toggles the
+`.dark` class from `base`. `font-transcript` sets transcript text: page
+transcripts, the typed-page editor and recording transcript segments.
 
 Five built-ins live in `src/themes/builtin/*.json` (Light, Dark, Midnight Blue,
 Sakura, Rainbow); all use radius `0px`. Custom themes are stored in the
@@ -1386,8 +1408,9 @@ Sakura, Rainbow); all use radius `0px`. Custom themes are stored in the
 is mirrored to `localStorage` (`takingnotes.activeTheme`) and painted before React
 mounts to avoid a flash. File format: pretty JSON of the theme minus `builtIn`
 (`<id>.theme.json`). `parseTheme` is tolerant: every bad colour, shape or font
-falls back to Light's value and adds a warning; non-objects fail with an error
-naming the problem. Import never overwrites a built-in id (`uniqueThemeId`
+falls back to Light's value and adds a warning; a non-object, a bad `id`
+(1-40 characters of `a-z`, `0-9`, `-`) or a bad `name` (1-60 characters) fails
+with an error naming the problem. Import never overwrites a built-in id (`uniqueThemeId`
 suffixes `-2`, `-3`). Element-kind classes (`text-heading`, `text-session-title`,
 `text-tag`, `text-timestamp`, `text-date`, `text-link`, `bg-search-highlight`) are
 how components pick these colours; `noHardcodedColors.test.ts` bans literal
@@ -1431,5 +1454,7 @@ the list is kept, not emptied.
 `AppShell` renders both `TabsContent` panels with `forceMount` and hides the
 inactive one. Sessions stays mounted so a live capture, audio playback, scroll
 position and the canvas survive a switch to Triage. The consequence is that
-Triage is also always mounted: its clock (`useNow`) ticks every 60 s whether or
-not the tab is visible, so it refreshes on that cadence rather than on tab entry.
+Triage is also always mounted. Its data refresh comes from `useTriageData`: a
+60 s interval plus a refresh on window focus, whether or not the tab is visible,
+rather than a reload on tab entry. (`useNow` separately ticks Triage's clock
+every 60 s for date display; it does not reload data.)

@@ -25,6 +25,19 @@ classes. Task 18 restyled Triage to match and swept the remaining
 - Regex safety is two layers: a static guard (fast feedback) plus a Worker runner
   with a 1000 ms budget; no regex runs on the main thread in production. Cost:
   regex filtering/Find is asynchronous, with a structured-clone cost per query.
+  The static guard rejects only nested/repeated quantified groups, over-long
+  patterns and bad syntax. There is no cap on the number of `*`/`+` quantifiers
+  (an earlier cap of two refused `\w+\s+\w+`, `\d+:\d+:\d+`, `.*foo.*bar.*`);
+  the Worker's budget is the protection against slow patterns.
+- Starting capture (Start session, New note, or the pen starting a note) switches
+  the notes half to Handwriting, so the live page shows ink even if
+  Transcription was the saved mode.
+- The sidebar's regex filter is stale-while-revalidate: while the same patterns
+  re-run against a rebuilt catalog (every page turn during live capture), the
+  last settled matches keep filtering, so the list does not flicker.
+- A theme sets `color-scheme` from its base, so native controls (scrollbars,
+  date pickers) go dark with a dark theme; the theme's transcript font applies
+  to page transcripts, the typed-page editor and recording segments.
 - `useThemes()` outside a provider returns Light with no-op setters, so existing
   tests stay unwrapped (`main.tsx` wraps the real app).
 - The Switch component's keyboard coverage is "it is a native button"; happy-dom
@@ -41,8 +54,19 @@ classes. Task 18 restyled Triage to match and swept the remaining
 2. Rainbow: confirm the per-element colours read well.
 3. Ink visibility on the dark themes on the real pad (on-screen ink uses the
    theme `ink` token; the OCR raster stays white/black).
-4. Triage is now always mounted, so it refreshes every 60 s rather than on tab
-   entry; confirm that is acceptable.
+4. Triage is now always mounted, so its data refreshes on `useTriageData`'s
+   60 s interval and on window focus rather than on tab entry; confirm that is
+   acceptable.
+5. Recording rename and delete differ from the spec's "(call)" of a small menu
+   by the recording arrows: rename is click-the-title (inline edit) and Delete
+   stays inside the recording detail, as a button beside the title. Confirm or
+   ask for the menu.
+6. The theme builder's live preview does not reach the page canvas: editing
+   `canvas-bg` or `ink` recolours the rest of the UI, but `InkCanvas` draws
+   with the *active* (saved) theme, so the ink colours show on the canvas only
+   after saving. Left as is: `preview()` writes CSS variables only, and making
+   the canvas follow it would mean putting the previewed theme into the theme
+   context, re-rendering every consumer on each keystroke in the builder.
 
 ---
 
