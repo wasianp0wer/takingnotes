@@ -52,7 +52,7 @@ function TranscriptSegments({
           >
             {formatClock(segment.startMs)}
           </button>
-          <span>{segment.text}</span>
+          <span className="font-transcript">{segment.text}</span>
         </li>
       ))}
     </ul>
@@ -427,7 +427,7 @@ export function RecordingDetail({
           ) : transcript.segments.length > 0 ? (
             <TranscriptSegments segments={transcript.segments} onSeek={seekTo} />
           ) : (
-            <p className="text-sm">{transcript.text}</p>
+            <p className="font-transcript text-sm">{transcript.text}</p>
           )}
           <p className="text-xs text-muted-foreground">{transcript.model}</p>
         </div>

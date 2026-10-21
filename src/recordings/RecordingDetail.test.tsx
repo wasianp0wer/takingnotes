@@ -292,6 +292,25 @@ describe('RecordingDetail (ported from RecordingsView)', () => {
     expect(audio.currentTime).toBe(65);
   });
 
+  it("sets transcript text in the theme's transcript font", async () => {
+    const segmented = await seedWith('Talk', {
+      text: 'hello',
+      segments: [{ startMs: 0, endMs: 1000, text: 'hello' }],
+    });
+    await show(segmented, liveQueue());
+    const segmentText = [...container.querySelectorAll('li span')].find(
+      (el) => el.textContent === 'hello',
+    );
+    expect(segmentText?.classList.contains('font-transcript')).toBe(true);
+
+    const textOnly = await seedWith('Talk', { text: 'joined text only', segments: [] });
+    await show(textOnly, liveQueue());
+    const para = [...container.querySelectorAll('p')].find(
+      (el) => el.textContent === 'joined text only',
+    );
+    expect(para?.classList.contains('font-transcript')).toBe(true);
+  });
+
   it('shows the partial transcript text while a job is running', async () => {
     const recording = await seedWith('In progress', {
       text: 'the first few minutes',

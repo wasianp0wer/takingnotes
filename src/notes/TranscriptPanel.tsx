@@ -36,7 +36,7 @@ function PreviousTranscript({ transcript }: { transcript: TranscriptRecord }) {
   return (
     <div className="space-y-1 pt-2">
       <p className="text-xs font-medium text-muted-foreground">Previous transcript</p>
-      <div className="whitespace-pre-wrap text-sm text-muted-foreground">
+      <div className="whitespace-pre-wrap font-transcript text-sm text-muted-foreground">
         {transcript.markdown}
       </div>
       <p className="text-xs text-muted-foreground">
@@ -117,7 +117,7 @@ export function TranscriptPanel({ page, isActivePage, onRetry }: TranscriptPanel
 
   return (
     <div className="space-y-2 p-4">
-      <div className="whitespace-pre-wrap text-sm">
+      <div className="whitespace-pre-wrap font-transcript text-sm">
         {transcript.markdown ? transcript.markdown : 'Blank page'}
       </div>
       <p className="text-xs text-muted-foreground">

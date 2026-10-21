@@ -77,6 +77,11 @@ describe('TypedPageEditor', () => {
     expect(textarea().value).toBe('hello');
   });
 
+  it("types in the theme's transcript font", async () => {
+    await mountEditor({ pageId: 'p1', initialText: 'hello' });
+    expect(textarea().classList.contains('font-transcript')).toBe(true);
+  });
+
   it('debounce-saves an edit through setPageText, mirroring it into the transcript', async () => {
     const pageId = await seedTypedPage();
 
