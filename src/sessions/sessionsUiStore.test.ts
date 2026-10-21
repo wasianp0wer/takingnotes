@@ -111,6 +111,19 @@ describe('sessionsUiStore', () => {
     });
   });
 
+  it('followActiveNote switches the notes half back to Handwriting so live ink shows', () => {
+    const store = createSessionsUiStore(null);
+    store.openNote('old', 2, 'transcription');
+    store.setTab('triage');
+    store.followActiveNote('n1', 0);
+    expect(store.getState()).toMatchObject({
+      tab: 'sessions',
+      selectedKey: 'note:n1',
+      pageIndex: 0,
+      notesMode: 'handwriting',
+    });
+  });
+
   it('selectEntry resets page and recording', () => {
     const s = createSessionsUiStore(null);
     s.openRecording('r1', 5, 'n1');

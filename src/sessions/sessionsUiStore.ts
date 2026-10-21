@@ -40,7 +40,10 @@ export interface SessionsUiStore {
   openRecording(recordingId: string, startMs: number | undefined, ownerNoteId: string | null): void;
   /** No-op if a newer token is pending. */
   clearSeek(token: number): void;
-  /** Switches to the Sessions tab. */
+  /**
+   * Switches to the Sessions tab and to Handwriting, so the live page shows
+   * its ink rather than a "will be transcribed" placeholder.
+   */
   followActiveNote(noteId: string, pageIndex: number): void;
   followPage(pageIndex: number): void;
 }
@@ -149,7 +152,13 @@ export function createSessionsUiStore(
       if (state.seek !== null && state.seek.token === token) update({ seek: null });
     },
     followActiveNote: (noteId, pageIndex) =>
-      update({ tab: 'sessions', selectedKey: noteKey(noteId), pageIndex, recordingId: null }),
+      update({
+        tab: 'sessions',
+        selectedKey: noteKey(noteId),
+        pageIndex,
+        recordingId: null,
+        notesMode: 'handwriting',
+      }),
     followPage: (pageIndex) => update({ pageIndex }),
   };
 }

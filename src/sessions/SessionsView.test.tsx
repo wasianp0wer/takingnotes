@@ -445,6 +445,29 @@ describe('SessionsView', () => {
     errors.mockRestore();
   });
 
+  it('a persisted Transcription mode gives way to the live canvas when capture starts', async () => {
+    const storage = memoryStorage();
+    storage.setItem(
+      SESSIONS_UI_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        selectedKey: null,
+        pageIndex: 0,
+        recordingId: null,
+        notesMode: 'transcription',
+      }),
+    );
+    store = createSessionsUiStore(storage);
+    await render();
+    expect(store.getState().notesMode).toBe('transcription');
+
+    await startSession();
+
+    expect(store.getState().notesMode).toBe('handwriting');
+    expect(container.querySelector('[data-half="notes"] canvas')).not.toBeNull();
+    expect(container.textContent).not.toContain(PAGE_TRANSCRIBING_MESSAGE);
+  });
+
   it('openRecording from the store seeks the player', async () => {
     const note = await seedNote({ title: 'Lecture', sessionId: 's1', startedAt: 1_000 });
     await seedNote({ title: 'Newer', startedAt: 2_000 });
@@ -627,17 +650,21 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
   });
 
   it('shows the transcribing message for the active, unfinalized live page', async () => {
-    store.setNotesMode('transcription');
     await render();
     await click(buttonByText('New note'));
+    // Starting a note switches to Handwriting (live follow); switch back.
+    await act(async () => store.setNotesMode('transcription'));
+    await settle();
 
     expect(container.textContent).toContain(PAGE_TRANSCRIBING_MESSAGE);
   });
 
   it('does not show the transcribing message for the active typed page', async () => {
-    store.setNotesMode('transcription');
     await render();
     await click(buttonByText('New note'));
+    // Starting a note switches to Handwriting (live follow); switch back.
+    await act(async () => store.setNotesMode('transcription'));
+    await settle();
     await click(buttonByText('Type page'));
 
     expect(container.textContent).not.toContain(PAGE_TRANSCRIBING_MESSAGE);
