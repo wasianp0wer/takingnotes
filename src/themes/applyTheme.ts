@@ -25,6 +25,8 @@ export function applyTheme(theme: Theme, root: HTMLElement = document.documentEl
   style.setProperty('--font-transcript', theme.fonts.transcript)
   root.dataset.themeBase = theme.base
   root.classList.toggle('dark', theme.base === 'dark')
+  // Native controls (scrollbars, date pickers, checkboxes) follow the base.
+  style.colorScheme = theme.base
   const meta = root.ownerDocument.querySelector('meta[name="theme-color"]')
   if (meta) meta.setAttribute('content', theme.colors.background)
 }

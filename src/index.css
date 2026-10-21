@@ -7,6 +7,8 @@
 /* First-paint defaults: Light's tokens as HSL triplets. applyTheme() overrides them inline. */
 @layer base {
   :root {
+    color-scheme: light;
+    accent-color: hsl(var(--primary));
     --font-ui: 'TASA Orbiter', ui-sans-serif, system-ui, sans-serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
     --font-transcript: 'TASA Orbiter', ui-sans-serif, system-ui, sans-serif;

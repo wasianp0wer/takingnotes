@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { applyTheme, CSS_VAR_ALIASES } from './applyTheme'
 import { BUILT_IN_THEMES, lightTheme } from './builtins'
@@ -43,6 +45,21 @@ describe('applyTheme', () => {
     applyTheme(lightTheme(), el)
     expect(el.dataset.themeBase).toBe('light')
     expect(el.classList.contains('dark')).toBe(false)
+  })
+
+  it("sets color-scheme to the theme's base so native controls follow it", () => {
+    const el = document.createElement('div')
+    applyTheme(dark, el)
+    expect(el.style.colorScheme).toBe('dark')
+    applyTheme(lightTheme(), el)
+    expect(el.style.colorScheme).toBe('light')
+  })
+
+  it('index.css declares a light color-scheme and the primary accent for first paint', () => {
+    const css = readFileSync(resolve(__dirname, '../index.css'), 'utf8')
+    const rootBlock = css.match(/:root\s*\{([^}]*)\}/)?.[1] ?? ''
+    expect(rootBlock).toMatch(/color-scheme:\s*light;/)
+    expect(rootBlock).toMatch(/accent-color:\s*hsl\(var\(--primary\)\);/)
   })
 
   it('updates the theme-color meta when present', () => {
