@@ -118,7 +118,7 @@ export function Scratchpad({ text, loaded, error = null, onChange, onPromote }: 
   return (
     <div className="flex h-full flex-col gap-2">
       <div className="flex items-baseline justify-between gap-2">
-        <h2 className="text-sm font-semibold text-foreground">Scratchpad</h2>
+        <h2 className="text-sm font-semibold text-heading">Scratchpad</h2>
         {error ? (
           <span role="alert" className="text-xs text-destructive">
             {error}
@@ -138,8 +138,8 @@ export function Scratchpad({ text, loaded, error = null, onChange, onPromote }: 
         }}
         onKeyDown={onKeyDown}
         className={cn(
-          'min-h-48 w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-sm shadow-xs outline-none transition-[color,box-shadow]',
-          'placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50',
+          'min-h-48 w-full rounded bg-muted px-3 py-2 font-mono text-sm outline-none',
+          'placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-focus-ring',
           'disabled:cursor-not-allowed disabled:opacity-50',
         )}
       />

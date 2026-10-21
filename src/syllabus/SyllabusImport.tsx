@@ -300,8 +300,8 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
   const hasExisting = useMemo(() => rows !== null && rows.some((r) => r.existing), [rows]);
 
   return (
-    <section aria-label="Syllabus" className="rounded-lg border border-border p-4">
-      <h2 className="text-sm font-medium">Syllabus</h2>
+    <section aria-label="Syllabus" className="bg-surface p-4">
+      <h2 className="text-sm font-medium text-heading">Syllabus</h2>
       <p className="mt-1 text-sm text-muted-foreground">
         Import a syllabus as assignment deadlines. Nothing is added to the calendar until you
         confirm it below.
@@ -351,7 +351,7 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
           value={pasted}
           disabled={busy}
           onChange={(e) => setPasted(e.target.value)}
-          className="mt-1 w-full rounded border border-border bg-background p-2 text-sm"
+          className="mt-1 w-full rounded bg-muted p-2 text-sm"
         />
         <Button className="mt-2" size="sm" variant="outline" disabled={busy} onClick={extractPasted}>
           Extract assignments
@@ -376,7 +376,7 @@ export function SyllabusImport({ deps }: { deps?: Partial<SyllabusImportDeps> } 
 
       {rows !== null && (
         <div className="mt-4">
-          <h3 className="text-sm font-medium">Review before adding</h3>
+          <h3 className="text-sm font-medium text-heading">Review before adding</h3>
           {rows.length === 0 ? (
             <p className="mt-1 text-sm text-muted-foreground">
               No assignments were found in that syllabus.

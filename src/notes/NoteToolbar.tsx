@@ -35,7 +35,7 @@ export function NoteToolbar({
   onGoToPage,
 }: NoteToolbarProps) {
   return (
-    <div className="flex flex-col border-b border-border">
+    <div className="flex flex-col">
       <div className="flex items-center justify-between gap-3 px-4 py-2">
         <div className="ml-auto flex items-center gap-2">
           <Button variant="outline" size="sm" disabled={sessionLocked} onClick={onNewNote}>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { HOVER_AFFORDANCE } from '@/components/ui/hover';
 import { Input } from '@/components/ui/input';
 import { getSettingValue, SETTING_DEFAULTS, setSettingValue } from '@/storage/settingKeys';
 import type { CalendarEventRecord } from '@/storage/types';
@@ -188,7 +189,7 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
   return (
     <section className="flex h-full min-w-0 flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-foreground">{formatMonthTitle(visible.year, visible.month)}</h2>
+        <h2 className="text-sm font-semibold text-heading">{formatMonthTitle(visible.year, visible.month)}</h2>
         <div className="flex items-center gap-1">
           <Button
             type="button"
@@ -242,7 +243,8 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
                 aria-label={`${formatDayLabel(day, now)} (${dateStr})`}
                 onClick={() => openCreate(day)}
                 className={cn(
-                  'flex min-w-0 flex-col items-start gap-0.5 rounded-md border border-transparent p-1 text-left text-xs transition-colors hover:bg-accent sm:aspect-square sm:text-sm',
+                  'flex min-w-0 flex-col items-start gap-0.5 p-1 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-focus-ring sm:aspect-square sm:text-sm',
+                  HOVER_AFFORDANCE,
                   outside && 'text-muted-foreground',
                   isToday && 'ring-2 ring-ring',
                 )}
@@ -383,16 +385,19 @@ function Agenda({
       ) : (
         groups.map(({ day, items }) => (
           <div key={day}>
-            <h3 className="text-xs font-semibold text-muted-foreground">{formatDayLabel(day, now)}</h3>
+            <h3 className="text-xs font-semibold text-heading">{formatDayLabel(day, now)}</h3>
             <ul className="flex flex-col gap-1">
               {items.map((e) => (
                 <li key={e.id}>
                   <button
                     type="button"
                     onClick={() => onOpen(e)}
-                    className="flex w-full items-center gap-2 rounded-md border border-border p-1.5 text-left text-xs hover:bg-accent sm:text-sm"
+                    className={cn(
+                      'flex w-full items-center gap-2 p-1.5 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-focus-ring sm:text-sm',
+                      HOVER_AFFORDANCE,
+                    )}
                   >
-                    <span className="shrink-0 tabular-nums text-muted-foreground">
+                    <span className="shrink-0 tabular-nums text-date">
                       {e.allDay ? 'All day' : formatTime(e.startsAt)}
                     </span>
                     <span className="min-w-0 flex-1 truncate">{e.title}</span>

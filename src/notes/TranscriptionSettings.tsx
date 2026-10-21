@@ -135,7 +135,7 @@ export function TranscriptionSettings(props?: { fetchImpl?: FetchLike }) {
         <div className="flex items-center gap-2">
           <select
             id="ollama-model"
-            className="h-9 w-full min-w-0 rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none"
+            className="h-9 w-full min-w-0 rounded bg-muted px-3 py-2 text-sm outline-none"
             value={model}
             onChange={handleModelChange}
           >

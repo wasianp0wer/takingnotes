@@ -27,7 +27,7 @@ export function ReviewTable({ rows, onChange }: ReviewTableProps) {
       </thead>
       <tbody>
         {rows.map((row) => (
-          <tr key={row.id} className="border-t border-border align-top">
+          <tr key={row.id} className="align-top">
             <td className="p-1">
               <input
                 type="checkbox"

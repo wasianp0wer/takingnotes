@@ -1,4 +1,52 @@
-# Session handoff — Phase 3 complete
+# Session handoff
+
+## 2026-10-20: Sessions UI, search and themes (branch `sessions-ui`)
+
+Built from local `phase3` HEAD on `sessions-ui` (not merged; `phase3` and `main`
+are unchanged). Spec: `docs/superpowers/specs/2026-10-19-sessions-ui-and-themes-design.md`;
+design reference: `docs/architecture.md` section 9.
+
+**What was built.** A two-tab shell (Sessions, Triage) that keeps both mounted.
+Sessions is a sidebar of sessions (plus an Uncategorized group) with a text and
+regex filter, beside a split handwriting/transcription view and an audio half
+with seek-to-segment. A header quick search (plain text) and a full-screen
+advanced search (regex, date/tag/source filters, smart search) whose state
+survives closing. A theme system: five built-ins (Light, Dark, Midnight Blue,
+Sakura, Rainbow), a picker with import/export/delete in Settings, and an in-app
+builder with live preview. A shared visual language: square corners, background
+tints instead of resting borders, hover-only affordances, element-kind colour
+classes. Task 18 restyled Triage to match and swept the remaining
+`rounded-md|lg|xl` and resting borders.
+
+**Tests.** `npm test`: 1857 tests in 145 files, against the 1614 / 119 baseline.
+`npx tsc -b` clean, `npm run lint` 0 errors, `npm run build` succeeds.
+
+**Decisions taken on the owner's behalf.**
+- Regex safety is two layers: a static guard (fast feedback) plus a Worker runner
+  with a 1000 ms budget; no regex runs on the main thread in production. Cost:
+  regex filtering/Find is asynchronous, with a structured-clone cost per query.
+- `useThemes()` outside a provider returns Light with no-op setters, so existing
+  tests stay unwrapped (`main.tsx` wraps the real app).
+- The Switch component's keyboard coverage is "it is a native button"; happy-dom
+  cannot synthesise Space/Enter.
+- The theme builder gained a Base (light/dark) select so custom dark themes get
+  the `.dark` class.
+- Intermediate commits had the search UI unreachable between its removal and
+  rewiring; accepted on a feature branch.
+- Triage keeps its layout; only its styling changed. Commit trailers name the
+  model that wrote each commit.
+
+**Owner checks (need a human or the real pad).**
+1. Visual check of all five themes against mockup v3.
+2. Rainbow: confirm the per-element colours read well.
+3. Ink visibility on the dark themes on the real pad (on-screen ink uses the
+   theme `ink` token; the OCR raster stays white/black).
+4. Triage is now always mounted, so it refreshes every 60 s rather than on tab
+   entry; confirm that is acceptable.
+
+---
+
+## Phase 3 complete
 
 Written 2026-10-10, revised 2026-10-15 and again 2026-10-19. Paste or reference
 this at the start of a new session. It is the summary of record for Phase 3:

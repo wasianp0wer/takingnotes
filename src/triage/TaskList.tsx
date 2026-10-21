@@ -46,7 +46,7 @@ export function TaskList({ tasks, now, onAdd, onPatch, onComplete, onDismiss }: 
 
   return (
     <section className="flex h-full flex-col gap-3">
-      <h2 className="text-sm font-semibold text-foreground">Tasks</h2>
+      <h2 className="text-sm font-semibold text-heading">Tasks</h2>
       {ranked.length === 0 ? (
         <p className="text-sm text-muted-foreground">No open tasks.</p>
       ) : (
@@ -125,17 +125,17 @@ function TaskRow({
   const sourceHint = SOURCE_HINT[task.source];
 
   return (
-    <li data-task-id={task.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border p-2">
+    <li data-task-id={task.id} className="flex flex-wrap items-center gap-2 bg-muted p-2">
       <span
         data-testid="task-score"
         title="Priority score"
-        className={cn('rounded-md bg-secondary px-1.5 text-xs tabular-nums', BAND_TEXT_CLASS[scoreBand(score)])}
+        className={cn('bg-secondary px-1.5 text-xs tabular-nums', BAND_TEXT_CLASS[scoreBand(score)])}
       >
         {score}
       </span>
       <span className="min-w-0 flex-1 truncate text-sm">{task.title}</span>
       {sourceHint ? <span className="text-xs text-muted-foreground">{sourceHint}</span> : null}
-      <span className={cn('text-xs', overdue ? 'text-destructive' : 'text-muted-foreground')}>{dueLabel}</span>
+      <span className={cn('text-xs', overdue ? 'text-destructive' : 'text-date')}>{dueLabel}</span>
       <Button
         type="button"
         size="sm"
@@ -247,7 +247,7 @@ function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
   };
 
   return (
-    <form aria-label="Add task" onSubmit={(e) => void handleSubmit(e)} className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+    <form aria-label="Add task" onSubmit={(e) => void handleSubmit(e)} className="flex flex-wrap items-center gap-2 pt-3">
       <Label htmlFor="task-list-new-title" className="sr-only">
         Task title
       </Label>

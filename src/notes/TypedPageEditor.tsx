@@ -113,7 +113,7 @@ export function TypedPageEditor({ pageId, initialText, debounceMs = 500 }: Typed
         aria-label="Typed page text"
         value={text}
         onChange={(e) => setText(e.target.value)}
-        className="min-h-96 w-full flex-1 resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-[color,box-shadow] placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        className="min-h-96 w-full flex-1 resize-none rounded bg-muted px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-focus-ring"
       />
     </div>
   );

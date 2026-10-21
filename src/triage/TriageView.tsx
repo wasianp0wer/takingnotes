@@ -31,7 +31,7 @@ export function TriageView() {
           {data.error}
         </p>
       )}
-      <section aria-label="Tasks" className="min-w-0 rounded-lg border border-border p-4">
+      <section aria-label="Tasks" className="min-w-0 bg-surface p-4">
         <TaskList
           tasks={openTasks}
           now={now}
@@ -45,7 +45,7 @@ export function TriageView() {
         />
       </section>
       <div className="flex min-w-0 flex-col gap-4">
-        <section aria-label="Calendar" className="rounded-lg border border-border p-4">
+        <section aria-label="Calendar" className="bg-surface p-4">
           <CalendarPanel
             events={data.events}
             now={now}
@@ -55,7 +55,7 @@ export function TriageView() {
             onDeleteEvent={data.removeEvent}
           />
         </section>
-        <section aria-label="Scratchpad" className="rounded-lg border border-border p-4">
+        <section aria-label="Scratchpad" className="bg-surface p-4">
           <Scratchpad
             text={pad.text}
             loaded={pad.loaded}

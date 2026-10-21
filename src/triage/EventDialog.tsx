@@ -181,8 +181,8 @@ export function EventDialog({ open, onOpenChange, initial, eventId, onSave, onDe
               value={form.notes}
               onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
               className={cn(
-                'min-h-20 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-xs outline-none',
-                'focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+                'min-h-20 w-full rounded bg-muted px-3 py-2 text-sm outline-none',
+                'focus-visible:ring-2 focus-visible:ring-focus-ring',
               )}
             />
           </div>

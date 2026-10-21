@@ -1325,3 +1325,109 @@ it to be a fraction of.
   accepting a synthetic WebM fragment - the risk §8.2 records as unproven. The
   PCM cache removes the only recurring cost it would have avoided. If a longer
   recording later fails in the decode itself, this is the named next step.
+
+## 9. Sessions UI, search and themes
+
+Added on the `sessions-ui` branch (spec:
+`docs/superpowers/specs/2026-10-19-sessions-ui-and-themes-design.md`). The app
+shell has two always-mounted tabs, Sessions and Triage; Sessions is a sidebar of
+sessions beside a split notes / audio view, with a header search box, an
+advanced-search dialog and a theme system. Code wins where this disagrees.
+
+### 9.1 Two stores
+
+Both are small external stores (`getState` / `subscribe`), provided by context
+(`SessionsUiContext`, `SearchContext`) and read with `useSyncExternalStore`.
+
+- **`sessionsUiStore`** (`src/sessions/sessionsUiStore.ts`) holds the active tab,
+  the selected sidebar entry, page index, selected recording, notes mode, a
+  one-shot `seek` request, the sidebar filter and whether the advanced filter is
+  open. Only four keys persist, in `localStorage` under
+  `takingnotes.sessionsUi`, with `version: 1`: `selectedKey`, `pageIndex`,
+  `recordingId`, `notesMode`. A missing, corrupt or wrong-version payload yields
+  the defaults; each field is validated on its own. The tab, seek token and
+  filter are deliberately not persisted. A persisted selection that names a note
+  or recording that no longer exists falls back quietly (active note, else the
+  newest session, else the newest uncategorized entry, else the empty state).
+- **`searchStore`** (`src/search/searchStore.ts`) holds the quick query, the
+  advanced dialog's open flag, query, regex toggle, filters and the last smart
+  search result. It is memory-only: closing the dialog keeps its state, a reload
+  clears it. The quick header box is always plain text; regex exists only in the
+  advanced dialog and the sidebar's advanced filter.
+
+### 9.2 Session catalog and the Uncategorized rule
+
+`buildSessionCatalog(notes, recordings)` (`src/sessions/catalog.ts`) returns
+`{ sessions, uncategorized }`, both newest first. `sessions` holds notes that
+have a `sessionId`, each with the recordings it owns (`recordingOwnersByNote`).
+`uncategorized` holds notes with no `sessionId` plus recordings that no note
+owns. Entry keys are `note:<id>` and `recording:<id>`. The sidebar renders the
+two groups and `filter.ts` filters them without reshuffling.
+
+### 9.3 Themes
+
+A theme is `{ id, name, builtIn, base: 'light' | 'dark', colors, shape, fonts }`
+(`src/themes/types.ts`). `colors` holds exactly the tokens in
+`THEME_COLOR_TOKENS` (surfaces, primary/secondary/accent, `focus-ring`,
+`hover-bg`, `hover-outline`, `selected-*`, the element-kind tokens `heading`,
+`session-title`, `tag`, `timestamp`, `date`, `link`, `search-highlight`, status
+colours, `canvas-bg`, `ink`, and `score-red` to `score-green`). Values are
+`#rrggbb` only. `applyTheme` converts each to an HSL triplet (`"210 33% 97%"`)
+and writes it as `--<token>` on `<html>`, so Tailwind's `/alpha` modifier works
+(`hsl(var(--heading) / <alpha-value>)`); a few tokens also write the shadcn
+aliases (`surface` also sets `--card` and `--sidebar-background`, `focus-ring`
+sets `--ring`). It also sets `--radius`, `--border-width`, `--font-ui`,
+`--font-mono`, `--font-transcript`, `data-theme-base` and toggles the `.dark`
+class from `base`.
+
+Five built-ins live in `src/themes/builtin/*.json` (Light, Dark, Midnight Blue,
+Sakura, Rainbow); all use radius `0px`. Custom themes are stored in the
+`ui.customThemes` setting and the active id in `ui.theme`. The last applied theme
+is mirrored to `localStorage` (`takingnotes.activeTheme`) and painted before React
+mounts to avoid a flash. File format: pretty JSON of the theme minus `builtIn`
+(`<id>.theme.json`). `parseTheme` is tolerant: every bad colour, shape or font
+falls back to Light's value and adds a warning; non-objects fail with an error
+naming the problem. Import never overwrites a built-in id (`uniqueThemeId`
+suffixes `-2`, `-3`). Element-kind classes (`text-heading`, `text-session-title`,
+`text-tag`, `text-timestamp`, `text-date`, `text-link`, `bg-search-highlight`) are
+how components pick these colours; `noHardcodedColors.test.ts` bans literal
+colours in `src/**/*.tsx` outside `src/probe/**`, and `elementKinds.test.tsx` pins
+the classes and the absence of `rounded-md|lg|xl` on Triage and the sidebar.
+Resting borders are gone in favour of background tints; interactive elements use
+`HOVER_AFFORDANCE` (`src/components/ui/hover.ts`).
+
+**Exemption: `src/transcription/rasterize.ts`.** The OCR raster is always white
+background `#ffffff` with black ink `#000000` (`RASTER_INK`), whatever theme is
+active. On-screen ink uses the theme's `ink` and `canvas-bg` tokens instead, so
+handwriting stays visible on dark themes while recognition input never changes.
+
+### 9.4 Regex safety
+
+User regex runs over a whole library and joined lecture transcripts, so a
+catastrophic pattern could freeze the tab. Two layers:
+
+1. **Static guard** (`src/search/matcher.ts`): rejects known-bad shapes (nested
+   or repeated quantified groups, bounded counts of 2 or more counted as
+   repetition, more than two unbounded quantifiers, over-long patterns,
+   invalid syntax) with an inline error. It is fast feedback only and is
+   non-exhaustive: short polynomial patterns such as `.*.*.*.*z` pass it.
+2. **Worker runner** (`src/search/regexRunner.ts`, `regexRunner.worker.ts`): the
+   real protection. `createRegexRunner().run(pattern, texts)` matches in a Worker
+   with a 1000 ms budget (`REGEX_TIME_BUDGET_MS`); on timeout the worker is
+   terminated, a fresh one serves the next run, and the caller gets the inline
+   error "This pattern took too long to run". A newer `run()` supersedes an older
+   one. The in-thread executor exists only for environments without `Worker`
+   (the test runner).
+
+In production no regex is evaluated on the main thread: the sidebar's title and
+text regex criteria and advanced search's regex Find all go through the runner.
+Plain-text mode and the quick header box stay synchronous. On any regex error
+the list is kept, not emptied.
+
+### 9.5 Tabs stay mounted (`forceMount`)
+
+`AppShell` renders both `TabsContent` panels with `forceMount` and hides the
+inactive one. Sessions stays mounted so a live capture, audio playback, scroll
+position and the canvas survive a switch to Triage. The consequence is that
+Triage is also always mounted: its clock (`useNow`) ticks every 60 s whether or
+not the tab is visible, so it refreshes on that cadence rather than on tab entry.

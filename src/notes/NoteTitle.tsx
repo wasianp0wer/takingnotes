@@ -108,7 +108,7 @@ export function NoteTitle({ noteId, title, onRenamed }: NoteTitleProps) {
           if (e.key === 'Enter') void commit();
           else if (e.key === 'Escape') cancel();
         }}
-        className="rounded border border-input bg-background px-1 text-sm font-medium"
+        className="rounded bg-muted px-1 text-sm font-medium"
       />
       {error && <span className="text-xs text-destructive">{error}</span>}
     </div>

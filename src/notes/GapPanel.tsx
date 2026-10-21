@@ -258,9 +258,9 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
       aria-label="Gaps"
       data-note-id={noteId}
       data-page-id={pageId}
-      className="border-t border-border p-4"
+      className="bg-surface p-4"
     >
-      <h3 className="text-sm font-medium">Gaps</h3>
+      <h3 className="text-sm font-medium text-heading">Gaps</h3>
       {sourceWindow && (
         <p className="text-xs text-muted-foreground">{formatSourceWindow(sourceWindow)}</p>
       )}
@@ -307,7 +307,7 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
       {proposed.length > 0 && (
         <ul className="mt-2 space-y-3">
           {proposed.map((suggestion) => (
-            <li key={suggestion.id} className="space-y-1 rounded border border-border p-2">
+            <li key={suggestion.id} className="space-y-1 bg-muted p-2">
               <SuggestionQuote suggestion={suggestion} />
               <div className="flex items-center gap-2">
                 <Button variant="outline" size="sm" onClick={() => review(suggestion.id, 'accepted')}>
@@ -327,7 +327,7 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
           <h4 className="text-xs font-medium text-muted-foreground">From the recording</h4>
           <ul className="space-y-3">
             {accepted.map((suggestion) => (
-              <li key={suggestion.id} className="space-y-1 rounded border border-border p-2">
+              <li key={suggestion.id} className="space-y-1 bg-muted p-2">
                 <SuggestionQuote suggestion={suggestion} />
               </li>
             ))}
@@ -340,7 +340,7 @@ export function GapPanel({ noteId, pageId, analyzer }: GapPanelProps) {
           <h4 className="text-xs font-medium">Rejected</h4>
           <ul className="space-y-3">
             {rejected.map((suggestion) => (
-              <li key={suggestion.id} className="space-y-1 rounded border border-border p-2">
+              <li key={suggestion.id} className="space-y-1 bg-muted p-2">
                 <SuggestionQuote suggestion={suggestion} />
               </li>
             ))}

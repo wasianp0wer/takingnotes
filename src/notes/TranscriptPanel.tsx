@@ -34,7 +34,7 @@ export interface TranscriptPanelProps {
  */
 function PreviousTranscript({ transcript }: { transcript: TranscriptRecord }) {
   return (
-    <div className="space-y-1 border-t border-border pt-2">
+    <div className="space-y-1 pt-2">
       <p className="text-xs font-medium text-muted-foreground">Previous transcript</p>
       <div className="whitespace-pre-wrap text-sm text-muted-foreground">
         {transcript.markdown}
