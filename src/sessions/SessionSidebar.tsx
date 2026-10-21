@@ -1,7 +1,7 @@
 import { HOVER_AFFORDANCE } from '@/components/ui/hover';
 import { cn } from '@/lib/utils';
 import { AdvancedFilterPanel } from '@/sessions/AdvancedFilterPanel';
-import { entryStartedAt, entryTitle } from '@/sessions/catalog';
+import { entryStartedAt, entryTitle, noteKey } from '@/sessions/catalog';
 import type { SessionEntry } from '@/sessions/catalog';
 import { EMPTY_SIDEBAR_FILTER } from '@/sessions/filter';
 import type { FilterOutcome, SidebarFilter } from '@/sessions/filter';
@@ -22,10 +22,13 @@ export interface SessionSidebarProps {
 function EntryButton({
   entry,
   selected,
+  live,
   onSelect,
 }: {
   entry: SessionEntry;
   selected: boolean;
+  /** The note being written right now. */
+  live: boolean;
   onSelect(key: string): void;
 }) {
   const tags = entry.kind === 'note' ? tagsOf(entry.note) : [];
@@ -42,8 +45,13 @@ function EntryButton({
       )}
     >
       <span className="text-session-title block truncate text-sm">{entryTitle(entry)}</span>
-      <span className="text-date block text-xs">
-        {new Date(entryStartedAt(entry)).toLocaleDateString()}
+      <span className="block text-xs">
+        <span className="text-date">{new Date(entryStartedAt(entry)).toLocaleDateString()}</span>
+        {live && (
+          <span data-live className="text-status-ok ml-1.5 font-semibold">
+            Live
+          </span>
+        )}
       </span>
       {tags.length > 0 && (
         <span className="block truncate text-xs">
@@ -62,11 +70,13 @@ function Group({
   title,
   entries,
   selectedKey,
+  liveKey,
   onSelect,
 }: {
   title: string;
   entries: SessionEntry[];
   selectedKey: string | null;
+  liveKey: string | null;
   onSelect(key: string): void;
 }) {
   return (
@@ -79,6 +89,7 @@ function Group({
           key={entry.key}
           entry={entry}
           selected={entry.key === selectedKey}
+          live={entry.key === liveKey}
           onSelect={onSelect}
         />
       ))}
@@ -89,6 +100,7 @@ function Group({
 export function SessionSidebar({
   outcome,
   selectedKey,
+  activeNoteId,
   filter,
   onFilterChange,
   advancedOpen,
@@ -96,6 +108,7 @@ export function SessionSidebar({
   vocabulary,
   onSelect,
 }: SessionSidebarProps) {
+  const liveKey = activeNoteId === null ? null : noteKey(activeNoteId);
   return (
     <aside className="bg-surface text-surface-foreground flex h-full w-60 shrink-0 flex-col p-2.5">
       <input
@@ -136,12 +149,14 @@ export function SessionSidebar({
           title="Sessions"
           entries={outcome.sessions}
           selectedKey={selectedKey}
+          liveKey={liveKey}
           onSelect={onSelect}
         />
         <Group
           title="Uncategorized"
           entries={outcome.uncategorized}
           selectedKey={selectedKey}
+          liveKey={liveKey}
           onSelect={onSelect}
         />
       </div>

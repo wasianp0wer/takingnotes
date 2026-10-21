@@ -4,21 +4,8 @@ import { PageTurnControls } from '@/capture/PageTurnControls';
 import { Button } from '@/components/ui/button';
 
 export interface NoteToolbarProps {
-  /**
-   * Shown when `title` is not given, rendered as `noteTitle ?? 'No note
-   * selected'`. That exact fallback string is asserted by
-   * `NotesView.test.tsx:312`, so it is part of the contract, not a placeholder
-   * to reword.
-   */
-  noteTitle?: string | null;
-  /** **Wave 2 mount point**: S1's inline title editor. Replaces the plain title. */
-  title?: ReactNode;
-  /** **Wave 2 mount point**: S5's tag editor. Rendered under the title. */
-  meta?: ReactNode;
   /** **Wave 2 mount point**: S4's "Type page" button. Rendered before page navigation. */
   actions?: ReactNode;
-  /** **Wave 2 mount point**: S1's "writing still goes to X" notice. A full-width row below the toolbar. */
-  banner?: ReactNode;
   /**
    * K15: a session locks you into its note, so New note is disabled. End note
    * deliberately stays enabled - ending must never be reachable only by reload.
@@ -33,17 +20,12 @@ export interface NoteToolbarProps {
 }
 
 /**
- * The notes-view toolbar: title, New note / End note, page navigation and
- * F4's page-turn controls. Pulled out of `NotesView` (Task 6) so Wave 2 units
- * can add to it via the `title` / `meta` / `actions` / `banner` slots instead
- * of editing this file directly.
+ * The notes half's toolbar: New note / End note, the `actions` slot (Type
+ * page), F4's page-turn controls and the centred page navigation. The title,
+ * tags and the K16 banner live in `SessionHeader`.
  */
 export function NoteToolbar({
-  noteTitle,
-  title,
-  meta,
   actions,
-  banner,
   sessionLocked,
   hasActiveNote,
   onNewNote,
@@ -55,14 +37,6 @@ export function NoteToolbar({
   return (
     <div className="flex flex-col border-b border-border">
       <div className="flex items-center justify-between gap-3 px-4 py-2">
-        {(noteTitle !== undefined || title || meta) && (
-          <div className="flex flex-col">
-            {title ?? (
-              <span className="text-sm font-medium">{noteTitle ?? 'No note selected'}</span>
-            )}
-            {meta}
-          </div>
-        )}
         <div className="ml-auto flex items-center gap-2">
           <Button variant="outline" size="sm" disabled={sessionLocked} onClick={onNewNote}>
             New note
@@ -100,7 +74,6 @@ export function NoteToolbar({
           </Button>
         </div>
       )}
-      {banner}
     </div>
   );
 }

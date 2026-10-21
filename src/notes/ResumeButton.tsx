@@ -19,8 +19,8 @@ function messageOf(error: unknown): string {
 }
 
 /**
- * K14: the one place Resume is offered - mounted once per row in
- * `NoteList.rowActions` and once in `SessionControls`'s interrupted banner.
+ * K14: the one place Resume is offered - mounted once in
+ * `SessionHeader` and once in `SessionControls`'s interrupted banner.
  * Renders nothing for the active note or a legacy note (K14's "any
  * non-legacy note that is not the active note"). Disabled while a session is
  * locked onto a different note (K15), and disabled everywhere - not just the

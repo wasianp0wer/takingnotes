@@ -2,22 +2,30 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { AppShell, createNavigationTargetFactory } from '@/app/AppShell';
+import { AppShell } from '@/app/AppShell';
+import { resetAudioRuntimeForTests } from '@/audio/audioRuntime';
 import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine } from '@/capture/engine';
+import type { LiveCaptureEngine } from '@/capture/engine';
 import { TabletProvider } from '@/device/TabletProvider';
+import { resetNamingQueueForTests } from '@/notes/naming/startNaming';
+import { resetResumeLockForTests } from '@/notes/resumeLock';
 import { createNote } from '@/storage/notes';
-import { createPage, setPageTranscript } from '@/storage/pages';
-import { createRecording, finalizeRecording, setRecordingTranscript } from '@/storage/recordings';
+import { createPage } from '@/storage/pages';
+import { createRecording, setRecordingTranscript } from '@/storage/recordings';
+import type { NoteRecord } from '@/storage/types';
 import { createFakeDeviceController } from '@/test/fakeDeviceController';
 import { resetDatabase } from '@/test/resetDb';
+import { resetTranscriptionQueueForTests } from '@/transcription/startTranscription';
 
-const migrate = vi.hoisted(() => vi.fn(async () => ({
-  imported: 0,
-  pages: 0,
-  failed: 0,
-  skipped: true,
-})));
+const migrate = vi.hoisted(() =>
+  vi.fn(async () => ({
+    imported: 0,
+    pages: 0,
+    failed: 0,
+    skipped: true,
+  })),
+);
 
 vi.mock('@/storage/migrate', () => ({ migrateLegacyNotebooks: migrate }));
 
@@ -27,23 +35,67 @@ declare global {
 
 let container: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
+let engine: LiveCaptureEngine;
+
+const originalGetContext = HTMLCanvasElement.prototype.getContext;
+const originalCreateObjectURL = URL.createObjectURL;
+const originalRevokeObjectURL = URL.revokeObjectURL;
+
+// Node 25 ships a global `localStorage` stub that shadows happy-dom's and has
+// no methods, so install a Map-backed Storage for these tests.
+function memoryStorage(): Storage {
+  const m = new Map<string, string>();
+  return {
+    get length() {
+      return m.size;
+    },
+    clear: () => m.clear(),
+    getItem: (k) => m.get(k) ?? null,
+    key: (i) => [...m.keys()][i] ?? null,
+    removeItem: (k) => void m.delete(k),
+    setItem: (k, v) => void m.set(k, String(v)),
+  };
+}
 
 beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   await resetDatabase();
+  resetTranscriptionQueueForTests();
+  resetNamingQueueForTests();
+  resetAudioRuntimeForTests();
+  resetResumeLockForTests();
+  vi.stubGlobal('localStorage', memoryStorage());
+  HTMLCanvasElement.prototype.getContext = (() => ({
+    fillRect: () => {},
+    beginPath: () => {},
+    moveTo: () => {},
+    lineTo: () => {},
+    stroke: () => {},
+    arc: () => {},
+    fill: () => {},
+  })) as never;
+  URL.createObjectURL = vi.fn(() => 'blob:fake');
+  URL.revokeObjectURL = vi.fn();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  engine = createCaptureEngine({ controller: createFakeDeviceController() });
 });
 
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  engine.dispose();
+  resetTranscriptionQueueForTests();
+  resetNamingQueueForTests();
+  vi.unstubAllGlobals();
+  HTMLCanvasElement.prototype.getContext = originalGetContext;
+  URL.createObjectURL = originalCreateObjectURL;
+  URL.revokeObjectURL = originalRevokeObjectURL;
 });
 
-function renderShell() {
-  const engine = createCaptureEngine({ controller: createFakeDeviceController() });
-  act(() => {
+async function renderShell(): Promise<void> {
+  await act(async () => {
     root.render(
       <TabletProvider>
         <CaptureProvider engine={engine}>
@@ -52,17 +104,24 @@ function renderShell() {
       </TabletProvider>,
     );
   });
+  await settle();
+}
+
+async function remountShell(): Promise<void> {
+  act(() => root.unmount());
+  root = createRoot(container);
+  await renderShell();
 }
 
 function tab(label: string): HTMLElement {
-  const found = [...container.querySelectorAll('[data-slot="tabs-trigger"]')].find(
+  const found = [...container.querySelectorAll('[role="tab"]')].find(
     (node) => node.textContent === label,
   );
   if (!found) throw new Error(`no tab labelled ${label}`);
   return found as HTMLElement;
 }
 
-async function settle(rounds = 4): Promise<void> {
+async function settle(rounds = 6): Promise<void> {
   for (let i = 0; i < rounds; i++) {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -78,250 +137,177 @@ async function clickTab(label: string): Promise<void> {
   await settle();
 }
 
-function buttonByText(text: string): HTMLButtonElement {
-  const found = [...container.querySelectorAll('button')].find((b) => b.textContent?.trim() === text);
-  if (!found) throw new Error(`no button with text ${JSON.stringify(text)}`);
-  return found;
-}
-
-const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-  window.HTMLInputElement.prototype,
-  'value',
-)!.set!;
-
-async function typeQuery(value: string): Promise<void> {
-  const input = container.querySelector('input')!;
-  await act(async () => {
-    nativeInputValueSetter.call(input, value);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-  });
-  await settle();
-  // Fix round 3, I4: SearchView debounces Find by 150ms - a real, generous
-  // margin past that so this helper's callers see Find's result.
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  });
-}
-
-async function click(el: HTMLElement): Promise<void> {
+async function click(el: Element): Promise<void> {
   await act(async () => {
     el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
   await settle();
 }
 
-/** The sidebar's own `aria-current` on the selected note's row (`NoteList.tsx`). */
-function selectedSidebarTitle(): string | null {
-  return container.querySelector('button[aria-current="true"]')?.textContent?.trim() ?? null;
+function buttonByText(text: string): HTMLButtonElement {
+  const found = [...container.querySelectorAll('button')].find(
+    (b) => b.textContent?.trim() === text,
+  );
+  if (!found) throw new Error(`no button with text ${JSON.stringify(text)}`);
+  return found;
 }
 
-/** The Recordings sidebar's own `aria-current` on the selected recording's row. */
-function selectedRecordingTitle(): string | null {
-  const found = [...container.querySelectorAll('[data-recording-id]')].find(
-    (b) => b.getAttribute('aria-current') === 'true',
+function byLabel(label: string): HTMLElement {
+  const found = container.querySelector<HTMLElement>(`[aria-label="${label}"]`);
+  if (!found) throw new Error(`nothing labelled ${label}`);
+  return found;
+}
+
+function selectedEntryKey(): string | null {
+  return (
+    container.querySelector('aside button[aria-current="true"]')?.getAttribute('data-entry-key') ??
+    null
   );
-  return found?.textContent ?? null;
+}
+
+/** A session note with `pageCount` unfinalized pages (nothing for the real transcription queue to pick up). */
+async function seedSession(title: string, startedAt: number, pageCount: number): Promise<NoteRecord> {
+  const note = await createNote({
+    title,
+    deviceId: 'huion',
+    pageBaseline: 0,
+    pageWidth: 1409,
+    pageHeight: 1869,
+    status: 'complete',
+    startedAt,
+    sessionId: `session-${title}`,
+  });
+  for (let i = 0; i < pageCount; i++) {
+    await createPage({
+      noteId: note.id,
+      pageIndex: i,
+      devicePageNum: i + 1,
+      source: 'live',
+      strokes: [],
+    });
+  }
+  return note;
+}
+
+async function seedRecording(note: NoteRecord, title: string, startedAt: number): Promise<void> {
+  const recording = await createRecording(
+    {
+      title,
+      sessionId: note.sessionId,
+      noteId: note.id,
+      startedAt,
+      durationMs: 1000,
+      endedAt: startedAt + 1000,
+    },
+    new Blob(['a'], { type: 'audio/webm' }),
+  );
+  await setRecordingTranscript(recording.id, {
+    text: title,
+    segments: [],
+    model: 'whisper',
+    language: 'en',
+    status: 'done',
+    error: null,
+    updatedAt: 1,
+  });
 }
 
 describe('AppShell', () => {
-  it('shows the four tabs, the device status and the header controls', () => {
-    renderShell();
+  it('shows exactly two tabs, Sessions and Triage, centred with Start session', async () => {
+    await renderShell();
 
-    expect(tab('Notes')).toBeTruthy();
-    expect(tab('Recordings')).toBeTruthy();
-    expect(tab('Triage')).toBeTruthy();
-    expect(tab('Search')).toBeTruthy();
+    const names = [...container.querySelectorAll('[role="tab"]')].map((t) => t.textContent);
+    expect(names).toEqual(['Sessions', 'Triage']);
+
+    const tabList = container.querySelector('[role="tablist"]')!;
+    const centre = tabList.parentElement!;
+    expect(centre.className.split(/\s+/)).toContain('justify-center');
+    expect(centre.contains(buttonByText('Start session'))).toBe(true);
+
+    // The rest of the header stays: device status, Record and Settings.
     expect(container.textContent).toContain('Not connected');
     expect(container.textContent).toContain('Record');
     expect(container.querySelector('[aria-label="Settings"]')).toBeTruthy();
-    // P3's mount point (docs/architecture.md §6.7): the header is the only
-    // place session controls appear, so nothing else may claim it.
     expect(container.querySelector('[aria-label="Session"]')).toBeTruthy();
   });
 
-  it("switches to Search and renders its landmark (S6, K39)", async () => {
-    renderShell();
+  it('opens on Sessions', async () => {
+    await renderShell();
 
-    await act(async () => {
-      tab('Search').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      tab('Search').dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    // SearchView loads its corpus asynchronously (over IndexedDB) before it
-    // renders anything but `null` - give it a few ticks to resolve.
-    for (let i = 0; i < 4; i++) {
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-    }
-
-    expect(tab('Search').getAttribute('data-state')).toBe('active');
-    expect(container.querySelector('[aria-label="Search"]')).not.toBeNull();
+    expect(tab('Sessions').getAttribute('data-state')).toBe('active');
+    expect(byLabel('Notes')).toBeTruthy();
+    // F4's page-turn controls stay mounted through the notes half.
+    expect(buttonByText('New page')).toBeTruthy();
   });
 
-  it('opens on Notes, which mounts F4\'s page-turn controls', () => {
-    renderShell();
+  it('switching to Triage and back keeps the selected session and page', async () => {
+    await seedSession('Session A', 2_000, 2);
+    const b = await seedSession('Session B', 1_000, 2);
+    await renderShell();
 
-    expect(tab('Notes').getAttribute('data-state')).toBe('active');
-    // NotesView must keep rendering PageTurnControls: it is F4's only mount point.
-    expect(container.textContent).toContain('New page');
-  });
+    await click(container.querySelector(`aside button[data-entry-key="note:${b.id}"]`)!);
+    await click(byLabel('Next page'));
+    expect(container.textContent).toContain('Page 2 of 2');
 
-  it('switches tabs', async () => {
-    renderShell();
-
-    await act(async () => {
-      tab('Triage').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-      tab('Triage').dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-
+    await clickTab('Triage');
     expect(tab('Triage').getAttribute('data-state')).toBe('active');
-    // One assertion per landmark, so a failure names the missing one.
     expect(container.querySelector('section[aria-label="Tasks"]')).not.toBeNull();
     expect(container.querySelector('section[aria-label="Calendar"]')).not.toBeNull();
     expect(container.querySelector('section[aria-label="Scratchpad"]')).not.toBeNull();
-  });
 
-  it("a Search hit's Open button for a note navigates to the exact note and page it names (Fix round 1, Finding 1)", async () => {
-    await createNote({ title: 'Other Note', deviceId: 'd', pageBaseline: 0 });
-    const target = await createNote({ title: 'Target Note', deviceId: 'd', pageBaseline: 0 });
-    await createPage({ noteId: target.id, pageIndex: 0, devicePageNum: 1, source: 'live', strokes: [] });
-    const page1 = await createPage({
-      noteId: target.id,
-      pageIndex: 1,
-      devicePageNum: 2,
-      source: 'live',
-      strokes: [],
-    });
-    await setPageTranscript(page1.id, {
-      markdown: 'a very distinctive search phrase',
-      model: 'gemma4',
-      promptVersion: 'gemma-v1',
-      status: 'done',
-      error: null,
-      updatedAt: 1,
-    });
-    renderShell();
-    await clickTab('Search');
-    await typeQuery('distinctive search phrase');
-    await click(buttonByText('Open'));
-
-    expect(tab('Notes').getAttribute('data-state')).toBe('active');
-    expect(selectedSidebarTitle()).toBe('Target Note');
+    await clickTab('Sessions');
+    expect(tab('Sessions').getAttribute('data-state')).toBe('active');
+    expect(selectedEntryKey()).toBe(`note:${b.id}`);
     expect(container.textContent).toContain('Page 2 of 2');
   });
 
-  it('clicking the same Search hit a second time, after navigating away and back, still lands on the right note and page', async () => {
-    await createNote({ title: 'Other Note', deviceId: 'd', pageBaseline: 0 });
-    const target = await createNote({ title: 'Target Note', deviceId: 'd', pageBaseline: 0 });
-    await createPage({ noteId: target.id, pageIndex: 0, devicePageNum: 1, source: 'live', strokes: [] });
-    const page1 = await createPage({
-      noteId: target.id,
-      pageIndex: 1,
-      devicePageNum: 2,
-      source: 'live',
-      strokes: [],
-    });
-    await setPageTranscript(page1.id, {
-      markdown: 'a very distinctive search phrase',
-      model: 'gemma4',
-      promptVersion: 'gemma-v1',
-      status: 'done',
-      error: null,
-      updatedAt: 1,
-    });
-    renderShell();
+  it('a reload restores the selected session, page, recording and notes mode', async () => {
+    await seedSession('Session A', 2_000, 1);
+    const b = await seedSession('Session B', 1_000, 2);
+    await seedRecording(b, 'First take', 1_000);
+    await seedRecording(b, 'Second take', 2_000);
+    await renderShell();
 
-    await clickTab('Search');
-    await typeQuery('distinctive search phrase');
-    await click(buttonByText('Open'));
-    expect(selectedSidebarTitle()).toBe('Target Note');
+    await click(container.querySelector(`aside button[data-entry-key="note:${b.id}"]`)!);
+    await click(byLabel('Next page'));
+    await click(byLabel('Next recording'));
+    await click(byLabel('Notes view'));
+    expect(byLabel('Notes view').getAttribute('aria-checked')).toBe('true');
 
-    // Navigate away from Notes entirely (not just back to Search), then
-    // back to Search, and click the identical hit a second time.
+    await remountShell();
+
+    expect(tab('Sessions').getAttribute('data-state')).toBe('active');
+    expect(selectedEntryKey()).toBe(`note:${b.id}`);
+    expect(container.textContent).toContain('Page 2 of 2');
+    expect(container.textContent).toContain('Recording 2 of 2');
+    expect(container.textContent).toContain('Second take');
+    expect(byLabel('Notes view').getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('starting capture while on Triage switches to Sessions and selects the live note', async () => {
+    await seedSession('Older', 1_000, 1);
+    await renderShell();
     await clickTab('Triage');
-    await clickTab('Search');
-    await typeQuery('distinctive search phrase');
-    await click(buttonByText('Open'));
+    expect(tab('Triage').getAttribute('data-state')).toBe('active');
 
-    expect(tab('Notes').getAttribute('data-state')).toBe('active');
-    expect(selectedSidebarTitle()).toBe('Target Note');
-    expect(container.textContent).toContain('Page 2 of 2');
-  });
-
-  it("a Search hit's Open button for a recording switches to Recordings with that recording selected (Fix round 1, Finding 1)", async () => {
-    await createRecording({ title: 'Other Recording', durationMs: 1000 }, new Blob(['a']));
-    const target = await createRecording(
-      { title: 'Target Recording', durationMs: 1000 },
-      new Blob(['b']),
-    );
-    await finalizeRecording(target.id, new Blob(['b']), { endedAt: 2, durationMs: 1000 });
-    await setRecordingTranscript(target.id, {
-      text: 'mentions a very distinctive audio phrase',
-      segments: [{ startMs: 5000, endMs: 6000, text: 'mentions a very distinctive audio phrase' }],
-      model: 'whisper',
-      language: 'en',
-      status: 'done',
-      error: null,
-      updatedAt: 1,
+    await act(async () => {
+      await engine.startSession();
     });
-    // `other` is deliberately never finalized, so it is excluded from the
-    // corpus (K5) and cannot be confused with the target either way.
+    await settle();
+    const activeId = engine.getState().activeNoteId;
 
-    renderShell();
-    await clickTab('Search');
-    await typeQuery('distinctive audio phrase');
-    await click(buttonByText('Open'));
-
-    expect(tab('Recordings').getAttribute('data-state')).toBe('active');
-    expect(selectedRecordingTitle()).toContain('Target Recording');
-    expect(container.textContent).toContain('look for the segment at 0:05');
+    expect(activeId).not.toBeNull();
+    expect(tab('Sessions').getAttribute('data-state')).toBe('active');
+    expect(selectedEntryKey()).toBe(`note:${activeId}`);
   });
 
-  it('runs the legacy notebook migration once for the whole app', () => {
-    renderShell();
-    act(() => root.unmount());
-    root = createRoot(container);
-    renderShell();
+  it('the legacy migration runs once', async () => {
+    await renderShell();
+    await remountShell();
 
     // Once across two mounts (and across StrictMode's double mount in dev):
     // two overlapping runs would both find the "migrated" setting unset and
     // import the library twice.
     expect(migrate).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('createNavigationTargetFactory (Fix round 2)', () => {
-  // Why this, rather than a click-through `AppShell` test: both `NotesView`
-  // and `RecordingsView` are remounted fresh by Radix every time `AppShell`
-  // switches back to their tab (see `createNavigationTargetFactory`'s own
-  // comment in AppShell.tsx), so a round-trip test cannot tell a frozen
-  // token from a working one - confirmed empirically while building this
-  // fix: freezing the bump left a full "navigate away, come back, click the
-  // same hit again" AppShell test green. This factory is the literal body
-  // `openNote`/`openRecording` call, so testing it directly tests whether
-  // AppShell would ever hand out a repeated token.
-  it('bumps the token on every call on the note path, never repeating it - even for the identical note+page', () => {
-    const factory = createNavigationTargetFactory();
-    const first = factory.note('note-1', 0);
-    const second = factory.note('note-1', 0);
-    expect(second.token).not.toBe(first.token);
-  });
-
-  it('bumps the token on every call on the recording path, never repeating it - even for the identical recording', () => {
-    const factory = createNavigationTargetFactory();
-    const first = factory.recording('rec-1');
-    const second = factory.recording('rec-1');
-    expect(second.token).not.toBe(first.token);
-  });
-
-  it('shares one monotonic counter across both paths, so no two targets of either kind ever collide', () => {
-    const factory = createNavigationTargetFactory();
-    const tokens = [
-      factory.note('a', 0).token,
-      factory.recording('b').token,
-      factory.note('a', 0).token,
-      factory.recording('b').token,
-    ];
-    expect(new Set(tokens).size).toBe(tokens.length);
   });
 });

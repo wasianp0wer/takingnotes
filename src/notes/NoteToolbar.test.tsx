@@ -35,7 +35,6 @@ afterEach(() => {
 });
 
 const base: NoteToolbarProps = {
-  noteTitle: 'Lecture 1',
   sessionLocked: false,
   hasActiveNote: true,
   onNewNote: vi.fn(),
@@ -72,37 +71,13 @@ function buttonByText(text: string): HTMLButtonElement {
 }
 
 describe('NoteToolbar', () => {
-  it('shows the note title when no title slot is given', async () => {
-    await render();
-    expect(container.textContent).toContain('Lecture 1');
-  });
-
-  it('falls back to "No note selected" when there is no note', async () => {
-    // NotesView.test.tsx:312 asserts this exact string for the empty state;
-    // the extraction has to keep producing it.
-    await render({ noteTitle: null, hasActiveNote: false });
-    expect(container.textContent).toContain('No note selected');
-  });
-
-  it('a title slot replaces the plain title', async () => {
-    await render({ title: <input aria-label="Note title" defaultValue="x" /> });
-    expect(container.querySelector('input[aria-label="Note title"]')).not.toBeNull();
-    expect(container.textContent).not.toContain('Lecture 1');
-  });
-
-  it('renders the meta, actions and banner slots', async () => {
-    await render({
-      meta: <span data-testid="meta-slot" />,
-      actions: <span data-testid="actions-slot" />,
-      banner: <span data-testid="banner-slot" />,
-    });
-    expect(container.querySelector('[data-testid="meta-slot"]')).not.toBeNull();
+  it('renders the actions slot', async () => {
+    await render({ actions: <span data-testid="actions-slot" /> });
     expect(container.querySelector('[data-testid="actions-slot"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="banner-slot"]')).not.toBeNull();
   });
 
-  it('centres the page navigation and omits the title block when no title props are given', async () => {
-    await render({ noteTitle: undefined });
+  it('centres the page navigation and renders no title block (the session header owns it)', async () => {
+    await render();
     const prev = container.querySelector('button[aria-label="Previous page"]');
     expect(prev?.parentElement?.className).toContain('justify-center');
     expect(container.textContent).not.toContain('No note selected');

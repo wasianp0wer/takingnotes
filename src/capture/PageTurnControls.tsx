@@ -5,7 +5,7 @@ import { isPageTurn, PAGE_INDICATOR_MS } from '@/capture/pageTurnIndicator';
 import { Button } from '@/components/ui/button';
 
 /**
- * F4 (docs/architecture.md §3.5), mounted in the NotesView page toolbar: the
+ * F4 (docs/architecture.md §3.5), mounted in the notes half's toolbar: the
  * on-screen "New page" button - the fallback for when the pad is not reporting
  * turns (A9: pressing it and turning the paper page makes two pages) - and a
  * transient "Page N" indicator shown after any page turn in the active note.

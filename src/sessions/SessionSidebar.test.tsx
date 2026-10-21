@@ -142,6 +142,14 @@ describe('SessionSidebar list', () => {
     expect(q('button[data-entry-key="note:a"]').getAttribute('aria-current')).toBeNull();
   });
 
+  it('marks the active note entry Live, and no other entry', () => {
+    mount({ activeNoteId: 'b' });
+    const live = q('button[data-entry-key="note:b"] [data-live]');
+    expect(live?.textContent).toBe('Live');
+    expect(live?.className).toContain('text-status-ok');
+    expect(host.querySelectorAll('[data-live]')).toHaveLength(1);
+  });
+
   it('shows an orphan recording by its title and selects it on click', () => {
     const p = mount();
     const btn = q<HTMLButtonElement>('button[data-entry-key="recording:r1"]');
