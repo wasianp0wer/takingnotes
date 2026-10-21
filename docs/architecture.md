@@ -1408,9 +1408,11 @@ catastrophic pattern could freeze the tab. Two layers:
 
 1. **Static guard** (`src/search/matcher.ts`): rejects known-bad shapes (nested
    or repeated quantified groups, bounded counts of 2 or more counted as
-   repetition, more than two unbounded quantifiers, over-long patterns,
-   invalid syntax) with an inline error. It is fast feedback only and is
-   non-exhaustive: short polynomial patterns such as `.*.*.*.*z` pass it.
+   repetition, over-long patterns, invalid syntax) with an inline error. It is
+   fast feedback only and is non-exhaustive. There is deliberately no cap on
+   the number of unbounded quantifiers: ordinary patterns such as
+   `\w+\s+\w+`, `\d+:\d+:\d+` and `.*foo.*bar.*` need several, so short
+   polynomial patterns such as `.*.*.*.*z` pass it and are left to the Worker.
 2. **Worker runner** (`src/search/regexRunner.ts`, `regexRunner.worker.ts`): the
    real protection. `createRegexRunner().run(pattern, texts)` matches in a Worker
    with a 1000 ms budget (`REGEX_TIME_BUDGET_MS`); on timeout the worker is

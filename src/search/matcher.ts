@@ -2,8 +2,8 @@
  * Pattern matcher for Find: plain case-insensitive substring, or a
  * case-insensitive regular expression.
  *
- * Regex safety (a hostile or careless pattern must never freeze the tab) is
- * two layers, both applied before any text is tested:
+ * Regex safety (a hostile or careless pattern must never freeze the tab).
+ * Two checks run here, before any text is tested, for instant feedback:
  *   1. A length cap, `MAX_PATTERN_LENGTH`.
  *   2. A nested-repetition rejection. After `new RegExp` accepts the pattern,
  *      `isRiskyPattern` walks it once, tracking group depth on a stack,
@@ -15,17 +15,14 @@
  *      non-capturing, lookaround and named groups, and counts `*`, `+`,
  *      `{n,}`, `{n,m}` (m >= 2) and `{n}` (n >= 2) as repeats. A plain `?`
  *      after a group is fine.
- *   3. A cap of `MAX_UNBOUNDED_QUANTIFIERS` unbounded quantifiers (`*`, `+`,
- *      `{n,}`) in the whole pattern, which stops group-less blow-ups such as
- *      `.*.*.*.*z`.
- * A pattern that passes can still be slow on a huge text; `regexRunner.ts`
- * runs patterns in a Worker under a time budget as the last line of defence.
- * This is deliberately conservative: it may refuse a few safe patterns, but
- * it does not run the pattern to find out.
+ * There is deliberately no cap on the number of `*`/`+` quantifiers: ordinary
+ * patterns such as `\w+\s+\w+` or `.*foo.*bar.*` need several. Every
+ * production regex runs in a Worker under a time budget (`regexRunner.ts`),
+ * which is the real protection; a slow group-less pattern such as
+ * `.*.*.*.*z` is stopped there with "This pattern took too long to run".
  */
 
 export const MAX_PATTERN_LENGTH = 200;
-const MAX_UNBOUNDED_QUANTIFIERS = 2;
 
 export interface TextMatcher {
   test(text: string): boolean;
@@ -40,19 +37,18 @@ const BRACE_QUANTIFIER = /^\{(\d+)(?:(,)(\d*))?\}/;
  * A repeating quantifier at `at`: `*`, `+`, `{n,}`, `{n,m}` with m >= 2, or
  * `{n}` with n >= 2. `length` is 0 when there is none.
  */
-function repeatQuantifierAt(pattern: string, at: number): { length: number; unbounded: boolean } {
+function repeatQuantifierAt(pattern: string, at: number): number {
   const ch = pattern[at];
-  if (ch === '*' || ch === '+') return { length: 1, unbounded: true };
+  if (ch === '*' || ch === '+') return 1;
   if (ch === '{') {
     const m = BRACE_QUANTIFIER.exec(pattern.slice(at));
     if (m) {
       const n = Number(m[1]);
-      const unbounded = m[2] !== undefined && m[3] === '';
-      const max = m[2] === undefined ? n : unbounded ? Infinity : Number(m[3]);
-      if (max >= 2) return { length: m[0].length, unbounded };
+      const max = m[2] === undefined ? n : m[3] === '' ? Infinity : Number(m[3]);
+      if (max >= 2) return m[0].length;
     }
   }
-  return { length: 0, unbounded: false };
+  return 0;
 }
 
 /** Index just past the `(?...` prefix of a non-capturing, lookaround or named group. */
@@ -71,9 +67,8 @@ function skipGroupPrefix(pattern: string, open: number): number {
   return i;
 }
 
-/** True when the pattern repeats a repeating group, or has too many unbounded quantifiers. */
+/** True when the pattern repeats a group whose body itself repeats or alternates. */
 function isRiskyPattern(pattern: string): boolean {
-  let unbounded = 0;
   // One entry per open group: does its body contain a quantifier or `|`?
   const stack: boolean[] = [];
   let i = 0;
@@ -91,20 +86,18 @@ function isRiskyPattern(pattern: string): boolean {
     } else if (ch === ')') {
       const bodyRepeats = stack.pop() ?? false;
       i += 1;
-      const { length: q, unbounded: u } = repeatQuantifierAt(pattern, i);
+      const q = repeatQuantifierAt(pattern, i);
       if (q > 0 && bodyRepeats) return true;
-      if (u) unbounded += 1;
       // The closed group's contents, and its own quantifier, sit inside the parent's body.
       if (stack.length > 0 && (bodyRepeats || q > 0)) stack[stack.length - 1] = true;
       i += q;
     } else {
-      const { length: q, unbounded: u } = repeatQuantifierAt(pattern, i);
-      if (u) unbounded += 1;
+      const q = repeatQuantifierAt(pattern, i);
       if ((q > 0 || ch === '|') && stack.length > 0) stack[stack.length - 1] = true;
       i += Math.max(q, 1);
     }
   }
-  return unbounded > MAX_UNBOUNDED_QUANTIFIERS;
+  return false;
 }
 
 export function compileMatcher(query: string, options: { regex: boolean }): MatcherResult {

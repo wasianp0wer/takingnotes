@@ -40,7 +40,7 @@ describe('compileMatcher', () => {
     expect(compileMatcher('a'.repeat(MAX_PATTERN_LENGTH), { regex: true }).ok).toBe(true);
   });
 
-  it.each(['(a+)+$', '(a*)*', '(\\w+\\s?)+$', '(a|aa)+', '(?:a+)+', 'x((a)*b)+', '(a+){2,}', '(a|b){1,5}', '(a+){30}b', '(\\w+\\s?){12}$', '(a|a){25}b', '.*.*.*.*z', '(a+){20}'])(
+  it.each(['(a+)+$', '(a*)*', '(\\w+\\s?)+$', '(a|aa)+', '(?:a+)+', 'x((a)*b)+', '(a+){2,}', '(a|b){1,5}', '(a+){30}b', '(\\w+\\s?){12}$', '(a|a){25}b', '(a+){20}'])(
     'rejects nested repetition %s',
     (p) => {
       expect(err(p)).toContain('too long to run');
@@ -54,10 +54,14 @@ describe('compileMatcher', () => {
     },
   );
 
-  it('rejects more than two unbounded quantifiers but allows two', () => {
-    expect(compileMatcher('a+b+', { regex: true }).ok).toBe(true);
-    expect(compileMatcher('a+b+c+', { regex: true }).ok).toBe(false);
-  });
+  // No cap on unbounded quantifiers: these are ordinary patterns, and the
+  // Worker's time budget (regexRunner.ts) is what stops a slow one.
+  it.each(['\\w+\\s+\\w+', '\\d+:\\d+:\\d+', '.*foo.*bar.*', 'a+b+c+d+'])(
+    'accepts ordinary pattern %s with several unbounded quantifiers',
+    (p) => {
+      expect(compileMatcher(p, { regex: true }).ok).toBe(true);
+    },
+  );
 
   it('ignores quantifier characters inside classes and escapes when counting', () => {
     expect(compileMatcher('[+*][+*][+*]\\+\\+', { regex: true }).ok).toBe(true);
