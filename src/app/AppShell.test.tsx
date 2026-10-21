@@ -261,6 +261,26 @@ describe('AppShell', () => {
     expect(container.textContent).toContain('Page 2 of 2');
   });
 
+  it('neither panel remounts on a Sessions -> Triage -> Sessions round trip', async () => {
+    await seedSession('Session A', 2_000, 1);
+    await renderShell();
+    await clickTab('Triage');
+    const sidebar = container.querySelector('aside');
+    const tasks = container.querySelector('section[aria-label="Tasks"]');
+    expect(sidebar).not.toBeNull();
+    expect(tasks).not.toBeNull();
+
+    await clickTab('Sessions');
+    await clickTab('Triage');
+    await clickTab('Sessions');
+
+    // The very same DOM nodes survive: hidden, never unmounted.
+    expect(container.querySelector('aside')).toBe(sidebar);
+    expect(container.querySelector('section[aria-label="Tasks"]')).toBe(tasks);
+    expect(sidebar!.isConnected).toBe(true);
+    expect(tasks!.isConnected).toBe(true);
+  });
+
   it('a reload restores the selected session, page, recording and notes mode', async () => {
     await seedSession('Session A', 2_000, 1);
     const b = await seedSession('Session B', 1_000, 2);
