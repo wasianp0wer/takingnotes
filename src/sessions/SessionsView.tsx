@@ -143,8 +143,12 @@ export function SessionsView(props?: SessionsViewProps) {
           writingDestinationTitle={writingDestinationTitle}
           onChanged={reload}
         />
-        <div className="flex min-h-0 flex-1">
-          <section data-half="notes" aria-label="Notes" className="min-h-0 min-w-0 flex-1">
+        <div className="flex min-h-0 flex-1 gap-2 p-2">
+          <section
+            data-half="notes"
+            aria-label="Notes"
+            className="min-h-0 min-w-0 flex-1 border border-border"
+          >
             <NotesHalf
               key={halfKey}
               entry={entry}
@@ -160,7 +164,7 @@ export function SessionsView(props?: SessionsViewProps) {
           <section
             data-half="audio"
             aria-label="Audio"
-            className="bg-surface/40 min-h-0 min-w-0 flex-1"
+            className="bg-surface/40 min-h-0 min-w-0 flex-1 border border-border"
           >
             <AudioHalf
               key={halfKey}

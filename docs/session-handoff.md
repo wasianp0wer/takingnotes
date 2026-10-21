@@ -18,7 +18,7 @@ tints instead of resting borders, hover-only affordances, element-kind colour
 classes. Task 18 restyled Triage to match and swept the remaining
 `rounded-md|lg|xl` and resting borders.
 
-**Tests.** `npm test`: 1874 tests in 146 files (after the final-review fixes and the owner's 2026-10-20 follow-ups), against the 1614 / 119 baseline.
+**Tests.** `npm test`: 1875 tests in 146 files (after the final-review fixes and the owner's 2026-10-20 follow-ups), against the 1614 / 119 baseline.
 `npx tsc -b` clean, `npm run lint` 0 errors, `npm run build` succeeds.
 
 **Decisions taken on the owner's behalf.**
@@ -33,8 +33,10 @@ classes. Task 18 restyled Triage to match and swept the remaining
   its transcript (owner follow-up). Starting capture (Start session, New note,
   Resume, or the pen starting a note) still switches to Handwriting, so the live
   page shows ink rather than an empty transcript.
-- Owner follow-ups on 2026-10-20: gap analysis moved to the bottom of the
-  Transcription view; a border now separates the session sidebar.
+- Owner follow-ups on 2026-10-20: gap analysis is pinned to the bottom of the
+  notes half in Transcription mode (the transcript scrolls above it; the gap
+  strip is capped at 40% of the half and scrolls on its own); a border separates
+  the session sidebar, and each half is framed by a border.
 - The sidebar's regex filter is stale-while-revalidate: while the same patterns
   re-run against a rebuilt catalog (every page turn during live capture), the
   last settled matches keep filtering, so the list does not flicker.

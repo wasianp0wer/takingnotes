@@ -102,7 +102,8 @@ A sidebar entry is a **note**. In practice a note and its `SessionRecord` are
 
 ### Left sidebar
 
-A border separates the sidebar from the main view. **(owner, 2026-10-20)**
+A border separates the sidebar from the main view, and each of the two halves
+(notes, audio) is framed by a border too. **(owner, 2026-10-20)**
 
 - **Quick filter box.** Narrows the list as you type, by title or tag, as plain
   substring matching. **(owner)**
@@ -141,8 +142,9 @@ A border separates the sidebar from the main view. **(owner, 2026-10-20)**
   has no transcript yet.
   - **Handwriting** shows `InkCanvas`, or `TypedPageEditor` for a typed page.
   - **Transcription** shows the page's OCR transcript (`TranscriptPanel`), with
-    **gap analysis** (`GapPanel`, with its button) at the *bottom*. **(owner,
-    2026-10-20; was above the transcript)**
+    **gap analysis** (`GapPanel`, with its button) pinned to the *bottom of the
+    half*: the transcript scrolls above it rather than pushing it down to
+    wherever the text ends. **(owner, 2026-10-20; was above the transcript)**
 - **Page navigation** ("‹ Page N of M ›") sits centred just below the switch,
   with the `NoteToolbar` actions (Type page and the rest) nearby.
 - **Blank when there are no pages.** The owner can Resume and type a page.

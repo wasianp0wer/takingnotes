@@ -684,8 +684,8 @@ today's shape and no behaviour change - P3 replaces it with the real flow, and
 ### 6.7 File ownership (Phase 2)
 
 > **Superseded by §9** for the mount points below: `NotesView` is gone, and
-> `GapPanel` is mounted by `NotesHalf` (`src/sessions/NotesHalf.tsx`) below the
-> transcript in Transcription mode, still keyed per page.
+> `GapPanel` is mounted by `NotesHalf` (`src/sessions/NotesHalf.tsx`) pinned below the
+> scrolling transcript in Transcription mode, still keyed per page.
 
 | Path | Owner |
 |------|-------|

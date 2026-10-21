@@ -407,6 +407,10 @@ describe('SessionsView', () => {
     expect(row).not.toContain('flex-col');
     expect(notes.className.split(/\s+/)).toContain('flex-1');
     expect(audio.className.split(/\s+/)).toContain('flex-1');
+    // Each half is framed by a border in the theme's border colour.
+    for (const half of [notes, audio]) {
+      expect(half.className.split(/\s+/)).toEqual(expect.arrayContaining(['border', 'border-border']));
+    }
     expect(notes.compareDocumentPosition(audio) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(notes.querySelector('canvas')).not.toBeNull();
     expect(audio.querySelector('audio')).not.toBeNull();

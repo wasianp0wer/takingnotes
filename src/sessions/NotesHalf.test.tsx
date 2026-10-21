@@ -211,6 +211,26 @@ describe('NotesHalf', () => {
     expect(container.querySelector('canvas')).toBeNull();
   });
 
+  it('pins gap analysis to the bottom of the half, outside the scrolling transcript', async () => {
+    const { entry, note } = await seedNoteEntry();
+    const pages = [await inkPage(note.id, 0)];
+    await renderWith({ entry, pages, mode: 'transcription' });
+    const gap = container.querySelector<HTMLElement>('[aria-label="Gaps"]')!;
+    const scroller = container.querySelector<HTMLElement>('[data-notes-scroll]')!;
+    expect(scroller).not.toBeNull();
+    // The transcript scrolls; the gap panel does not scroll with it.
+    expect(scroller.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(['flex-1', 'overflow-auto']),
+    );
+    expect(scroller.textContent).toContain('This page has not been transcribed yet.');
+    expect(scroller.contains(gap)).toBe(false);
+    // It is the last thing in the half, below the scroller, and never shrinks away.
+    const pinned = gap.closest<HTMLElement>('[data-notes-gaps]')!;
+    expect(pinned).not.toBeNull();
+    expect(pinned.className.split(/\s+/)).toContain('shrink-0');
+    expect(scroller.nextElementSibling).toBe(pinned);
+  });
+
   it('the live page shows live ink', async () => {
     await renderWith({});
     await click(buttonByText('New note'));

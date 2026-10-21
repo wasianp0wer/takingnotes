@@ -118,38 +118,47 @@ export function NotesHalf({
         // it: a remount would re-seed it from `viewedPage.text`, which is stale
         // (typing sends no change signal) and a later keystroke would then
         // overwrite the saved text.
-        <div className="flex flex-1 flex-col overflow-auto">
-          {isTypedPage(viewedPage) ? (
-            <TypedPageEditor
-              key={viewedPage.id}
-              pageId={viewedPage.id}
-              initialText={viewedPage.text ?? ''}
-            />
-          ) : mode === 'handwriting' ? (
-            <div className="flex items-start justify-center p-4">
-              {viewedPage.id === state.activePageId ? (
-                <InkCanvas live dims={dims} />
-              ) : (
-                <InkCanvas strokes={viewedPage.strokes} dims={dims} />
-              )}
-            </div>
-          ) : (
-            <TranscriptPanel
-              key={viewedPage.id}
-              page={viewedPage}
-              isActivePage={viewedPage.id === state.activePageId}
-              onRetry={(pageId) => transcriptionQueue.retry(pageId)}
-            />
-          )}
-          {/* Gap analysis sits at the bottom of the transcription view (owner,
-              2026-10-20). It comes after the editor, so the editor keeps its
-              place in the tree across a mode toggle. */}
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div data-notes-scroll className="flex min-h-0 flex-1 flex-col overflow-auto">
+            {isTypedPage(viewedPage) ? (
+              <TypedPageEditor
+                key={viewedPage.id}
+                pageId={viewedPage.id}
+                initialText={viewedPage.text ?? ''}
+              />
+            ) : mode === 'handwriting' ? (
+              <div className="flex items-start justify-center p-4">
+                {viewedPage.id === state.activePageId ? (
+                  <InkCanvas live dims={dims} />
+                ) : (
+                  <InkCanvas strokes={viewedPage.strokes} dims={dims} />
+                )}
+              </div>
+            ) : (
+              <TranscriptPanel
+                key={viewedPage.id}
+                page={viewedPage}
+                isActivePage={viewedPage.id === state.activePageId}
+                onRetry={(pageId) => transcriptionQueue.retry(pageId)}
+              />
+            )}
+          </div>
+          {/* Gap analysis is pinned to the bottom of the half in Transcription
+              mode (owner, 2026-10-20): the transcript scrolls above it rather
+              than pushing it down to wherever the text ends. It sits after the
+              scroller, so the typed editor keeps its place in the tree across a
+              mode toggle. Capped so a long gap list scrolls inside its own strip. */}
           {mode === 'transcription' && (
-            <GapPanel
-              key={`gaps-${viewedPage.id}`}
-              noteId={viewedPage.noteId}
-              pageId={viewedPage.id}
-            />
+            <div
+              data-notes-gaps
+              className="max-h-[40%] shrink-0 overflow-auto border-t border-border"
+            >
+              <GapPanel
+                key={`gaps-${viewedPage.id}`}
+                noteId={viewedPage.noteId}
+                pageId={viewedPage.id}
+              />
+            </div>
           )}
         </div>
       )}
