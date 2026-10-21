@@ -18,7 +18,7 @@ tints instead of resting borders, hover-only affordances, element-kind colour
 classes. Task 18 restyled Triage to match and swept the remaining
 `rounded-md|lg|xl` and resting borders.
 
-**Tests.** `npm test`: 1857 tests in 145 files, against the 1614 / 119 baseline.
+**Tests.** `npm test`: 1871 tests in 146 files (after the final-review fixes), against the 1614 / 119 baseline.
 `npx tsc -b` clean, `npm run lint` 0 errors, `npm run build` succeeds.
 
 **Decisions taken on the owner's behalf.**
