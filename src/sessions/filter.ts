@@ -118,8 +118,10 @@ export function filterCatalog(
   let titleTest: ((e: SessionEntry) => boolean) | null = null;
   let textTest: ((e: SessionEntry) => boolean) | null = null;
   if (advanced.regex) {
+    // A pending outcome may still carry the last settled keys or error
+    // (stale-while-revalidate, see useRegexFilter): apply them meanwhile.
     if (regex?.pending) pending = true;
-    else if (regex?.error) error = regex.error;
+    if (regex?.error) error = regex.error;
     else if (regex) {
       const { titleKeys, textKeys } = regex;
       if (titleKeys) titleTest = (e) => titleKeys.has(e.key);

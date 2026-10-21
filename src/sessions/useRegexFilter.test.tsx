@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { RegexRunner, RegexRunResult } from '@/search/regexRunner';
 import { buildSessionCatalog } from '@/sessions/catalog';
+import type { SessionCatalog } from '@/sessions/catalog';
 import { EMPTY_SIDEBAR_FILTER } from '@/sessions/filter';
 import type { AdvancedFilter, EntryText, RegexOutcome } from '@/sessions/filter';
 import { useRegexFilter } from '@/sessions/useRegexFilter';
@@ -66,18 +67,34 @@ function Host(props: {
   advanced: AdvancedFilter;
   text: ReadonlyMap<string, EntryText> | null;
   runner: RegexRunner;
+  catalog?: SessionCatalog;
 }) {
-  const outcome = useRegexFilter(props.advanced, catalog, props.text, props.runner);
+  const outcome = useRegexFilter(
+    props.advanced,
+    props.catalog ?? catalog,
+    props.text,
+    props.runner,
+  );
   useEffect(() => {
     latest = outcome;
   });
   return null;
 }
 
-function render(advanced: Partial<AdvancedFilter>, text = textByKey, runner: RegexRunner) {
+function render(
+  advanced: Partial<AdvancedFilter>,
+  text = textByKey,
+  runner: RegexRunner,
+  withCatalog: SessionCatalog = catalog,
+) {
   act(() => {
     root.render(
-      <Host advanced={{ ...EMPTY_SIDEBAR_FILTER.advanced, ...advanced }} text={text} runner={runner} />,
+      <Host
+        advanced={{ ...EMPTY_SIDEBAR_FILTER.advanced, ...advanced }}
+        text={text}
+        runner={runner}
+        catalog={withCatalog}
+      />,
     );
   });
 }
@@ -189,5 +206,32 @@ describe('useRegexFilter', () => {
     expect(latest?.pending).toBe(false);
     render({ title: 'b', regex: true }, textByKey, runner);
     expect(latest).toMatchObject({ pending: true, titleKeys: null });
+  });
+
+  it('keeps the last settled keys while a new catalog revalidates (no widen-then-narrow)', async () => {
+    const { runner, calls } = fakeRunner();
+    render({ title: 'a', text: 'o', regex: true }, textByKey, runner);
+    await settle(calls[0], { ok: true, matches: [null, { index: 0, length: 1 }] });
+    await settle(calls[1], { ok: true, matches: [null, { index: 0, length: 1 }] });
+    expect(latest).toMatchObject({ pending: false, error: null });
+    expect([...(latest?.titleKeys ?? [])]).toEqual(['note:1']);
+    expect([...(latest?.textKeys ?? [])]).toEqual(['note:1']);
+
+    // A page turn or transcription signal rebuilds the catalog: same entries, new object.
+    const rebuilt = buildSessionCatalog([note('1', 'Alpha', 1), note('2', 'Beta', 2)], []);
+    const newText = new Map(textByKey);
+    render({ title: 'a', text: 'o', regex: true }, newText, runner, rebuilt);
+    expect(latest?.pending).toBe(true);
+    expect([...(latest?.titleKeys ?? [])]).toEqual(['note:1']);
+    expect([...(latest?.textKeys ?? [])]).toEqual(['note:1']);
+  });
+
+  it('keeps a settled error while the same pattern revalidates', async () => {
+    const { runner, calls } = fakeRunner();
+    render({ title: '(', regex: true }, textByKey, runner);
+    await settle(calls[0], { ok: false, error: 'Invalid pattern: x' });
+    const rebuilt = buildSessionCatalog([note('1', 'Alpha', 1), note('2', 'Beta', 2)], []);
+    render({ title: '(', regex: true }, textByKey, runner, rebuilt);
+    expect(latest).toMatchObject({ pending: true, error: 'Invalid pattern: x' });
   });
 });

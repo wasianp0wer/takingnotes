@@ -20,7 +20,8 @@ interface Settled {
  * Evaluates the advanced filter's regex title/text criteria in the regex
  * Worker (never on the main thread). `null` when regex is off or both fields
  * are blank. While inputs have changed since the last settled run, `pending`
- * is true. Titles run first, then texts (a runner serves one run at a time).
+ * is true; if only the catalog or text index changed (same patterns), the last
+ * settled keys and error are still returned, so callers keep filtering by them. Titles run first, then texts (a runner serves one run at a time).
  * Superseded results are ignored; a runner created here is disposed on unmount.
  */
 export function useRegexFilter(
@@ -94,17 +95,17 @@ export function useRegexFilter(
   }, [active, title, text, catalog, textByKey, runner]);
 
   if (!active) return null;
-  const fresh =
-    settled !== null &&
-    settled.catalog === catalog &&
-    settled.textByKey === textByKey &&
-    settled.title === title &&
-    settled.text === text;
+  // Stale-while-revalidate: the catalog and text index are rebuilt on every
+  // page turn and transcription signal during live capture. While the same
+  // patterns re-run against them, keep the last settled keys (and error) so
+  // the list does not widen to everything and then narrow again.
+  const samePatterns = settled !== null && settled.title === title && settled.text === text;
+  const fresh = samePatterns && settled.catalog === catalog && settled.textByKey === textByKey;
   const waitingForText = text !== '' && textByKey === null;
   return {
     pending: !fresh || waitingForText,
-    error: fresh ? settled.error : null,
-    titleKeys: fresh ? settled.titleKeys : null,
-    textKeys: fresh ? settled.textKeys : null,
+    error: samePatterns ? settled.error : null,
+    titleKeys: samePatterns ? settled.titleKeys : null,
+    textKeys: samePatterns ? settled.textKeys : null,
   };
 }

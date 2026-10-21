@@ -171,6 +171,18 @@ describe('filterCatalog', () => {
     expect(all).toEqual(everyKey);
   });
 
+  it('a pending regex still applies the last settled keys (stale-while-revalidate)', () => {
+    const rx: RegexOutcome = {
+      pending: true,
+      error: null,
+      titleKeys: new Set(['note:a']),
+      textKeys: null,
+    };
+    const { all, out } = keys(withAdvanced({ title: 'x', regex: true }), textByKey, null, rx);
+    expect(out.pending).toBe(true);
+    expect(all).toEqual(['note:a']);
+  });
+
   it('regex text uses textKeys', () => {
     const rx: RegexOutcome = {
       pending: false,
