@@ -36,7 +36,7 @@ function PreviousTranscript({ transcript }: { transcript: TranscriptRecord }) {
   return (
     <div className="space-y-1 pt-2">
       <p className="text-xs font-medium text-muted-foreground">Previous transcript</p>
-      <div className="whitespace-pre-wrap font-transcript text-sm text-muted-foreground">
+      <div className="whitespace-pre-wrap border border-border p-3 font-transcript text-base leading-relaxed text-muted-foreground">
         {transcript.markdown}
       </div>
       <p className="text-xs text-muted-foreground">
@@ -117,7 +117,12 @@ export function TranscriptPanel({ page, isActivePage, onRetry }: TranscriptPanel
 
   return (
     <div className="space-y-2 p-4">
-      <div className="whitespace-pre-wrap font-transcript text-sm">
+      {/* Framed and set in the theme's transcript font, so the transcribed
+          handwriting reads as content rather than as part of the interface. */}
+      <div
+        data-transcript-text
+        className="whitespace-pre-wrap border border-border bg-background p-3 font-transcript text-base leading-relaxed"
+      >
         {transcript.markdown ? transcript.markdown : 'Blank page'}
       </div>
       <p className="text-xs text-muted-foreground">

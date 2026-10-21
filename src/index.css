@@ -11,7 +11,7 @@
     accent-color: hsl(var(--primary));
     --font-ui: 'TASA Orbiter', ui-sans-serif, system-ui, sans-serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
-    --font-transcript: 'TASA Orbiter', ui-sans-serif, system-ui, sans-serif;
+    --font-transcript: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, ui-serif, serif;
     --radius: 0px;
     --border-width: 1px;
     --background: 0 0% 100%;

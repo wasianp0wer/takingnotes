@@ -40,4 +40,8 @@ describe('built-in themes', () => {
       expect(contrastRatio(t.colors.foreground, t.colors.background), t.id).toBeGreaterThanOrEqual(4.5)
     }
   })
+
+  it('set transcribed text in a different font from the interface', () => {
+    for (const t of BUILT_IN_THEMES) expect(t.fonts.transcript, t.id).not.toBe(t.fonts.ui)
+  })
 })

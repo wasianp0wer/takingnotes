@@ -69,4 +69,23 @@ describe('TranscriptPanel', () => {
     render(page({ status: 'failed', error: 'boom', markdown: 'older text' }));
     expect(elementWithText('older text')?.classList.contains('font-transcript')).toBe(true);
   });
+
+  it('frames the transcribed handwriting in its own bordered block', () => {
+    render(page({ markdown: 'Newton: F=ma' }));
+    const block = elementWithText('Newton: F=ma')!;
+    expect(block.hasAttribute('data-transcript-text')).toBe(true);
+    expect(block.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(['border', 'border-border']),
+    );
+    // The model/prompt line sits outside the frame.
+    expect(block.textContent).not.toContain('gemma4:12b');
+  });
+
+  it('frames a retained previous transcript too', () => {
+    render(page({ status: 'failed', error: 'boom', markdown: 'older text' }));
+    const block = elementWithText('older text')!;
+    expect(block.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(['border', 'border-border']),
+    );
+  });
 });

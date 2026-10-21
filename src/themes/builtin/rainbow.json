@@ -52,6 +52,6 @@
   "fonts": {
     "ui": "'TASA Orbiter', ui-sans-serif, system-ui, sans-serif",
     "mono": "ui-monospace, SFMono-Regular, Menlo, monospace",
-    "transcript": "'TASA Orbiter', ui-sans-serif, system-ui, sans-serif"
+    "transcript": "'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, ui-serif, serif"
   }
 }
