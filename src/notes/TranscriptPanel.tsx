@@ -34,12 +34,12 @@ export interface TranscriptPanelProps {
  */
 function PreviousTranscript({ transcript }: { transcript: TranscriptRecord }) {
   return (
-    <div className="space-y-1 pt-2">
-      <p className="text-xs font-medium text-muted-foreground">Previous transcript</p>
-      <div className="whitespace-pre-wrap border border-border p-3 font-transcript text-base leading-relaxed text-muted-foreground">
+    <div className="flex min-h-0 flex-1 flex-col gap-1 pt-2">
+      <p className="shrink-0 text-xs font-medium text-muted-foreground">Previous transcript</p>
+      <div className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap border border-border p-3 font-transcript text-base leading-relaxed text-muted-foreground">
         {transcript.markdown}
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="shrink-0 text-xs text-muted-foreground">
         {transcript.model} · {transcript.promptVersion}
       </p>
     </div>
@@ -91,8 +91,8 @@ export function TranscriptPanel({ page, isActivePage, onRetry }: TranscriptPanel
 
   if (transcript.status === 'pending' || transcript.status === 'running') {
     return (
-      <div className="space-y-3 p-4">
-        <p className="text-sm text-muted-foreground">
+      <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+        <p className="shrink-0 text-sm text-muted-foreground">
           {transcript.status === 'pending' ? 'Waiting to transcribe…' : 'Transcribing…'}
         </p>
         {transcript.markdown && <PreviousTranscript transcript={transcript} />}
@@ -102,9 +102,9 @@ export function TranscriptPanel({ page, isActivePage, onRetry }: TranscriptPanel
 
   if (transcript.status === 'failed') {
     return (
-      <div className="space-y-3 p-4">
-        <p className="text-sm text-destructive">Transcription failed: {transcript.error}</p>
-        <div className="flex items-center gap-2">
+      <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+        <p className="shrink-0 text-sm text-destructive">Transcription failed: {transcript.error}</p>
+        <div className="flex shrink-0 items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => retry()}>
             Retry
           </Button>
@@ -116,16 +116,18 @@ export function TranscriptPanel({ page, isActivePage, onRetry }: TranscriptPanel
   }
 
   return (
-    <div className="space-y-2 p-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
       {/* Framed and set in the theme's transcript font, so the transcribed
-          handwriting reads as content rather than as part of the interface. */}
+          handwriting reads as content rather than as part of the interface.
+          It fills a set area and scrolls inside it rather than growing with
+          the text (owner, 2026-10-20). */}
       <div
         data-transcript-text
-        className="whitespace-pre-wrap border border-border bg-background p-3 font-transcript text-base leading-relaxed"
+        className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap border border-border bg-background p-3 font-transcript text-base leading-relaxed"
       >
         {transcript.markdown ? transcript.markdown : 'Blank page'}
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="shrink-0 text-xs text-muted-foreground">
         {transcript.model} · {transcript.promptVersion}
       </p>
     </div>

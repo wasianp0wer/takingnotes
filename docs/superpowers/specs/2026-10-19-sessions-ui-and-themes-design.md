@@ -145,7 +145,8 @@ A border separates the sidebar from the main view, and each of the two halves
     **gap analysis** (`GapPanel`, with its button) pinned to the *bottom of the
     half*: the transcript scrolls above it rather than pushing it down to
     wherever the text ends. **(owner, 2026-10-20; was above the transcript)**
-    The transcribed text itself sits in a bordered block, set in the theme's
+    The transcribed text itself sits in a bordered block of a set size (it fills
+    the area above the gaps strip and scrolls inside itself), set in the theme's
     transcript font (a serif stack in every built-in) so it is clearly content.
     **(owner, 2026-10-20)**
 - **Page navigation** ("‹ Page N of M ›") sits centred just below the switch,

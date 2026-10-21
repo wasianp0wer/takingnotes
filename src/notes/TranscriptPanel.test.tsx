@@ -88,4 +88,15 @@ describe('TranscriptPanel', () => {
       expect.arrayContaining(['border', 'border-border']),
     );
   });
+
+  it('gives the transcript a set area that scrolls on its own instead of growing with the text', () => {
+    render(page({ markdown: 'Newton: F=ma' }));
+    const block = elementWithText('Newton: F=ma')!;
+    const cls = block.className.split(/\s+/);
+    // Fills the space it is given and scrolls inside it.
+    expect(cls).toEqual(expect.arrayContaining(['flex-1', 'min-h-0', 'overflow-auto']));
+    // Its panel fills the notes area as a column, so the block has a set height to fill.
+    const panel = block.parentElement!.className.split(/\s+/);
+    expect(panel).toEqual(expect.arrayContaining(['flex', 'flex-col', 'flex-1', 'min-h-0']));
+  });
 });
