@@ -42,7 +42,7 @@ function gap(over: Partial<GapSuggestionRecord> = {}): GapSuggestionRecord {
     fromMs: 1_000_000,
     toMs: 1_060_000,
     text: 'Point.',
-    kind: 'missing',
+    kind: 'claim',
     sourceQuote: 'quote',
     status: 'proposed',
     model: 'm',
@@ -51,7 +51,7 @@ function gap(over: Partial<GapSuggestionRecord> = {}): GapSuggestionRecord {
     createdAt: 0,
     updatedAt: 0,
     ...over,
-  } as GapSuggestionRecord;
+  };
 }
 
 describe('formatOffset', () => {
@@ -142,7 +142,7 @@ describe('submitGapReview', () => {
       noteId: note.id,
       pageIndex: 0,
       devicePageNum: 1,
-      source: 'ink',
+      source: 'live',
       strokes: [],
     });
     const recording = await createRecording(
@@ -155,7 +155,7 @@ describe('submitGapReview', () => {
       recordingId: recording.id,
       fromMs: 1_000_000,
       toMs: 1_060_000,
-      kind: 'missing',
+      kind: 'claim',
       sourceQuote: 'q',
       model: 'm',
       promptVersion: 'v',

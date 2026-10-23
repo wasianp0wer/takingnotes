@@ -7,10 +7,11 @@ import {
   type FakeGeneratorCall,
   type FakeTextGenerator,
 } from '@/gaps/fakeTextGenerator';
+import { submitGapReview } from '@/gaps/gapPage';
 import { getGapPrompt } from '@/gaps/prompts';
 import { createGaps, listGapsByPage } from '@/storage/gaps';
 import { createNote } from '@/storage/notes';
-import { createPage, getPage, setPageTranscript } from '@/storage/pages';
+import { createPage, getPage, listPages, setPageTranscript } from '@/storage/pages';
 import { createRecording, setRecordingTranscript } from '@/storage/recordings';
 import { createSession } from '@/storage/sessions';
 import type {
@@ -868,7 +869,7 @@ describe('createGapAnalyzer', () => {
     // This is the half of the architecture.md §8.2 bug `recordingForPage`'s
     // own defensive `endedAt === null` guard does not reach: that guard
     // stops a candidate being *selected*, but `noteHasRecording` (what
-    // `GapPanel`'s "Find gaps in note" gates on) must independently not
+    // `GapPanel`'s "Find gaps" gates on) must independently not
     // count an in-progress recording as "the note has one" - it calls
     // `candidateRecordings` directly, with no such guard of its own, so this
     // is the one place a regression to `listRecordings()` would actually be
@@ -1097,6 +1098,26 @@ describe('createGapAnalyzer', () => {
     expect(await listGapsByPage(pageIds[1])).toHaveLength(1);
     expect(logged).toHaveBeenCalled();
     logged.mockRestore();
+  });
+
+  it('analyzeNote never analyzes the typed page a submitted review created', async () => {
+    const { noteId, pageIds } = await seedNote(['Page one notes.']);
+    await analyzerFor(createFakeTextGenerator([ONE_POINT])).analyzeNote(noteId);
+    const [suggestion] = await listGapsByPage(pageIds[0]);
+    const typed = await submitGapReview(noteId, new Map([[suggestion.id, 'accepted']]));
+    expect(typed?.source).toBe('typed');
+    expect(await listPages(noteId)).toHaveLength(2);
+
+    const generator = createFakeTextGenerator([ONE_POINT]);
+    await analyzerFor(generator).analyzeNote(noteId);
+
+    // Only the handwriting page is compared; the typed page gets no model call
+    // and no analysis of its own.
+    expect(generator.calls).toHaveLength(1);
+    expect(lastCall(generator).prompt).toContain('Page one notes.');
+    expect(lastCall(generator).prompt).not.toContain('From the recording');
+    expect(await gapAnalysisOf(typed!.id)).toBeUndefined();
+    expect(await listGapsByPage(typed!.id)).toEqual([]);
   });
 
   it('analyzeNote on a note with no pages resolves quietly', async () => {
