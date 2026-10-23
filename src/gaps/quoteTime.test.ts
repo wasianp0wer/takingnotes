@@ -38,6 +38,24 @@ describe('findQuoteInSegments', () => {
     expect(findQuoteInSegments(segments, ' ... ')).toBeNull();
   });
 
+  it('matches whole words only', () => {
+    const words = [
+      { startMs: 0, endMs: 1000, text: 'ATPase is an enzyme.' },
+      { startMs: 1000, endMs: 2000, text: 'Off to a good start.' },
+    ];
+    expect(findQuoteInSegments(words, 'ATP')).toBeNull();
+    expect(findQuoteInSegments(words, 'art')).toBeNull();
+    expect(findQuoteInSegments(words, 'enzyme off')).toEqual({ startMs: 0, endMs: 2000 });
+  });
+
+  it('skips a partial-word hit for a later whole-word one', () => {
+    const words = [
+      { startMs: 0, endMs: 1000, text: 'ATPase first.' },
+      { startMs: 1000, endMs: 2000, text: 'Then ATP itself.' },
+    ];
+    expect(findQuoteInSegments(words, 'ATP')).toEqual({ startMs: 1000, endMs: 2000 });
+  });
+
   it('ignores segments with empty text', () => {
     const withSilence = [
       { startMs: 0, endMs: 500, text: '' },
@@ -74,6 +92,16 @@ describe('findQuoteInBullets', () => {
       startMs: 0,
       endMs: 10,
     });
+  });
+
+  it('matches whole words only', () => {
+    const words = [
+      { startMs: 0, endMs: 1000, text: 'ATPase is an enzyme' },
+      { startMs: 1000, endMs: 2000, text: 'a good start' },
+      { startMs: 2000, endMs: 3000, text: 'cells make ATP' },
+    ];
+    expect(findQuoteInBullets(words, 'ATP')).toEqual({ startMs: 2000, endMs: 3000 });
+    expect(findQuoteInBullets(words, 'art')).toBeNull();
   });
 
   it('returns null with no match', () => {

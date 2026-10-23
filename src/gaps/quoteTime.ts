@@ -22,10 +22,16 @@ export function normalizeForMatch(text: string): string {
     .trim();
 }
 
+/** Normalized text with a space either side, for whole-word matching. */
+function padWords(normalized: string): string {
+  return ` ${normalized} `;
+}
+
 /**
  * The time range of the segments a quote was spoken across, or `null` when the
- * quote is empty or not found. Matching is on normalized text joined across
- * segment boundaries, so a quote may start and end mid-segment.
+ * quote is empty or not found. Matching is on whole words of normalized text
+ * joined across segment boundaries, so a quote may start and end mid-segment
+ * but never mid-word (`ATP` does not match `ATPase`).
  */
 export function findQuoteInSegments(
   segments: TranscriptSegment[],
@@ -48,7 +54,10 @@ export function findQuoteInSegments(
     haystack += text;
   }
 
-  const at = haystack.indexOf(needle);
+  // Padded on both sides so only whole words match. A hit in the padded
+  // haystack at `i` starts the needle at `i + 1` there, which is `i` in the
+  // unpadded one, so the span offsets need no adjusting.
+  const at = padWords(haystack).indexOf(padWords(needle));
   if (at < 0) return null;
   const last = at + needle.length - 1;
   const first = spans.find((s) => at >= s.from && at < s.to);
@@ -57,10 +66,11 @@ export function findQuoteInSegments(
   return { startMs: first.segment.startMs, endMs: end.segment.endMs };
 }
 
-/** The range of the first summary bullet containing the quote, or `null`. */
+/** The range of the first summary bullet containing the quote as whole words, or `null`. */
 export function findQuoteInBullets(bullets: TimedText[], quote: string): TimeRange | null {
   const needle = normalizeForMatch(quote);
   if (needle.length === 0) return null;
-  const hit = bullets.find((b) => normalizeForMatch(b.text).includes(needle));
+  const padded = padWords(needle);
+  const hit = bullets.find((b) => padWords(normalizeForMatch(b.text)).includes(padded));
   return hit ? { startMs: hit.startMs, endMs: hit.endMs } : null;
 }
