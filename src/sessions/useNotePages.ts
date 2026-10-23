@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { useCaptureState } from '@/capture/CaptureContext';
+import { subscribePagesChanged } from '@/notes/pageChanges';
 import { listPages } from '@/storage/pages';
 import type { PageRecord } from '@/storage/types';
 import type { TranscriptionQueue } from '@/transcription/queue';
@@ -23,6 +24,15 @@ export function useNotePages(noteId: string | null, transcriptionQueue: Transcri
   useEffect(
     () => transcriptionQueue.subscribe(() => setRevision((n) => n + 1)),
     [transcriptionQueue],
+  );
+
+  // A page written outside the capture engine (the gap review's Submit).
+  useEffect(
+    () =>
+      subscribePagesChanged((changed) => {
+        if (changed === noteId) setRevision((n) => n + 1);
+      }),
+    [noteId],
   );
 
   useEffect(() => {

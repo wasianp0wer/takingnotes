@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine } from '@/capture/engine';
 import type { LiveCaptureEngine } from '@/capture/engine';
+import { notifyPagesChanged } from '@/notes/pageChanges';
 import { useNotePages } from '@/sessions/useNotePages';
 import * as pagesModule from '@/storage/pages';
 import type { PageRecord } from '@/storage/types';
@@ -108,5 +109,21 @@ describe('useNotePages', () => {
     });
     expect(seen.at(-1)).toEqual([page('b')]);
     expect(seen.some((r) => r?.[0]?.noteId === 'a')).toBe(false);
+  });
+
+  it('reloads when pages change for its note, and only its note', async () => {
+    const spy = vi.spyOn(pagesModule, 'listPages').mockResolvedValue([page('a')]);
+    await render('a');
+    expect(seen.at(-1)).toEqual([page('a')]);
+    const extra = { id: 'p-new', noteId: 'a' } as PageRecord;
+    spy.mockResolvedValue([page('a'), extra]);
+    await act(async () => {
+      notifyPagesChanged('other');
+    });
+    expect(seen.at(-1)).toEqual([page('a')]);
+    await act(async () => {
+      notifyPagesChanged('a');
+    });
+    expect(seen.at(-1)).toEqual([page('a'), extra]);
   });
 });
