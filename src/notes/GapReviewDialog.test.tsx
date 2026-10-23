@@ -2,9 +2,18 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getDraft, resetAllDrafts, setDraftChoice } from '@/gaps/reviewDraft';
+import { STALE_REVIEW_MESSAGE } from '@/gaps/gapPage';
+import { getDraft, reconcileDraft, resetAllDrafts, setDraftChoice } from '@/gaps/reviewDraft';
 import { GapReviewDialog, type GapReviewDialogProps } from '@/notes/GapReviewDialog';
-import { createGap, getGap, updateGap, type CreateGapInput } from '@/storage/gaps';
+import {
+  createGap,
+  deleteGapsByPage,
+  getGap,
+  listGapsByNote,
+  reviewProposedGaps,
+  updateGap,
+  type CreateGapInput,
+} from '@/storage/gaps';
 import { createNote } from '@/storage/notes';
 import { createPage, listPages } from '@/storage/pages';
 import { createRecording } from '@/storage/recordings';
@@ -13,7 +22,7 @@ import { resetDatabase } from '@/test/resetDb';
 
 vi.mock('@/storage/gaps', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/storage/gaps')>();
-  return { ...actual, updateGap: vi.fn(actual.updateGap) };
+  return { ...actual, reviewProposedGaps: vi.fn(actual.reviewProposedGaps) };
 });
 
 declare global {
@@ -38,7 +47,7 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.restoreAllMocks();
-  vi.mocked(updateGap).mockClear();
+  vi.mocked(reviewProposedGaps).mockClear();
 });
 
 async function seed() {
@@ -96,7 +105,7 @@ async function seed() {
   const c = await createGap(
     input({ text: 'Wilson proposed fourteen points.', kind: 'example', sourceQuote: 'fourteen points' }),
   );
-  return { noteId: note.id, gaps: [a, b, c] };
+  return { noteId: note.id, pageId: page.id, input, gaps: [a, b, c] };
 }
 
 async function settle(rounds = 4): Promise<void> {
@@ -249,7 +258,9 @@ describe('GapReviewDialog', () => {
     await render(props({ noteId, noteIsLive: true }));
 
     expect(submitButton().disabled).toBe(true);
-    expect(document.body.textContent).toContain('The page will be added once this note ends.');
+    expect(document.body.textContent).toContain(
+      'You can submit once this note ends — your choices are kept until then.',
+    );
   });
 
   it('disables Submit while a gap run is in flight', async () => {
@@ -257,7 +268,7 @@ describe('GapReviewDialog', () => {
     await render(props({ noteId, running: true }));
 
     expect(submitButton().disabled).toBe(true);
-    expect(document.body.textContent).not.toContain('The page will be added once this note ends.');
+    expect(document.body.textContent).not.toContain('You can submit once this note ends');
   });
 
   it('a double-click on Submit creates exactly one page', async () => {
@@ -281,7 +292,7 @@ describe('GapReviewDialog', () => {
     const p = props({ noteId });
     await render(p);
     await click(buttonIn(rowFor(gaps[0].id), 'Accept'));
-    vi.mocked(updateGap).mockRejectedValueOnce(new Error('disk full'));
+    vi.mocked(reviewProposedGaps).mockRejectedValueOnce(new Error('disk full'));
 
     await click(submitButton());
 
@@ -291,5 +302,63 @@ describe('GapReviewDialog', () => {
     expect(rows()).toHaveLength(3);
     expect(getDraft(noteId).get(gaps[0].id)).toBe('accepted');
     expect(submitButton().disabled).toBe(false);
+  });
+
+  it('reloads rows and choices when a run finishes while it is open', async () => {
+    const { noteId, pageId, input, gaps } = await seed();
+    setDraftChoice(noteId, gaps[0], 'accepted');
+    const p = props({ noteId, running: true });
+    await render(p);
+    expect(submitButton().disabled).toBe(true);
+
+    // What a run does: replace the page's proposed rows, then move the draft.
+    await deleteGapsByPage(pageId, 'proposed');
+    const recreated = await createGap(
+      input({ text: 'The treaty was signed in 1919.', sourceQuote: 'signed in 1919' }),
+    );
+    reconcileDraft(
+      noteId,
+      (await listGapsByNote(noteId)).filter((g) => g.status === 'proposed'),
+    );
+    await render({ ...p, running: false });
+
+    expect(rows()).toHaveLength(1);
+    expect(buttonIn(rowFor(recreated.id), 'Accept').getAttribute('aria-pressed')).toBe('true');
+    expect(submitButton().disabled).toBe(false);
+  });
+
+  it('shows the stale-suggestions error and writes nothing when rows were replaced', async () => {
+    const { noteId, pageId, input, gaps } = await seed();
+    await render(props({ noteId }));
+    await click(buttonIn(rowFor(gaps[0].id), 'Accept'));
+    await deleteGapsByPage(pageId, 'proposed');
+    await createGap(input({ text: 'Fresh point' }));
+
+    await click(submitButton());
+
+    expect(document.body.textContent).toContain(STALE_REVIEW_MESSAGE);
+    expect((await listPages(noteId)).filter((page) => page.source === 'typed')).toHaveLength(0);
+  });
+
+  it('does not flash stale rows or a stale error on reopen', async () => {
+    const { noteId, gaps } = await seed();
+    const p = props({ noteId });
+    await render(p);
+    await click(buttonIn(rowFor(gaps[0].id), 'Accept'));
+    vi.mocked(reviewProposedGaps).mockRejectedValueOnce(new Error('disk full'));
+    await click(submitButton());
+    expect(document.body.textContent).toContain('disk full');
+
+    await render({ ...p, open: false });
+    await updateGap(gaps[2].id, { status: 'rejected' });
+    // Reopen without settling: what shows before the reload finishes.
+    act(() => {
+      root.render(<GapReviewDialog {...p} open />);
+    });
+
+    expect(rows()).toHaveLength(0);
+    expect(document.body.textContent).not.toContain('disk full');
+    await settle();
+    expect(rows()).toHaveLength(2);
   });
 });

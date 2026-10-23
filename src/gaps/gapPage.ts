@@ -1,10 +1,12 @@
 import { notifyPagesChanged } from '@/notes/pageChanges';
-import { updateGap } from '@/storage/gaps';
+import { reviewProposedGaps } from '@/storage/gaps';
 import { createTypedPage, listPages } from '@/storage/pages';
 import { getRecording } from '@/storage/recordings';
 import type { GapSuggestionRecord, PageRecord, RecordingRecord } from '@/storage/types';
 
 export type GapDecision = 'accepted' | 'rejected';
+
+export const STALE_REVIEW_MESSAGE = 'Suggestions changed — reopen Review to see the latest.';
 
 /** `m:ss`, or `h:mm:ss` from one hour on. Negative input clamps to zero. */
 export function formatOffset(ms: number): string {
@@ -48,17 +50,20 @@ export function buildGapPageMarkdown(
 /**
  * Persists the review: each decision is written to its gap, and the accepted
  * ones become a new typed page appended to the note. Undecided gaps are left
- * `proposed`. Resolves to the new page, or null when nothing was accepted.
+ * `proposed`. Throws `STALE_REVIEW_MESSAGE`, writing nothing, when any decided
+ * gap is gone or no longer `proposed`. Resolves to the new page, or null when nothing was accepted.
  */
 export async function submitGapReview(
   noteId: string,
   decisions: Map<string, GapDecision>,
 ): Promise<PageRecord | null> {
-  const accepted: GapSuggestionRecord[] = [];
-  for (const [id, status] of decisions) {
-    const updated = await updateGap(id, { status });
-    if (status === 'accepted') accepted.push(updated);
-  }
+  // All-or-nothing: an accepted row written without its typed page would be
+  // lost work, so a stale id (a run replaced the rows) fails before any write.
+  const reviewed = await reviewProposedGaps(
+    decisions,
+    () => new Error(STALE_REVIEW_MESSAGE),
+  );
+  const accepted = reviewed.filter((g) => g.status === 'accepted');
   if (accepted.length === 0) return null;
 
   const items: Array<{ gap: GapSuggestionRecord; recording: RecordingRecord }> = [];

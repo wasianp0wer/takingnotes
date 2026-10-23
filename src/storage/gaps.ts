@@ -117,6 +117,35 @@ export async function updateGap(
 }
 
 /**
+ * Applies review decisions all-or-nothing, in one transaction: when any id is
+ * missing or no longer `proposed` (a re-run replaced it, or it was already
+ * reviewed), nothing is written and `staleError()` is thrown. Resolves to the
+ * updated records in the order given.
+ */
+export async function reviewProposedGaps(
+  decisions: Map<string, Exclude<GapStatus, 'proposed'>>,
+  staleError: () => Error,
+): Promise<GapSuggestionRecord[]> {
+  if (decisions.size === 0) return [];
+  const db = await openNotesDb();
+  const tx = db.transaction('gaps', 'readwrite');
+  const now = Date.now();
+  const updated: GapSuggestionRecord[] = [];
+  for (const [id, status] of decisions) {
+    const gap = await tx.store.get(id);
+    if (!gap || gap.status !== 'proposed') {
+      tx.abort();
+      await tx.done.catch(() => undefined);
+      throw staleError();
+    }
+    updated.push({ ...gap, status, updatedAt: now });
+  }
+  for (const gap of updated) await tx.store.put(gap);
+  await tx.done;
+  return updated;
+}
+
+/**
  * Oldest first: suggestions are read in the order the model produced them, so
  * they line up with the page (and, across a note, with its pages). `id` breaks
  * a tie, because a batch shares one `createdAt` and index order is by random

@@ -7,7 +7,7 @@ import {
   submitGapReview,
 } from '@/gaps/gapPage';
 import { subscribePagesChanged } from '@/notes/pageChanges';
-import { createGap, getGap } from '@/storage/gaps';
+import { createGap, deleteGapsByPage, getGap, updateGap } from '@/storage/gaps';
 import type { CreateGapInput } from '@/storage/gaps';
 import { createNote } from '@/storage/notes';
 import { createPage, listPages } from '@/storage/pages';
@@ -163,7 +163,7 @@ describe('submitGapReview', () => {
     const g1 = await createGap({ ...base, text: 'Accepted point', quoteStartMs: 1000, quoteEndMs: 2000 });
     const g2 = await createGap({ ...base, text: 'Rejected point' });
     const g3 = await createGap({ ...base, text: 'Undecided point' });
-    return { note, g1, g2, g3 };
+    return { note, page, g1, g2, g3 };
   }
 
   it('updates statuses, appends a typed page and notifies', async () => {
@@ -201,5 +201,52 @@ describe('submitGapReview', () => {
     expect((await getGap(g2.id))?.status).toBe('rejected');
     expect(await listPages(note.id)).toHaveLength(1);
     expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('writes nothing when a decided suggestion has been replaced by a re-run', async () => {
+    const { note, page, g1 } = await seed();
+    await deleteGapsByPage(page.id, 'proposed');
+    const survivor = await createGap({
+      noteId: note.id,
+      pageId: page.id,
+      recordingId: g1.recordingId,
+      fromMs: 1_000_000,
+      toMs: 1_060_000,
+      kind: 'claim',
+      sourceQuote: 'q',
+      model: 'm',
+      promptVersion: 'v',
+      text: 'Fresh point',
+    });
+    // The surviving row comes first, so a write-as-you-go submit would already
+    // have changed it before reaching the dead id.
+    const decisions = new Map<string, 'accepted' | 'rejected'>([
+      [survivor.id, 'rejected'],
+      [g1.id, 'accepted'],
+    ]);
+
+    await expect(submitGapReview(note.id, decisions)).rejects.toThrow(
+      'Suggestions changed — reopen Review to see the latest.',
+    );
+    expect((await getGap(survivor.id))?.status).toBe('proposed');
+    expect(await listPages(note.id)).toHaveLength(1);
+  });
+
+  it('writes nothing when a decided suggestion is no longer proposed', async () => {
+    const { note, g1, g2 } = await seed();
+    await updateGap(g2.id, { status: 'rejected' });
+
+    await expect(
+      submitGapReview(
+        note.id,
+        new Map([
+          [g1.id, 'accepted'],
+          [g2.id, 'accepted'],
+        ]),
+      ),
+    ).rejects.toThrow('Suggestions changed — reopen Review to see the latest.');
+    expect((await getGap(g1.id))?.status).toBe('proposed');
+    expect((await getGap(g2.id))?.status).toBe('rejected');
+    expect(await listPages(note.id)).toHaveLength(1);
   });
 });

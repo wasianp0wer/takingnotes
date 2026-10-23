@@ -4,6 +4,7 @@ import type { GapAnalyzer } from '@/gaps/analyzer';
 import { noteHasRecording, recordingForPage } from '@/gaps/analyzer';
 import { GAP_LEAD_MS, GAP_TRAIL_MS } from '@/gaps/constants';
 import { describeGapSkip, gapEligibility } from '@/gaps/eligibility';
+import { runGapAnalysis, useGapRunActive } from '@/gaps/gapRuns';
 import { reconcileDraft } from '@/gaps/reviewDraft';
 import { createConfiguredGapAnalyzer } from '@/gaps/startGaps';
 import { segmentsInWindow, speechTextOf, speechWindowForPage } from '@/gaps/window';
@@ -74,7 +75,9 @@ export function GapPanel({ noteId, pageId, noteIsLive = false, analyzer }: GapPa
   });
   const [loadError, setLoadError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
-  const [running, setRunning] = useState(false);
+  // Module-level, not component state: the panel remounts per page, and a run
+  // started on another page must still read as in flight here.
+  const running = useGapRunActive(noteId);
   const [runError, setRunError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
 
@@ -88,13 +91,6 @@ export function GapPanel({ noteId, pageId, noteIsLive = false, analyzer }: GapPa
       mountedRef.current = false;
     };
   }, []);
-
-  // A second guard, separate from the `running` state: two presses
-  // committed in the same batch (before either has re-rendered) would both
-  // read `running` as its pre-click value from their shared render closure,
-  // so the re-entrancy check has to live somewhere that mutates immediately,
-  // not something that only updates on the next commit.
-  const runningRef = useRef(false);
 
   useEffect(() => {
     let live = true;
@@ -130,36 +126,37 @@ export function GapPanel({ noteId, pageId, noteIsLive = false, analyzer }: GapPa
     return () => {
       live = false;
     };
-  }, [pageId, noteId, revision]);
+    // `running` too: a run - possibly started from another page's panel -
+    // replaces rows and analysis status, so its end must reload them.
+  }, [pageId, noteId, revision, running]);
 
   async function run() {
     // A press while a run is already in flight is a no-op: the button is
-    // disabled for this, but a second press slipping through (a race, or an
-    // environment that does not honour `disabled`) must not start a second
-    // run on top of it. Checked and set on the ref first, synchronously,
-    // before any `await` - see `runningRef` above.
-    if (runningRef.current) return;
-    runningRef.current = true;
-    setRunning(true);
+    // disabled for this, but a second press slipping through (a same-batch
+    // double press, or a remount mid-run) must not start a second run on top
+    // of it. `runGapAnalysis` marks the note synchronously, before any
+    // `await`, and the mark lives at module level, so it holds across mounts.
     setRunError(null);
     try {
-      const activeAnalyzer = analyzer ?? (await createConfiguredGapAnalyzer());
-      await activeAnalyzer.analyzeNote(noteId);
-      // The run replaced the note's proposed rows with new ids: move any
-      // unsubmitted review choices onto their replacements.
-      const proposedForNote = (await listGapsByNote(noteId)).filter(
-        (g) => g.status === 'proposed',
-      );
-      reconcileDraft(noteId, proposedForNote);
-      if (mountedRef.current) setRevision((n) => n + 1);
+      await runGapAnalysis(noteId, async () => {
+        try {
+          const activeAnalyzer = analyzer ?? (await createConfiguredGapAnalyzer());
+          await activeAnalyzer.analyzeNote(noteId);
+        } finally {
+          // The run replaced the note's proposed rows with new ids - even one
+          // that failed part-way may have: move any unsubmitted review choices
+          // onto their replacements before the run reads as finished.
+          const proposedForNote = (await listGapsByNote(noteId)).filter(
+            (g) => g.status === 'proposed',
+          );
+          reconcileDraft(noteId, proposedForNote);
+        }
+      });
     } catch (error) {
       if (mountedRef.current) {
         setRunError(error instanceof Error ? error.message : String(error));
         console.error('[gaps] analysis run failed', error);
       }
-    } finally {
-      runningRef.current = false;
-      if (mountedRef.current) setRunning(false);
     }
   }
 
@@ -247,7 +244,7 @@ export function GapPanel({ noteId, pageId, noteIsLive = false, analyzer }: GapPa
         <Button
           variant="outline"
           size="sm"
-          disabled={proposedInNote === 0}
+          disabled={proposedInNote === 0 || running}
           onClick={() => setDialogOpen(true)}
         >
           {proposedInNote === 0 ? 'Review suggestions' : `Review suggestions (${proposedInNote})`}

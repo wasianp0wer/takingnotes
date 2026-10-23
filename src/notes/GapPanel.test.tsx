@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GapAnalyzer } from '@/gaps/analyzer';
 import { describeGapSkip } from '@/gaps/eligibility';
 import { speechWindowForPage } from '@/gaps/window';
+import { resetGapRuns } from '@/gaps/gapRuns';
 import { getDraft, resetAllDrafts, setDraftChoice } from '@/gaps/reviewDraft';
 import { GapPanel } from '@/notes/GapPanel';
 import { createGap, deleteGapsByPage, type CreateGapInput } from '@/storage/gaps';
@@ -33,6 +34,7 @@ beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   await resetDatabase();
   resetAllDrafts();
+  resetGapRuns();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -283,9 +285,9 @@ describe('GapPanel', () => {
   it('a second press while a run is in flight does not start a second run', async () => {
     // Both clicks are dispatched inside one `act()`, before React commits the
     // first one's state update - a same-batch double press. `running` (the
-    // rendered state) would read `null` for both handlers in that window, so
+    // rendered state) would read `false` for both handlers in that window, so
     // this only proves the guard if the guard itself does not depend on a
-    // commit having happened yet (see `runningRef` in `GapPanel.tsx`).
+    // commit having happened yet (see `runGapAnalysis` in `gapRuns.ts`).
     const { noteId, pageId } = await seedPage();
     const manual = createManualAnalyzer();
 
@@ -579,7 +581,6 @@ describe('GapPanel', () => {
     expect(buttonByText('Review suggestions (1)').disabled).toBe(false);
   });
 
-
   it('has exactly one Find gaps button, which analyzes the whole note', async () => {
     const { noteId, pageId } = await seedPage();
     const analyzer = createStubAnalyzer();
@@ -694,6 +695,75 @@ describe('GapPanel', () => {
     expect(accept?.getAttribute('aria-pressed')).toBe('true');
   });
 
+  it('a run in flight survives a remount: Find gaps stays disabled and a second press does nothing', async () => {
+    const { noteId, pageId } = await seedPage();
+    const manual = createManualAnalyzer();
+
+    await render({ noteId, pageId, analyzer: manual });
+    await click(buttonByText('Find gaps'));
+
+    // Navigating to another page remounts the panel (NotesHalf keys it by page).
+    act(() => root.unmount());
+    root = createRoot(container);
+    await render({ noteId, pageId, analyzer: manual });
+
+    const findGaps = buttonByText('Find gaps');
+    expect(findGaps.disabled).toBe(true);
+    await act(async () => {
+      findGaps.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await settle();
+    expect(manual.analyzeNote).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      manual.resolve();
+    });
+    await settle();
+
+    expect(buttonByText('Find gaps').disabled).toBe(false);
+  });
+
+  it('Review suggestions is disabled while a run is in flight', async () => {
+    const { noteId, pageId, recordingId } = await seedPage();
+    await createGap(gapInput(pageId, noteId, recordingId!));
+    const manual = createManualAnalyzer();
+
+    await render({ noteId, pageId, analyzer: manual });
+    expect(buttonByText('Review suggestions (1)').disabled).toBe(false);
+    await click(buttonByText('Find gaps'));
+
+    expect(buttonByText('Review suggestions (1)').disabled).toBe(true);
+
+    await act(async () => {
+      manual.resolve();
+    });
+    await settle();
+
+    expect(buttonByText('Review suggestions (1)').disabled).toBe(false);
+  });
+
+  it('carries draft choices over even when the run fails after recreating rows', async () => {
+    const { noteId, pageId, recordingId } = await seedPage();
+    const original = await createGap(gapInput(pageId, noteId, recordingId!));
+    setDraftChoice(noteId, original, 'accepted');
+    let recreatedId = '';
+    const analyzer = createStubAnalyzer({
+      analyzeNote: async () => {
+        await deleteGapsByPage(pageId, 'proposed');
+        recreatedId = (await createGap(gapInput(pageId, noteId, recordingId!))).id;
+        throw new Error('second page failed');
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await render({ noteId, pageId, analyzer });
+    await click(buttonByText('Find gaps'));
+
+    expect(container.textContent).toContain('second page failed');
+    expect(recreatedId).not.toBe('');
+    expect(getDraft(noteId).get(recreatedId)).toBe('accepted');
+  });
+
   it('passes noteIsLive to the dialog', async () => {
     const { noteId, pageId, recordingId } = await seedPage();
     await createGap(gapInput(pageId, noteId, recordingId!));
@@ -701,6 +771,8 @@ describe('GapPanel', () => {
     await render({ noteId, pageId, noteIsLive: true });
     await click(buttonByText('Review suggestions (1)'));
 
-    expect(document.body.textContent).toContain('The page will be added once this note ends.');
+    expect(document.body.textContent).toContain(
+      'You can submit once this note ends — your choices are kept until then.',
+    );
   });
 });

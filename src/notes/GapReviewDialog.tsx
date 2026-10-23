@@ -56,9 +56,23 @@ export function GapReviewDialog({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  // Same reasoning as `GapPanel`'s `runningRef`: two clicks in one batch both
-  // see `submitting === false`, so the guard must mutate synchronously.
+  // Two clicks in one batch both see `submitting === false`, so the guard
+  // must mutate synchronously (as `runGapAnalysis` marks a run).
   const submittingRef = useRef(false);
+
+  // Closing forgets what was shown, so a reopen does not flash the old rows or
+  // an old error before its own load lands. Done while rendering, on the
+  // `open` change, rather than in an effect, so the reopen's first paint is
+  // already clean.
+  const [shownOpen, setShownOpen] = useState(open);
+  if (open !== shownOpen) {
+    setShownOpen(open);
+    if (!open) {
+      setRows([]);
+      setSubmitError(null);
+      setLoadError(null);
+    }
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -85,7 +99,9 @@ export function GapReviewDialog({
     return () => {
       live = false;
     };
-  }, [open, noteId]);
+    // `running` too: a run replaces the note's proposed rows (and moves the
+    // draft onto them), so the rows shown must be reloaded when it finishes.
+  }, [open, noteId, running]);
 
   function toggle(gap: GapSuggestionRecord, decision: GapDecision) {
     const next = choices.get(gap.id) === decision ? null : decision;
@@ -168,7 +184,7 @@ export function GapReviewDialog({
 
         {noteIsLive && (
           <p className="text-sm text-muted-foreground">
-            The page will be added once this note ends.
+            You can submit once this note ends — your choices are kept until then.
           </p>
         )}
         {submitError && <p className="text-sm text-destructive">{submitError}</p>}
