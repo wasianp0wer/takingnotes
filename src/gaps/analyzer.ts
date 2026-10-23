@@ -77,8 +77,8 @@ async function candidateRecordings(noteId: string): Promise<RecordingRecord[]> {
 
 /**
  * Whether a note has any finished recording linked to it at all, regardless
- * of whether it overlaps any particular page. This is what "Find gaps in
- * note" (`GapPanel`) gates on: a note-wide run may still find a usable
+ * of whether it overlaps any particular page. This is what "Find gaps"
+ * (`GapPanel`) gates on: a note-wide run may still find a usable
  * recording for some *other* page even when the page currently viewed has
  * none of its own (K45 made recording selection per-page, which this keeps
  * from narrowing the note-wide action down to one page's answer).

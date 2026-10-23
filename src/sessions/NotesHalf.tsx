@@ -157,6 +157,7 @@ export function NotesHalf({
                 key={`gaps-${viewedPage.id}`}
                 noteId={viewedPage.noteId}
                 pageId={viewedPage.id}
+                noteIsLive={state.activeNoteId === viewedPage.noteId}
               />
             </div>
           )}

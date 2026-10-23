@@ -5,8 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GapAnalyzer } from '@/gaps/analyzer';
 import { describeGapSkip } from '@/gaps/eligibility';
 import { speechWindowForPage } from '@/gaps/window';
+import { getDraft, resetAllDrafts, setDraftChoice } from '@/gaps/reviewDraft';
 import { GapPanel } from '@/notes/GapPanel';
-import { createGap, listGapsByPage, type CreateGapInput } from '@/storage/gaps';
+import { createGap, deleteGapsByPage, type CreateGapInput } from '@/storage/gaps';
 import { createNote } from '@/storage/notes';
 import { createPage, getPage, setPageGapAnalysis, setPageTranscript } from '@/storage/pages';
 import { createRecording, setRecordingTranscript } from '@/storage/recordings';
@@ -31,6 +32,7 @@ let root: ReturnType<typeof createRoot>;
 beforeEach(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   await resetDatabase();
+  resetAllDrafts();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -163,6 +165,7 @@ async function render(props: {
   noteId: string;
   pageId: string;
   analyzer?: GapAnalyzer;
+  noteIsLive?: boolean;
 }): Promise<void> {
   act(() => {
     root.render(<GapPanel {...props} />);
@@ -197,25 +200,25 @@ function createStubAnalyzer(overrides: Partial<GapAnalyzer> = {}): GapAnalyzer &
 }
 
 /**
- * An analyzer whose `analyzePage` call hangs until `resolve` or `reject` is
+ * An analyzer whose `analyzeNote` call hangs until `resolve` or `reject` is
  * called by hand.
  */
 function createManualAnalyzer() {
-  let release: ((value: GapSuggestionRecord[]) => void) | null = null;
+  let release: (() => void) | null = null;
   let fail: ((error: unknown) => void) | null = null;
-  const analyzePage = vi.fn(
+  const analyzePage = vi.fn(async () => [] as GapSuggestionRecord[]);
+  const analyzeNote = vi.fn(
     () =>
-      new Promise<GapSuggestionRecord[]>((resolve, reject) => {
+      new Promise<void>((resolve, reject) => {
         release = resolve;
         fail = reject;
       }),
   );
-  const analyzeNote = vi.fn(async () => {});
   return {
     analyzePage,
     analyzeNote,
-    resolve(value: GapSuggestionRecord[] = []) {
-      release?.(value);
+    resolve() {
+      release?.();
       release = null;
       fail = null;
     },
@@ -260,59 +263,6 @@ describe('GapPanel', () => {
     expect(section?.textContent).toContain('Gaps');
   });
 
-  it('lists proposed suggestions with kind and quote', async () => {
-    const { noteId, pageId, recordingId } = await seedPage();
-    await createGap(
-      gapInput(pageId, noteId, recordingId!, {
-        text: 'The treaty was the Treaty of Versailles.',
-        kind: 'name-or-date',
-        sourceQuote: 'signed in 1919',
-      }),
-    );
-    await createGap(
-      gapInput(pageId, noteId, recordingId!, {
-        text: 'The war lasted four years.',
-        kind: 'claim',
-        sourceQuote: 'four years of fighting',
-      }),
-    );
-
-    await render({ noteId, pageId });
-
-    expect(container.textContent).toContain('The treaty was the Treaty of Versailles.');
-    expect(container.textContent).toContain('The war lasted four years.');
-    expect(container.textContent).toContain('Name or date');
-    expect(container.textContent).toContain('Claim');
-    expect(container.textContent).toContain('signed in 1919');
-    expect(container.textContent).toContain('four years of fighting');
-  });
-
-  it('Accept moves a suggestion into the accepted block', async () => {
-    const { noteId, pageId, recordingId } = await seedPage();
-    const gap = await createGap(gapInput(pageId, noteId, recordingId!));
-
-    await render({ noteId, pageId });
-    await click(buttonByText('Accept'));
-
-    const stored = await listGapsByPage(pageId);
-    const updated = stored.find((g) => g.id === gap.id);
-    expect(updated?.status).toBe('accepted');
-    expect(container.textContent).toContain('From the recording');
-  });
-
-  it('Reject moves it into the rejected block', async () => {
-    const { noteId, pageId, recordingId } = await seedPage();
-    const gap = await createGap(gapInput(pageId, noteId, recordingId!));
-
-    await render({ noteId, pageId });
-    await click(buttonByText('Reject'));
-
-    const stored = await listGapsByPage(pageId);
-    const updated = stored.find((g) => g.id === gap.id);
-    expect(updated?.status).toBe('rejected');
-    expect(container.textContent).toContain('Rejected');
-  });
-
   it('accepted suggestions are read-only and never touch the transcript', async () => {
     const { noteId, pageId, recordingId } = await seedPage();
     await createGap(gapInput(pageId, noteId, recordingId!, { status: 'accepted' }));
@@ -328,53 +278,6 @@ describe('GapPanel', () => {
 
     const stored = await getPage(pageId);
     expect(stored?.transcript?.markdown).toBe('What the student wrote.');
-  });
-
-  it('Find gaps analyzes this page and reloads the list', async () => {
-    const { noteId, pageId, recordingId } = await seedPage();
-    const analyzer = createStubAnalyzer({
-      analyzePage: async () => {
-        const created = await createGap(
-          gapInput(pageId, noteId, recordingId!, { text: 'Found by analysis' }),
-        );
-        return [created];
-      },
-    });
-
-    await render({ noteId, pageId, analyzer });
-    await click(buttonByText('Find gaps'));
-
-    expect(analyzer.analyzePage).toHaveBeenCalledWith(pageId);
-    expect(container.textContent).toContain('Found by analysis');
-  });
-
-  it('Find gaps in note analyzes the note', async () => {
-    const { noteId, pageId } = await seedPage();
-    const analyzer = createStubAnalyzer();
-
-    await render({ noteId, pageId, analyzer });
-    await click(buttonByText('Find gaps in note'));
-
-    expect(analyzer.analyzeNote).toHaveBeenCalledWith(noteId);
-  });
-
-  it('both buttons are disabled while a run is in flight and enabled after', async () => {
-    const { noteId, pageId } = await seedPage();
-    const manual = createManualAnalyzer();
-
-    await render({ noteId, pageId, analyzer: manual });
-    await click(buttonByText('Find gaps'));
-
-    expect(buttonByText('Find gaps').disabled).toBe(true);
-    expect(buttonByText('Find gaps in note').disabled).toBe(true);
-
-    await act(async () => {
-      manual.resolve();
-    });
-    await settle();
-
-    expect(buttonByText('Find gaps').disabled).toBe(false);
-    expect(buttonByText('Find gaps in note').disabled).toBe(false);
   });
 
   it('a second press while a run is in flight does not start a second run', async () => {
@@ -399,7 +302,7 @@ describe('GapPanel', () => {
     });
     await settle();
 
-    expect(manual.analyzePage).toHaveBeenCalledTimes(1);
+    expect(manual.analyzeNote).toHaveBeenCalledTimes(1);
   });
 
   it('unmounting mid-run is quiet', async () => {
@@ -483,7 +386,7 @@ describe('GapPanel', () => {
     // error does not spill a stack trace into the test output.
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const analyzer = createStubAnalyzer({
-      analyzePage: async () => {
+      analyzeNote: async () => {
         throw new Error('no model');
       },
     });
@@ -527,7 +430,7 @@ describe('GapPanel', () => {
     expect(container.textContent).not.toContain('null');
   });
 
-  it('marks a summarized suggestion without claiming the current analysis was summarized', async () => {
+  it('does not claim the current analysis was summarized because an older suggestion was', async () => {
     // The status-line notice must come from `gapAnalysis.summarized` alone:
     // an older `accepted` suggestion carrying `summarized: true` must not
     // make a direct (`summarized: false`) analysis look lossy.
@@ -540,7 +443,6 @@ describe('GapPanel', () => {
     await render({ noteId, pageId });
 
     expect(container.textContent).not.toContain('The speech was too long to compare directly');
-    expect(container.textContent).toContain('Summarized');
   });
 
   it('shows a one-line source note naming the recording window', async () => {
@@ -589,17 +491,16 @@ describe('GapPanel', () => {
     expect(container.textContent).not.toContain('summarized');
   });
 
-  it('explains an ineligible page and disables Find gaps', async () => {
+  it('explains an ineligible page but still offers Find gaps for the note', async () => {
     const { noteId, pageId } = await seedPage({ strokes: [] });
 
     await render({ noteId, pageId });
 
     expect(container.textContent).toContain(describeGapSkip('no-strokes'));
-    expect(buttonByText('Find gaps').disabled).toBe(true);
-    expect(buttonByText('Find gaps in note').disabled).toBe(false);
+    expect(buttonByText('Find gaps').disabled).toBe(false);
   });
 
-  it('says when the note has no recording and disables both actions', async () => {
+  it('says when the note has no recording and disables Find gaps', async () => {
     const { noteId, pageId } = await seedPage({ withRecording: false });
 
     await render({ noteId, pageId });
@@ -611,7 +512,6 @@ describe('GapPanel', () => {
     // linked recording." is a falsehood next to a contradiction.
     expect(container.textContent).not.toContain('Comparing against the recording');
     expect(buttonByText('Find gaps').disabled).toBe(true);
-    expect(buttonByText('Find gaps in note').disabled).toBe(true);
   });
 
   it("reads the configured gaps.leadMs/trailMs, so eligibility matches what the analyzer will actually use (fix round 1, Important 3)", async () => {
@@ -630,7 +530,7 @@ describe('GapPanel', () => {
     });
 
     await render({ noteId, pageId });
-    expect(buttonByText('Find gaps').disabled).toBe(true);
+    expect(container.textContent).not.toContain('Comparing against the recording');
 
     act(() => root.unmount());
     root = createRoot(container);
@@ -641,7 +541,7 @@ describe('GapPanel', () => {
     await setSettingValue('gaps.leadMs', 150_000);
 
     await render({ noteId, pageId });
-    expect(buttonByText('Find gaps').disabled).toBe(false);
+    expect(container.textContent).toContain('Comparing against the recording');
   });
 
   it('says the window matched no speech rather than that no gaps were found', async () => {
@@ -676,6 +576,131 @@ describe('GapPanel', () => {
     expect(container.textContent).toContain(
       "The recording has no speech in this page's time window.",
     );
-    expect(container.textContent).toContain('The treaty was the Treaty of Versailles.');
+    expect(buttonByText('Review suggestions (1)').disabled).toBe(false);
+  });
+
+
+  it('has exactly one Find gaps button, which analyzes the whole note', async () => {
+    const { noteId, pageId } = await seedPage();
+    const analyzer = createStubAnalyzer();
+
+    await render({ noteId, pageId, analyzer });
+
+    expect(buttons().filter((b) => b.textContent === 'Find gaps')).toHaveLength(1);
+    expect(buttons().find((b) => b.textContent === 'Find gaps in note')).toBeUndefined();
+
+    await click(buttonByText('Find gaps'));
+
+    expect(analyzer.analyzeNote).toHaveBeenCalledWith(noteId);
+    expect(analyzer.analyzePage).not.toHaveBeenCalled();
+  });
+
+  it('enables Find gaps when the note has a recording even if this page has none', async () => {
+    // Written long after the recording ends: this page has no recording of its
+    // own, but the note does.
+    const startedAt = 1_000_000;
+    const { noteId, pageId } = await seedPage({
+      strokes: [stroke(startedAt + 5_000_000, startedAt + 5_010_000)],
+      finalizedAt: startedAt + 5_015_000,
+    });
+
+    await render({ noteId, pageId });
+
+    expect(container.textContent).toContain(describeGapSkip('no-recording'));
+    expect(buttonByText('Find gaps').disabled).toBe(false);
+  });
+
+  it('Find gaps is disabled while a run is in flight and enabled after', async () => {
+    const { noteId, pageId } = await seedPage();
+    const manual = createManualAnalyzer();
+
+    await render({ noteId, pageId, analyzer: manual });
+    await click(buttonByText('Find gaps'));
+
+    expect(buttonByText('Find gaps').disabled).toBe(true);
+
+    await act(async () => {
+      manual.resolve();
+    });
+    await settle();
+
+    expect(buttonByText('Find gaps').disabled).toBe(false);
+  });
+
+  it('Review suggestions is disabled when the note has no proposed suggestions', async () => {
+    const { noteId, pageId, recordingId } = await seedPage();
+    await createGap(gapInput(pageId, noteId, recordingId!, { status: 'rejected' }));
+
+    await render({ noteId, pageId });
+
+    expect(buttonByText('Review suggestions').disabled).toBe(true);
+  });
+
+  it('Review suggestions counts proposed suggestions on every page of the note', async () => {
+    const { noteId, pageId, recordingId } = await seedPage();
+    const other = await createPage({
+      noteId,
+      pageIndex: 1,
+      devicePageNum: 2,
+      source: 'live',
+      strokes: [],
+      finalizedAt: 2_000_000,
+    });
+    await createGap(gapInput(other.id, noteId, recordingId!));
+    await createGap(gapInput(other.id, noteId, recordingId!, { text: 'Another point.' }));
+
+    await render({ noteId, pageId });
+
+    expect(buttonByText('Review suggestions (2)').disabled).toBe(false);
+  });
+
+  it('Review suggestions opens the review dialog', async () => {
+    const { noteId, pageId, recordingId } = await seedPage();
+    await createGap(gapInput(pageId, noteId, recordingId!));
+
+    await render({ noteId, pageId });
+    await click(buttonByText('Review suggestions (1)'));
+
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('The treaty was the Treaty of Versailles.');
+    expect(buttonByText('Find gaps').disabled).toBe(true);
+  });
+
+  it('carries draft choices over to rows a run recreates', async () => {
+    const { noteId, pageId, recordingId } = await seedPage();
+    const original = await createGap(gapInput(pageId, noteId, recordingId!));
+    setDraftChoice(noteId, original, 'accepted');
+    let recreatedId = '';
+    const analyzer = createStubAnalyzer({
+      analyzeNote: async () => {
+        await deleteGapsByPage(pageId, 'proposed');
+        const recreated = await createGap(gapInput(pageId, noteId, recordingId!));
+        recreatedId = recreated.id;
+      },
+    });
+
+    await render({ noteId, pageId, analyzer });
+    await click(buttonByText('Find gaps'));
+
+    expect(recreatedId).not.toBe('');
+    expect(getDraft(noteId).get(recreatedId)).toBe('accepted');
+    expect(getDraft(noteId).has(original.id)).toBe(false);
+
+    await click(buttonByText('Review suggestions (1)'));
+    const row = document.body.querySelector(`[data-gap-row="${recreatedId}"]`);
+    const accept = Array.from(row?.querySelectorAll('button') ?? []).find(
+      (b) => b.textContent === 'Accept',
+    );
+    expect(accept?.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('passes noteIsLive to the dialog', async () => {
+    const { noteId, pageId, recordingId } = await seedPage();
+    await createGap(gapInput(pageId, noteId, recordingId!));
+
+    await render({ noteId, pageId, noteIsLive: true });
+    await click(buttonByText('Review suggestions (1)'));
+
+    expect(document.body.textContent).toContain('The page will be added once this note ends.');
   });
 });
