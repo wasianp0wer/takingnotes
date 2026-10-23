@@ -368,6 +368,115 @@ describe('createGapAnalyzer', () => {
     });
   });
 
+  describe('quote timing', () => {
+    const FIRST = 'The first segment talks about heat engines at length.';
+    const SECOND = 'Entropy always increases in a closed system.';
+    const TWO_SEGMENTS: TranscriptSegment[] = [
+      { startMs: 5_000, endMs: 9_000, text: FIRST },
+      { startMs: 10_000, endMs: 14_000, text: SECOND },
+    ];
+    const summarizeOpts = {
+      directCharBudget: 60,
+      chunkChars: 60,
+      chunkOverlap: 0,
+    };
+
+    function quoting(sourceQuote: string): string {
+      return JSON.stringify([{ text: 'A point.', kind: 'claim', sourceQuote }]);
+    }
+
+    it('records the segment span a quote was spoken in on the direct path', async () => {
+      const { pageId } = await seed({
+        segments: [
+          { startMs: 1_000, endMs: 4_000, text: 'Intro.' },
+          { startMs: 5_000, endMs: 9_000, text: SECOND },
+        ],
+      });
+      const generator = createFakeTextGenerator([quoting('entropy always increases')]);
+
+      await analyzerFor(generator).analyzePage(pageId);
+
+      const [gap] = await listGapsByPage(pageId);
+      expect(gap.quoteStartMs).toBe(5_000);
+      expect(gap.quoteEndMs).toBe(9_000);
+    });
+
+    it('leaves the timing unset when the direct quote is not in the speech', async () => {
+      const { pageId } = await seed({ segments: TWO_SEGMENTS });
+      const generator = createFakeTextGenerator([quoting('nothing like this was said')]);
+
+      await analyzerFor(generator).analyzePage(pageId);
+
+      const [gap] = await listGapsByPage(pageId);
+      expect(gap.quoteStartMs).toBeUndefined();
+      expect(gap.quoteEndMs).toBeUndefined();
+      expect('quoteStartMs' in gap).toBe(false);
+    });
+
+    it('uses the span of the chunk whose bullet holds the quote when summarized', async () => {
+      const { pageId } = await seed({ segments: TWO_SEGMENTS });
+      const generator = createFakeTextGenerator([
+        '- Point A from chunk one',
+        '- Point B from chunk two',
+        quoting('Point B from chunk two'),
+      ]);
+
+      await analyzerFor(generator, summarizeOpts).analyzePage(pageId);
+
+      expect(generator.calls).toHaveLength(3);
+      const [gap] = await listGapsByPage(pageId);
+      expect(gap.summarized).toBe(true);
+      expect(gap.quoteStartMs).toBe(10_000);
+      expect(gap.quoteEndMs).toBe(14_000);
+    });
+
+    it('splits a multi-line summary into bullets that each keep the chunk span', async () => {
+      const { pageId } = await seed({ segments: TWO_SEGMENTS });
+      const generator = createFakeTextGenerator([
+        '- Point A from chunk one',
+        '- Point B from chunk two\n\n- Point C from chunk two',
+        quoting('Point C from chunk two'),
+      ]);
+
+      await analyzerFor(generator, summarizeOpts).analyzePage(pageId);
+
+      expect(generator.calls[2].prompt).toContain(
+        '- Point A from chunk one\n- Point B from chunk two\n- Point C from chunk two',
+      );
+      const [gap] = await listGapsByPage(pageId);
+      expect(gap.quoteStartMs).toBe(10_000);
+      expect(gap.quoteEndMs).toBe(14_000);
+    });
+
+    it('falls back to the raw speech when no summary bullet holds the quote', async () => {
+      const { pageId } = await seed({ segments: TWO_SEGMENTS });
+      const generator = createFakeTextGenerator([
+        '- Point A from chunk one',
+        '- Point B from chunk two',
+        quoting('entropy always increases'),
+      ]);
+
+      await analyzerFor(generator, summarizeOpts).analyzePage(pageId);
+
+      const [gap] = await listGapsByPage(pageId);
+      expect(gap.quoteStartMs).toBe(10_000);
+      expect(gap.quoteEndMs).toBe(14_000);
+    });
+
+    it('matches against the raw speech when every chunk summarizes to nothing', async () => {
+      const { pageId } = await seed({ segments: TWO_SEGMENTS });
+      const generator = createFakeTextGenerator(['', '', quoting('heat engines at length')]);
+
+      await analyzerFor(generator, summarizeOpts).analyzePage(pageId);
+
+      expect(generator.calls[2].prompt).toContain(FIRST);
+      const [gap] = await listGapsByPage(pageId);
+      expect(gap.summarized).toBe(true);
+      expect(gap.quoteStartMs).toBe(5_000);
+      expect(gap.quoteEndMs).toBe(9_000);
+    });
+  });
+
   it('drops the bad rows of a response and still reports done', async () => {
     const { pageId } = await seed();
     const generator = createFakeTextGenerator([

@@ -18,6 +18,12 @@ export interface CreateGapInput {
   status?: GapStatus;
   /** Defaults to `false`; true when the speech was summarized first (J5). */
   summarized?: boolean;
+  /**
+   * Offsets from the recording's start, in ms, of the speech the quote came
+   * from. Absent → fall back to fromMs/toMs.
+   */
+  quoteStartMs?: number;
+  quoteEndMs?: number;
   /** Tests and a replay pass these; live creation lets them default to now. */
   createdAt?: number;
   updatedAt?: number;
@@ -38,6 +44,8 @@ function buildGap(input: CreateGapInput, now: number): GapSuggestionRecord {
     model: input.model,
     promptVersion: input.promptVersion,
     summarized: input.summarized ?? false,
+    ...(input.quoteStartMs !== undefined && { quoteStartMs: input.quoteStartMs }),
+    ...(input.quoteEndMs !== undefined && { quoteEndMs: input.quoteEndMs }),
     createdAt: input.createdAt ?? now,
     updatedAt: input.updatedAt ?? input.createdAt ?? now,
   };

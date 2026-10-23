@@ -339,6 +339,12 @@ export interface GapSuggestionRecord {
    * the UI can say the source was lossy.
    */
   summarized: boolean;
+  /**
+   * Offsets from the recording's start, in ms, of the speech the quote came
+   * from. Absent → fall back to fromMs/toMs.
+   */
+  quoteStartMs?: number;
+  quoteEndMs?: number;
   createdAt: number;
   updatedAt: number;
 }
