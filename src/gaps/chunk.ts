@@ -1,4 +1,6 @@
 import { GAP_CHUNK_CHARS, GAP_CHUNK_OVERLAP } from '@/gaps/constants';
+import type { TimedText } from '@/gaps/quoteTime';
+import type { TranscriptSegment } from '@/storage/types';
 
 export interface ChunkOptions {
   budget?: number;
@@ -58,6 +60,63 @@ export function chunkSpeech(text: string, opts: ChunkOptions = {}): string[] {
     }
     // The start must always move forward, whatever the boundary search found.
     start = next > start ? next : end;
+  }
+  return chunks;
+}
+
+/**
+ * `chunkSpeech` over transcript segments, so every chunk keeps the recording
+ * span it came from. Whole segments are packed up to `budget`; the next chunk
+ * restarts at the earliest trailing segment that fits within `overlap`, always
+ * moving at least one segment forward. A segment longer than the budget is cut
+ * by `chunkSpeech`, and each piece takes that segment's whole span.
+ */
+export function chunkSegments(segments: TranscriptSegment[], opts: ChunkOptions = {}): TimedText[] {
+  const rawBudget = opts.budget ?? GAP_CHUNK_CHARS;
+  const budget = rawBudget > 0 ? rawBudget : GAP_CHUNK_CHARS;
+  const overlap = Math.max(0, Math.min(opts.overlap ?? GAP_CHUNK_OVERLAP, budget - 1));
+
+  const parts = segments
+    .map((s) => ({ startMs: s.startMs, endMs: s.endMs, text: s.text.trim() }))
+    .filter((s) => s.text.length > 0);
+
+  const chunks: TimedText[] = [];
+  let i = 0;
+  while (i < parts.length) {
+    if (parts[i].text.length > budget) {
+      for (const text of chunkSpeech(parts[i].text, { budget, overlap })) {
+        chunks.push({ startMs: parts[i].startMs, endMs: parts[i].endMs, text });
+      }
+      i += 1;
+      continue;
+    }
+
+    let j = i;
+    let length = parts[i].text.length;
+    while (j + 1 < parts.length && length + 1 + parts[j + 1].text.length <= budget) {
+      j += 1;
+      length += 1 + parts[j].text.length;
+    }
+    chunks.push({
+      startMs: parts[i].startMs,
+      endMs: parts[j].endMs,
+      text: parts
+        .slice(i, j + 1)
+        .map((p) => p.text)
+        .join(' '),
+    });
+    if (j + 1 >= parts.length) break;
+
+    // Walk back from the chunk's end while the carried-over text stays in the overlap.
+    let next = j + 1;
+    let carried = 0;
+    while (next - 1 > i) {
+      const added = parts[next - 1].text.length + (carried > 0 ? 1 : 0);
+      if (carried + added > overlap) break;
+      carried += added;
+      next -= 1;
+    }
+    i = next;
   }
   return chunks;
 }
