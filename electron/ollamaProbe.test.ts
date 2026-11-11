@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ollamaTagsUrl, probeOllama } from './ollamaProbe';
+import { ollamaTagsUrl, probeOllama, type ProbeFetch } from './ollamaProbe';
 
 describe('ollamaTagsUrl', () => {
   it('builds /api/tags for localhost and 127.0.0.1 over http', () => {
@@ -48,7 +48,7 @@ describe('probeOllama', () => {
   });
 
   it('never follows a redirect, and a 3xx still counts as reachable', async () => {
-    const fetchImpl = vi.fn(async (_url: string, _init: RequestInit) => new Response(null, { status: 302, headers: { Location: 'http://example.com/' } }));
+    const fetchImpl = vi.fn<ProbeFetch>(async () => new Response(null, { status: 302, headers: { Location: 'http://example.com/' } }));
     await expect(probeOllama('http://localhost:11434', fetchImpl)).resolves.toBe(true);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fetchImpl.mock.calls[0][1]).toMatchObject({ redirect: 'manual' });
