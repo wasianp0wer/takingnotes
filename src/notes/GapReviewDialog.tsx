@@ -26,6 +26,12 @@ export interface GapReviewDialogProps {
   running: boolean;
   /** Called after a successful submit, so the panel reloads. */
   onSubmitted(): void;
+  /**
+   * Plays a suggestion's recording from the start of its span. When given,
+   * each time range is a button that calls it and closes the dialog (the
+   * choices are a draft and survive the close); without it the range is text.
+   */
+  onSeek?(recordingId: string, startMs: number): void;
 }
 
 interface Row {
@@ -50,6 +56,7 @@ export function GapReviewDialog({
   noteIsLive,
   running,
   onSubmitted,
+  onSeek,
 }: GapReviewDialogProps) {
   const [rows, setRows] = useState<Row[]>([]);
   const [choices, setChoices] = useState<Map<string, GapDecision>>(() => new Map());
@@ -156,7 +163,27 @@ export function GapReviewDialog({
                 <SuggestionQuote suggestion={gap} />
                 {recording && range && (
                   <p className="text-xs text-muted-foreground">
-                    — {recording.title}, {formatOffset(range.startMs)}–{formatOffset(range.endMs)}
+                    — {recording.title},{' '}
+                    {onSeek ? (
+                      <button
+                        type="button"
+                        data-seek-ms={range.startMs}
+                        aria-label={`Play ${recording.title} from ${formatOffset(range.startMs)}`}
+                        // Closes the modal so the player behind it can be seen and
+                        // paused; the draft keeps every choice made so far.
+                        onClick={() => {
+                          onSeek(gap.recordingId, range.startMs);
+                          onOpenChange(false);
+                        }}
+                        className="rounded-sm tabular-nums text-timestamp underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-focus-ring"
+                      >
+                        {formatOffset(range.startMs)}–{formatOffset(range.endMs)}
+                      </button>
+                    ) : (
+                      <>
+                        {formatOffset(range.startMs)}–{formatOffset(range.endMs)}
+                      </>
+                    )}
                   </p>
                 )}
                 <div className="flex items-center gap-2">

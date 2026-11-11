@@ -19,6 +19,8 @@ import { SessionsView } from '@/sessions/SessionsView';
 import { createSessionsUiStore, SESSIONS_UI_STORAGE_KEY } from '@/sessions/sessionsUiStore';
 import type { SessionsUiStore } from '@/sessions/sessionsUiStore';
 import { useLiveFollow } from '@/sessions/useLiveFollow';
+import { getDraft, resetAllDrafts, setDraftChoice } from '@/gaps/reviewDraft';
+import { createGap } from '@/storage/gaps';
 import { createNote, getNote, setNoteSummary } from '@/storage/notes';
 import { createPage, getPage, setPageTranscript } from '@/storage/pages';
 import { createRecording, getRecording, setRecordingTranscript } from '@/storage/recordings';
@@ -502,6 +504,58 @@ describe('SessionsView', () => {
 });
 
 describe('SessionsView (ported from NotesView and RecordingsView)', () => {
+  it("a gap's time selects its recording and seeks it, keeping the viewed page and the review draft", async () => {
+    resetAllDrafts();
+    const note = await seedNote({ title: 'Lecture', sessionId: 's1', startedAt: 1_000 });
+    await seedRecording({ title: 'First', sessionId: 's1', noteId: note.id, startedAt: 1_000 });
+    const second = await seedRecording({
+      title: 'Second',
+      sessionId: 's1',
+      noteId: note.id,
+      startedAt: 2_000,
+    });
+    await seedPage(note.id, 0);
+    const page = await seedPage(note.id, 1);
+    await setPageTranscript(page.id, transcript('done', { markdown: 'Page two notes.' }));
+    const gapInput = {
+      noteId: note.id,
+      pageId: page.id,
+      recordingId: second.id,
+      fromMs: 2_000,
+      toMs: 60_000,
+      kind: 'claim' as const,
+      model: 'gemma4:12b',
+      promptVersion: 'gap-compare-gemma-v1',
+    };
+    const gap = await createGap({
+      ...gapInput,
+      text: 'The treaty was signed in 1919.',
+      sourceQuote: 'signed in 1919',
+      quoteStartMs: 42_000,
+      quoteEndMs: 47_000,
+    });
+    const other = await createGap({ ...gapInput, text: 'Another point.', sourceQuote: 'another' });
+    setDraftChoice(note.id, other, 'rejected');
+    store.selectEntry(`note:${note.id}`);
+    store.goToPage(1);
+    await render();
+    expect(container.textContent).toContain('Recording 1 of 2');
+
+    await click(buttonByText('Review suggestions (2)'));
+    const time = document.body.querySelector<HTMLButtonElement>(
+      `[data-gap-row="${gap.id}"] button[data-seek-ms]`,
+    );
+    expect(time?.textContent).toBe('0:42–0:47');
+    await click(time!);
+
+    expect(document.body.querySelector('[data-gap-row]')).toBeNull(); // the dialog closed
+    expect(container.textContent).toContain('Recording 2 of 2');
+    const audio = container.querySelector('[data-half="audio"] audio') as HTMLAudioElement;
+    expect(audio.currentTime).toBe(42);
+    expect(store.getState()).toMatchObject({ selectedKey: `note:${note.id}`, pageIndex: 1 });
+    expect(getDraft(note.id).get(other.id)).toBe('rejected');
+  });
+
   it("mounts F4's page-turn controls", async () => {
     await render();
     expect(findButtonByText('New page')).toBeDefined();

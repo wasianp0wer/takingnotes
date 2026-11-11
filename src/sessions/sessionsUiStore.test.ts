@@ -79,6 +79,24 @@ describe('sessionsUiStore', () => {
     expect(s.getState().selectedKey).toBe('recording:r1');
   });
 
+  it('seekRecording selects and seeks a recording without leaving the viewed entry or page', () => {
+    const s = createSessionsUiStore(null);
+    s.selectEntry('note:n1');
+    s.goToPage(3);
+    s.setTab('triage');
+    s.seekRecording('r2', 42_000);
+    expect(s.getState()).toMatchObject({
+      tab: 'sessions',
+      selectedKey: 'note:n1',
+      pageIndex: 3,
+      recordingId: 'r2',
+      seek: { recordingId: 'r2', startMs: 42_000 },
+    });
+    const first = s.getState().seek!.token;
+    s.seekRecording('r2', 42_000);
+    expect(s.getState().seek!.token).not.toBe(first);
+  });
+
   it('each openRecording issues a fresh seek token, even for the same target', () => {
     const s = createSessionsUiStore(null);
     s.openRecording('r1', 100, 'n1');

@@ -32,6 +32,8 @@ export interface GapPanelProps {
   noteIsLive?: boolean;
   /** Tests only - a real mount builds one from settings. */
   analyzer?: GapAnalyzer;
+  /** Plays a recording from an offset; makes the review dialog's times clickable. */
+  onSeekRecording?(recordingId: string, startMs: number): void;
 }
 
 /** Local time, so the source note reads like a clock rather than a raw epoch. */
@@ -52,7 +54,13 @@ function formatSourceWindow(win: { fromMs: number; toMs: number }): string {
  * P1 replaces the placeholder body and keeps the name and props. The
  * `aria-label` is the mount point the notes view asserts on, so it stays too.
  */
-export function GapPanel({ noteId, pageId, noteIsLive = false, analyzer }: GapPanelProps) {
+export function GapPanel({
+  noteId,
+  pageId,
+  noteIsLive = false,
+  analyzer,
+  onSeekRecording,
+}: GapPanelProps) {
   const [page, setPage] = useState<PageRecord | null>(null);
   const [gaps, setGaps] = useState<GapSuggestionRecord[]>([]);
   // Every suggestion in the note, for the Review button's count.
@@ -282,6 +290,7 @@ export function GapPanel({ noteId, pageId, noteIsLive = false, analyzer }: GapPa
         noteIsLive={noteIsLive}
         running={running}
         onSubmitted={() => setRevision((n) => n + 1)}
+        onSeek={onSeekRecording}
       />
     </section>
   );

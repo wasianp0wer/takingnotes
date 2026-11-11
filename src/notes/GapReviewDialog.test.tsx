@@ -177,6 +177,54 @@ describe('GapReviewDialog', () => {
     expect(rowFor(gaps[1].id).textContent).toContain('— Lecture 4, 0:10–0:20');
   });
 
+  it('shows the time range as plain text when nothing can seek', async () => {
+    const { noteId, gaps } = await seed();
+    await render(props({ noteId }));
+
+    expect(rowFor(gaps[0].id).querySelector('button[data-seek-ms]')).toBeNull();
+    expect(rowFor(gaps[0].id).textContent).toContain('1:05–1:12');
+  });
+
+  it('makes the time range a keyboard-reachable timestamp button when it can seek', async () => {
+    const { noteId, gaps } = await seed();
+    await render(props({ noteId, onSeek: vi.fn() }));
+
+    const time = rowFor(gaps[0].id).querySelector<HTMLButtonElement>('button[data-seek-ms]');
+    expect(time).not.toBeNull();
+    expect(time!.type).toBe('button');
+    expect(time!.textContent).toBe('1:05–1:12');
+    expect(time!.getAttribute('aria-label')).toBe('Play Lecture 4 from 1:05');
+    const classes = time!.className.split(/\s+/);
+    expect(classes).toContain('text-timestamp');
+    expect(classes).toContain('focus-visible:ring-2');
+    expect(classes).toContain('focus-visible:ring-focus-ring');
+    expect(time!.tabIndex).not.toBe(-1);
+  });
+
+  it("seeks the suggestion's own recording at the start of its span, closing but keeping choices", async () => {
+    const { noteId, gaps } = await seed();
+    const onSeek = vi.fn();
+    const p = props({ noteId, onSeek });
+    await render(p);
+    await click(buttonIn(rowFor(gaps[1].id), 'Accept'));
+
+    await click(rowFor(gaps[0].id).querySelector<HTMLButtonElement>('button[data-seek-ms]')!);
+
+    expect(onSeek).toHaveBeenCalledWith(gaps[0].recordingId, 65_000);
+    expect(p.onOpenChange).toHaveBeenCalledWith(false);
+    expect(getDraft(noteId).get(gaps[1].id)).toBe('accepted');
+  });
+
+  it('seeks to the page window start for a suggestion with no quote timing', async () => {
+    const { noteId, gaps } = await seed();
+    const onSeek = vi.fn();
+    await render(props({ noteId, onSeek }));
+
+    await click(rowFor(gaps[1].id).querySelector<HTMLButtonElement>('button[data-seek-ms]')!);
+
+    expect(onSeek).toHaveBeenCalledWith(gaps[1].recordingId, 10_000);
+  });
+
   it('leaves out suggestions that are no longer proposed', async () => {
     const { noteId, gaps } = await seed();
     await updateGap(gaps[2].id, { status: 'rejected' });

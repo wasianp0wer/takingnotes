@@ -38,6 +38,12 @@ export interface SessionsUiStore {
   openNote(noteId: string, pageIndex: number, mode?: NotesMode): void;
   /** Switches to the Sessions tab and issues a fresh seek token. */
   openRecording(recordingId: string, startMs: number | undefined, ownerNoteId: string | null): void;
+  /**
+   * Selects a recording of the entry already being viewed and issues a fresh
+   * seek token, keeping the selected entry and page - for a gap suggestion's
+   * time, which belongs to the note on screen. Switches to the Sessions tab.
+   */
+  seekRecording(recordingId: string, startMs: number): void;
   /** No-op if a newer token is pending. */
   clearSeek(token: number): void;
   /**
@@ -151,6 +157,12 @@ export function createSessionsUiStore(
         pageIndex: 0,
         recordingId,
         seek: { token: nextToken++, recordingId, startMs: startMs ?? 0 },
+      }),
+    seekRecording: (recordingId, startMs) =>
+      update({
+        tab: 'sessions',
+        recordingId,
+        seek: { token: nextToken++, recordingId, startMs },
       }),
     clearSeek(token) {
       if (state.seek !== null && state.seek.token === token) update({ seek: null });
