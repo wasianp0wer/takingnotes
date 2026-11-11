@@ -8,7 +8,7 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 export default defineConfig([
   // `.claude/` holds agent worktrees - full copies of src/. Without ignoring
   // it, every file is linted twice and the problem count silently doubles.
-  globalIgnores(['dist', '.claude']),
+  globalIgnores(['dist', 'dist-electron', 'release', '.claude']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
