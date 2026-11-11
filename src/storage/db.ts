@@ -1,4 +1,12 @@
-import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
+import {
+  openDB,
+  type DBSchema,
+  type IDBPDatabase,
+  type IDBPTransaction,
+  type StoreNames,
+} from 'idb';
+
+import { getActiveDbName } from '@/storage/activeDb';
 
 import type {
   CalendarEventRecord,
@@ -90,82 +98,99 @@ export interface NotesDb extends DBSchema {
 
 let dbPromise: Promise<IDBPDatabase<NotesDb>> | null = null;
 
+// Branch on `oldVersion`, not on `objectStoreNames.contains(...)`: a
+// future version bump needs to run only the steps a given user is
+// missing. Each `if (oldVersion < N)` block is one schema generation and
+// must never be edited once it has shipped.
+function upgradeNotesDb(
+  db: IDBPDatabase<NotesDb>,
+  oldVersion: number,
+  _newVersion: number | null,
+  tx: IDBPTransaction<NotesDb, StoreNames<NotesDb>[], 'versionchange'>,
+): void {
+  if (oldVersion < 1) {
+    const notes = db.createObjectStore('notes', { keyPath: 'id' });
+    notes.createIndex('by-started', 'startedAt');
+
+    const pages = db.createObjectStore('pages', { keyPath: 'id' });
+    pages.createIndex('by-note', 'noteId');
+
+    db.createObjectStore('pageRenders');
+    db.createObjectStore('settings', { keyPath: 'key' });
+  }
+  if (oldVersion < 2) {
+    // An index on a store that already exists has to be created through
+    // the version-change transaction: `db.createObjectStore` would throw
+    // for an existing store, and there is no other handle to it here.
+    // Notes whose `sessionId` is null or absent are simply not in the
+    // index - IndexedDB skips those - which is exactly what
+    // `listNotesBySession` wants.
+    tx.objectStore('notes').createIndex('by-session', 'sessionId');
+
+    const sessions = db.createObjectStore('sessions', { keyPath: 'id' });
+    sessions.createIndex('by-started', 'startedAt');
+
+    const recordings = db.createObjectStore('recordings', { keyPath: 'id' });
+    recordings.createIndex('by-session', 'sessionId');
+    recordings.createIndex('by-started', 'startedAt');
+
+    db.createObjectStore('recordingAudio');
+
+    const events = db.createObjectStore('events', { keyPath: 'id' });
+    events.createIndex('by-start', 'startsAt');
+
+    const tasks = db.createObjectStore('tasks', { keyPath: 'id' });
+    tasks.createIndex('by-status', 'status');
+    tasks.createIndex('by-event', 'eventId');
+  }
+  if (oldVersion < 3) {
+    // Phase 2 gap suggestions (docs/architecture.md §6.2). Indexed by
+    // both note and page: the note view lists a whole note's suggestions,
+    // and a re-run of one page deletes that page's proposed ones.
+    const gaps = db.createObjectStore('gaps', { keyPath: 'id' });
+    gaps.createIndex('by-note', 'noteId');
+    gaps.createIndex('by-page', 'pageId');
+  }
+  if (oldVersion < 4) {
+    // Phase 3 incremental audio (K4-K7). Indexed by recording so a
+    // stitch reads exactly one recording's chunks, and so a recording
+    // deleted mid-flight can drop its own without a full scan.
+    const chunks = db.createObjectStore('recordingChunks', { keyPath: 'id' });
+    chunks.createIndex('by-recording', 'recordingId');
+    // No data migration: every v4 field is optional with a documented
+    // absent-reading (K1), so existing rows are already valid v4 rows.
+  }
+  if (oldVersion < 5) {
+    // Chunked resumable transcription: the decoded-audio cache that
+    // keeps a resumed job from re-decoding. In-line keys on
+    // `recordingId`, no index - every read is by primary key.
+    db.createObjectStore('pcmCache', { keyPath: 'recordingId' });
+    // No data migration: `completedMs`, `leaseOwner` and `leaseAt` are
+    // all optional on `AudioTranscriptRecord` with documented
+    // absent-readings, so existing rows are already valid v5 rows.
+  }
+}
+
+export function openNamedDb(name: string): Promise<IDBPDatabase<NotesDb>> {
+  return openDB<NotesDb>(name, DB_VERSION, {
+    upgrade: upgradeNotesDb,
+    blocked() {
+      console.warn(`[${name}] upgrade blocked: another tab still holds an older connection`);
+    },
+    terminated() {
+      console.error(`[${name}] connection terminated unexpectedly`);
+    },
+  });
+}
+
 export function openNotesDb(): Promise<IDBPDatabase<NotesDb>> {
   if (!dbPromise) {
-    dbPromise = openDB<NotesDb>(DB_NAME, DB_VERSION, {
-      // Branch on `oldVersion`, not on `objectStoreNames.contains(...)`: a
-      // future version bump needs to run only the steps a given user is
-      // missing. Each `if (oldVersion < N)` block is one schema generation and
-      // must never be edited once it has shipped.
-      upgrade(db, oldVersion, _newVersion, tx) {
-        if (oldVersion < 1) {
-          const notes = db.createObjectStore('notes', { keyPath: 'id' });
-          notes.createIndex('by-started', 'startedAt');
-
-          const pages = db.createObjectStore('pages', { keyPath: 'id' });
-          pages.createIndex('by-note', 'noteId');
-
-          db.createObjectStore('pageRenders');
-          db.createObjectStore('settings', { keyPath: 'key' });
-        }
-        if (oldVersion < 2) {
-          // An index on a store that already exists has to be created through
-          // the version-change transaction: `db.createObjectStore` would throw
-          // for an existing store, and there is no other handle to it here.
-          // Notes whose `sessionId` is null or absent are simply not in the
-          // index - IndexedDB skips those - which is exactly what
-          // `listNotesBySession` wants.
-          tx.objectStore('notes').createIndex('by-session', 'sessionId');
-
-          const sessions = db.createObjectStore('sessions', { keyPath: 'id' });
-          sessions.createIndex('by-started', 'startedAt');
-
-          const recordings = db.createObjectStore('recordings', { keyPath: 'id' });
-          recordings.createIndex('by-session', 'sessionId');
-          recordings.createIndex('by-started', 'startedAt');
-
-          db.createObjectStore('recordingAudio');
-
-          const events = db.createObjectStore('events', { keyPath: 'id' });
-          events.createIndex('by-start', 'startsAt');
-
-          const tasks = db.createObjectStore('tasks', { keyPath: 'id' });
-          tasks.createIndex('by-status', 'status');
-          tasks.createIndex('by-event', 'eventId');
-        }
-        if (oldVersion < 3) {
-          // Phase 2 gap suggestions (docs/architecture.md §6.2). Indexed by
-          // both note and page: the note view lists a whole note's suggestions,
-          // and a re-run of one page deletes that page's proposed ones.
-          const gaps = db.createObjectStore('gaps', { keyPath: 'id' });
-          gaps.createIndex('by-note', 'noteId');
-          gaps.createIndex('by-page', 'pageId');
-        }
-        if (oldVersion < 4) {
-          // Phase 3 incremental audio (K4-K7). Indexed by recording so a
-          // stitch reads exactly one recording's chunks, and so a recording
-          // deleted mid-flight can drop its own without a full scan.
-          const chunks = db.createObjectStore('recordingChunks', { keyPath: 'id' });
-          chunks.createIndex('by-recording', 'recordingId');
-          // No data migration: every v4 field is optional with a documented
-          // absent-reading (K1), so existing rows are already valid v4 rows.
-        }
-        if (oldVersion < 5) {
-          // Chunked resumable transcription: the decoded-audio cache that
-          // keeps a resumed job from re-decoding. In-line keys on
-          // `recordingId`, no index - every read is by primary key.
-          db.createObjectStore('pcmCache', { keyPath: 'recordingId' });
-          // No data migration: `completedMs`, `leaseOwner` and `leaseAt` are
-          // all optional on `AudioTranscriptRecord` with documented
-          // absent-readings, so existing rows are already valid v5 rows.
-        }
-      },
+    dbPromise = openDB<NotesDb>(getActiveDbName(), DB_VERSION, {
+      upgrade: upgradeNotesDb,
       // Without these, a version bump with a second tab open hangs forever with
       // no diagnostic. Fail loudly instead.
       blocked() {
-        console.warn(
-          `[${DB_NAME}] upgrade blocked: another tab still holds an older connection`,
-        );
+        console.warn(`[${DB_NAME}] upgrade blocked: another tab still holds an older connection`);
       },
       blocking() {
         console.warn(`[${DB_NAME}] closing this connection so an upgrade can proceed`);

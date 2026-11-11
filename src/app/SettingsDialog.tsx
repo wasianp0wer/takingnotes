@@ -1,6 +1,7 @@
 import { Settings } from 'lucide-react';
 
 import { AudioSettings } from '@/audio/AudioSettings';
+import { BackupSettings } from '@/backup/BackupSettings';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -40,6 +41,8 @@ export function SettingsDialog() {
           <TranscriptionSettings />
           <Separator />
           <AudioSettings />
+          <Separator />
+          <BackupSettings />
         </div>
       </DialogContent>
     </Dialog>
