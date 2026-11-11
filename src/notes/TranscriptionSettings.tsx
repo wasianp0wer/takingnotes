@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { OllamaSetupStatus } from '@/notes/OllamaSetupStatus';
 import {
   MIN_RENDER_LONG_EDGE,
   SETTING_DEFAULTS,
@@ -119,6 +120,8 @@ export function TranscriptionSettings(props?: { fetchImpl?: FetchLike }) {
   return (
     <section className="space-y-3">
       <h3 className="text-sm font-medium">Handwriting transcription</h3>
+
+      <OllamaSetupStatus fetchImpl={props?.fetchImpl} />
 
       <div className="space-y-1">
         <Label htmlFor="ollama-base-url">Ollama address</Label>
