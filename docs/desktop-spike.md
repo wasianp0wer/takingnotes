@@ -184,3 +184,31 @@ guard showed:
 - `customElements.get('webview')` is undefined (no `<webview>` tag);
 - all earlier checks (render, IndexedDB, regex worker, pdf.js, Ollama,
   Whisper) still pass.
+
+## Task 10: device picker and Ollama probe (built app)
+
+Run on 2026-11-11, same machine, after `npm run desktop:build` at commit
+`014b895`. The harness is `scripts/spike/picker-spike.cjs` (gitignored, not
+committed). It uses a temp `userData`, `require`s the unchanged
+`dist-electron/main.cjs`, and drives the page with `executeJavaScript`. Nobody
+clicked the window.
+
+| Check | Result |
+|---|---|
+| Bridge shape | `Object.keys(window.takingnotesDesktop)` = `platform`, `devices`, `probeOllama`. |
+| HID picker opens | **Pass.** `navigator.hid.requestDevice({ filters: [] })`, called with a user gesture (`executeJavaScript(code, true)`), opened the in-app dialog titled **Choose a USB device**. It listed the 12 HID devices on this Mac (for example "Apple Internal Keyboard / Trackpad", "Keyboard Backlight", "Headset"). A screenshot showed the Radix dialog in the app theme over a dimmed overlay. |
+| Cancel settles the request | **Pass.** Clicking **Cancel** closed the dialog, and `requestDevice()` resolved with an empty array (`{ ok: true, n: 0 }`) instead of hanging. |
+| `probeOllama` | **Pass.** With Ollama running (`curl localhost:11434/api/tags` gave 200): `http://localhost:11434` gave true and `http://127.0.0.1:11434` gave true. `http://localhost:1` (a closed port) gave false. `http://example.com` and `https://localhost:11434` gave false. Those last two are refused by the URL check before anything is fetched. |
+
+**Not checked:**
+- **Bluetooth.** `navigator.bluetooth.requestDevice()` was not called. It raises
+  the macOS Bluetooth permission prompt, which must not be answered on the
+  user's behalf. The Bluetooth path ("Choose a tablet", the live list) is
+  covered only by unit tests.
+- **The real Connect button.** No tablet was attached. The HID request was
+  made directly, without the app's Huion filters, so the dialog listed every
+  HID device.
+- **Selecting a device.** Selection in the built app was not exercised. It is
+  covered by unit tests only.
+- **`npm run desktop:dev`.** It was not re-run for this task. The check above
+  used the production `app://` build.
