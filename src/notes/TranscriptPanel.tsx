@@ -2,6 +2,7 @@ import { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import { LazyTranscriptMarkdown } from '@/notes/LazyTranscriptMarkdown';
+import { OllamaSetupStatus } from '@/notes/OllamaSetupStatus';
 import { isPageFinalized } from '@/storage/pages';
 import type { PageRecord, TranscriptRecord } from '@/storage/types';
 
@@ -105,6 +106,7 @@ export function TranscriptPanel({ page, isActivePage, onRetry }: TranscriptPanel
     return (
       <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
         <p className="shrink-0 text-sm text-destructive">Transcription failed: {transcript.error}</p>
+        <OllamaSetupStatus compact />
         <div className="flex shrink-0 items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => retry()}>
             Retry
