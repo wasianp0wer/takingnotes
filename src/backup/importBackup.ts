@@ -9,6 +9,8 @@ import {
   type BackupManifest,
 } from '@/backup/format';
 import { ImportBlockedError, findImportBlockers } from '@/backup/guards';
+
+export { ImportBlockedError };
 import {
   BACKUP_STORES,
   OUT_OF_LINE_STORES,
@@ -289,8 +291,11 @@ export async function importBackup(
   const { manifest, binaryStart } = await readValidated(file);
 
   const storage = opts.storage ?? defaultStorage();
-  const blockers = await findImportBlockers({ countTabs: opts.countTabs, storage });
-  if (blockers.length > 0) throw new ImportBlockedError(blockers);
+  const checkBlockers = async () => {
+    const blockers = await findImportBlockers({ countTabs: opts.countTabs, storage });
+    if (blockers.length > 0) throw new ImportBlockedError(blockers);
+  };
+  await checkBlockers();
   if (!storage) throw new ImportBlockedError(['storage-blocked']);
 
   const oldName = getActiveDbName(storage);
@@ -313,6 +318,10 @@ export async function importBackup(
     await verifyCounts(db, manifest);
     db.close();
     db = null;
+    // A long import gives a recording, transcription or new tab time to
+    // start writing to the old database; those writes would be lost at the
+    // swap, so check again right before it.
+    await checkBlockers();
     await closeNotesDb();
     swapIn(storage, manifest, staging);
   } catch (err) {

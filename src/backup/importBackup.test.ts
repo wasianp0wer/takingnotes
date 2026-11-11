@@ -6,6 +6,7 @@ import { BackupFormatError, buildBackupBlob, type BackupEntry } from '@/backup/f
 import { ImportBlockedError } from '@/backup/guards';
 import {
   BackupTooNewError,
+  ImportBlockedError as ReExportedBlockedError,
   importBackup,
   inspectBackup,
 } from '@/backup/importBackup';
@@ -107,7 +108,7 @@ function manifestBlob(over: Record<string, unknown>, parts: Blob[] = []): Blob {
  * Wraps a staging database so that every `put` in the `failOn`-th readwrite
  * transaction throws.
  */
-function failingStaging(failOn: number) {
+function failingStaging(failOn: number, mode: 'sync' | 'async' = 'sync') {
   let txCount = 0;
   return async (name: string) => {
     const db = await openNamedDb(name);
@@ -129,6 +130,14 @@ function failingStaging(failOn: number) {
                 return new Proxy(store, {
                   get(s, q) {
                     if (q === 'put') {
+                      if (mode === 'async') {
+                        // A second insert of the same key: the request fails
+                        // asynchronously (ConstraintError) and aborts the tx.
+                        return (value: never, key?: never) => {
+                          void s.put!(value, key).catch(() => {});
+                          return s.add!(value, key);
+                        };
+                      }
                       return () => {
                         throw new Error('injected put failure');
                       };
@@ -210,27 +219,70 @@ describe('importBackup', () => {
     expect(storage.getItem('unrelated.key')).toBe('keep');
   });
 
-  it('failure mid-import leaves data untouched', async () => {
-    await seedAll('a');
-    const storage = localStorage;
-    storage.setItem('takingnotes.activeTheme', 'light');
-    const blob = await exportBackup({ appVersion: '1.0.0', storage: memoryStorage({ 'takingnotes.activeTheme': 'dark' }) });
-    await closeNotesDb();
-    await deleteDb(DB_NAME);
+  for (const mode of ['sync', 'async'] as const) {
+    it(`failure mid-import leaves data untouched (${mode} put failure)`, async () => {
+      await seedAll('a');
+      const storage = localStorage;
+      storage.setItem('takingnotes.activeTheme', 'light');
+      const blob = await exportBackup({ appVersion: '1.0.0', storage: memoryStorage({ 'takingnotes.activeTheme': 'dark' }) });
+      await closeNotesDb();
+      await deleteDb(DB_NAME);
+      await seedAll('original');
+      const before = await activeSnapshot();
+      const namesBefore = await dbNames();
+      const progress: number[] = [];
+
+      const err = await importBackup(blob, {
+        storage,
+        countTabs: oneTab,
+        openStaging: failingStaging(3, mode),
+        onProgress: (done) => progress.push(done),
+      }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(Error);
+      if (mode === 'sync') expect((err as Error).message).toBe('injected put failure');
+      else expect((err as Error).name).toBe('ConstraintError');
+      // One record per store, so batches 1 and 2 committed and batch 3 failed.
+      expect(progress).toEqual([0, 1, 2]);
+      expect(storage.getItem(ACTIVE_DB_KEY)).toBeNull();
+      expect(getActiveDbName(storage)).toBe(DB_NAME);
+      expect(storage.getItem('takingnotes.activeTheme')).toBe('light');
+      expect(await dbNames()).toEqual(namesBefore);
+      expect(await activeSnapshot()).toEqual(before);
+    });
+  }
+
+  it('blocker appearing mid-import aborts before the swap', async () => {
     await seedAll('original');
     const before = await activeSnapshot();
-    const namesBefore = await dbNames();
-
-    await expect(
-      importBackup(blob, { storage, countTabs: oneTab, openStaging: failingStaging(3) }),
-    ).rejects.toThrow('injected put failure');
-
-    expect(storage.getItem(ACTIVE_DB_KEY)).toBeNull();
-    expect(getActiveDbName(storage)).toBe(DB_NAME);
-    expect(storage.getItem('takingnotes.activeTheme')).toBe('light');
-    expect(await dbNames()).toEqual(namesBefore);
+    localStorage.setItem('takingnotes.activeTheme', 'light');
+    const blob = manifestBlob({
+      stores: {
+        notes: [{ key: null, value: { id: 'imported' } }],
+        tasks: [{ key: null, value: { id: 't' } }],
+      },
+      localStorage: { 'takingnotes.activeTheme': 'dark' },
+    });
+    let tabs = 1;
+    const err = await importBackup(blob, {
+      countTabs: async () => tabs,
+      // A second tab opens once the first batch has been written.
+      onProgress: (done) => {
+        if (done > 0) tabs = 2;
+      },
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ImportBlockedError);
+    expect((err as ImportBlockedError).blockers).toEqual(['other-tabs']);
+    expect(localStorage.getItem(ACTIVE_DB_KEY)).toBeNull();
+    expect(localStorage.getItem('takingnotes.activeTheme')).toBe('light');
+    expect(await dbNames()).toEqual([DB_NAME]);
     expect(await activeSnapshot()).toEqual(before);
   });
+
+  it('re-exports ImportBlockedError', () => {
+    expect(ReExportedBlockedError).toBe(ImportBlockedError);
+  });
+
 
   it('a pointer write that does not stick restores localStorage and drops staging', async () => {
     await seedAll('original');
