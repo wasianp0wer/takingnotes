@@ -298,12 +298,12 @@ describe('createGapAnalyzer', () => {
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({
       summarized: true,
-      promptVersion: 'gap-summarize-gemma-v1+gap-compare-gemma-v1',
+      promptVersion: 'gap-summarize-gemma-v2+gap-compare-gemma-v1',
     });
     expect(await gapAnalysisOf(pageId)).toMatchObject({
       status: 'done',
       summarized: true,
-      promptVersion: 'gap-summarize-gemma-v1+gap-compare-gemma-v1',
+      promptVersion: 'gap-summarize-gemma-v2+gap-compare-gemma-v1',
     });
   });
 
@@ -359,13 +359,13 @@ describe('createGapAnalyzer', () => {
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({
       summarized: true,
-      promptVersion: 'gap-summarize-gemma-v1+gap-compare-gemma-v1',
+      promptVersion: 'gap-summarize-gemma-v2+gap-compare-gemma-v1',
     });
     expect(await gapAnalysisOf(pageId)).toMatchObject({
       status: 'done',
       error: null,
       summarized: true,
-      promptVersion: 'gap-summarize-gemma-v1+gap-compare-gemma-v1',
+      promptVersion: 'gap-summarize-gemma-v2+gap-compare-gemma-v1',
     });
   });
 
@@ -461,6 +461,108 @@ describe('createGapAnalyzer', () => {
 
       const [gap] = await listGapsByPage(pageId);
       expect(gap.quoteStartMs).toBe(10_000);
+      expect(gap.quoteEndMs).toBe(14_000);
+    });
+
+    describe('citations from the summarize step', () => {
+      // Three segments that pack into one chunk, so the chunk span alone
+      // (5s..30s) cannot say where any one point was made.
+      const LECTURE: TranscriptSegment[] = [
+        { startMs: 5_000, endMs: 9_000, text: 'so um where were we.' },
+        { startMs: 10_000, endMs: 14_000, text: 'entropy always goes up in a closed system.' },
+        { startMs: 20_000, endMs: 30_000, text: 'and boltzmann gave us the formula for it.' },
+      ];
+      const oneChunk = { directCharBudget: 10, chunkChars: 5_000, chunkOverlap: 0 };
+
+      it('numbers the speech lines it asks the summarizer about', async () => {
+        const { pageId } = await seed({ segments: LECTURE });
+        const generator = createFakeTextGenerator(['- Entropy increases [2]', quoting('x')]);
+
+        await analyzerFor(generator, oneChunk).analyzePage(pageId);
+
+        expect(generator.calls[0].prompt).toContain('[1] so um where were we.');
+        expect(generator.calls[0].prompt).toContain('[2] entropy always goes up');
+        expect(generator.calls[0].prompt).toContain('[3] and boltzmann');
+      });
+
+      it('times a quote by the lines its bullet cites, not the whole chunk', async () => {
+        const { pageId } = await seed({ segments: LECTURE });
+        const generator = createFakeTextGenerator([
+          '- Entropy in a closed system always increases [2]\n- Boltzmann gave the formula for entropy [3]',
+          quoting('Boltzmann gave the formula for entropy'),
+        ]);
+
+        await analyzerFor(generator, oneChunk).analyzePage(pageId);
+
+        const [gap] = await listGapsByPage(pageId);
+        expect(gap.quoteStartMs).toBe(20_000);
+        expect(gap.quoteEndMs).toBe(30_000);
+      });
+
+      it('passes the bullets to the comparison without their citation marks', async () => {
+        const { pageId } = await seed({ segments: LECTURE });
+        const generator = createFakeTextGenerator([
+          '- Entropy in a closed system always increases [2]\n- Boltzmann gave the formula [2, 3]',
+          quoting('x'),
+        ]);
+
+        await analyzerFor(generator, oneChunk).analyzePage(pageId);
+
+        expect(generator.calls[1].prompt).toContain(
+          '- Entropy in a closed system always increases\n- Boltzmann gave the formula',
+        );
+        expect(generator.calls[1].prompt).not.toContain('[2]');
+      });
+
+      it('times a quote copied across two bullets by both of their citations', async () => {
+        const { pageId } = await seed({ segments: LECTURE });
+        const generator = createFakeTextGenerator([
+          '- Entropy in a closed system always increases [2]\n- Boltzmann gave the formula for entropy [3]',
+          quoting(
+            'Entropy in a closed system always increases. Boltzmann gave the formula for entropy.',
+          ),
+        ]);
+
+        await analyzerFor(generator, oneChunk).analyzePage(pageId);
+
+        const [gap] = await listGapsByPage(pageId);
+        expect(gap.quoteStartMs).toBe(10_000);
+        expect(gap.quoteEndMs).toBe(30_000);
+      });
+
+      it('keeps the chunk span for a bullet that cites nothing usable', async () => {
+        const { pageId } = await seed({ segments: LECTURE });
+        const generator = createFakeTextGenerator([
+          '- Entropy in a closed system always increases [9]',
+          quoting('Entropy in a closed system always increases'),
+        ]);
+
+        await analyzerFor(generator, oneChunk).analyzePage(pageId);
+
+        const [gap] = await listGapsByPage(pageId);
+        expect(gap.quoteStartMs).toBe(5_000);
+        expect(gap.quoteEndMs).toBe(30_000);
+      });
+    });
+
+    it('times a direct quote the model elided with "..." by the pieces it joined', async () => {
+      const { pageId } = await seed({
+        segments: [
+          { startMs: 1_000, endMs: 4_000, text: 'the rise of standing armies paid for by the state' },
+          { startMs: 5_000, endMs: 9_000, text: 'rather than entrepreneurs like wallenstein' },
+          { startMs: 10_000, endMs: 14_000, text: 'that shift is what historians call the military revolution' },
+        ],
+      });
+      const generator = createFakeTextGenerator([
+        quoting(
+          'the rise of standing armies paid for by the state... that shift is what historians call the military revolution',
+        ),
+      ]);
+
+      await analyzerFor(generator).analyzePage(pageId);
+
+      const [gap] = await listGapsByPage(pageId);
+      expect(gap.quoteStartMs).toBe(1_000);
       expect(gap.quoteEndMs).toBe(14_000);
     });
 
@@ -1034,6 +1136,36 @@ describe('createGapAnalyzer', () => {
     for (const id of pageIds) {
       expect(await gapAnalysisOf(id)).toMatchObject({ status: 'done', error: null });
     }
+  });
+
+  it('analyzeNote reports progress each time a page status changes on disk', async () => {
+    const markdowns = ['Page one notes.', 'Page two notes.'];
+    const { noteId, pageIds } = await seedNote(markdowns);
+    const generator = createFakeTextGenerator([ONE_POINT]);
+    const onProgress = vi.fn();
+
+    // At each model call: how many reports have been made, and what the pages'
+    // statuses are on disk. A report is made only after its write has landed.
+    const atCall: Array<{
+      reports: number;
+      statuses: Array<GapAnalysisStatus | undefined>;
+    }> = [];
+    generator.onGenerate = async () => {
+      const reports = onProgress.mock.calls.length;
+      const statuses = await Promise.all(
+        pageIds.map(async (id) => (await gapAnalysisOf(id))?.status),
+      );
+      atCall.push({ reports, statuses });
+    };
+
+    await analyzerFor(generator).analyzeNote(noteId, { onProgress });
+
+    // pending, pending, running(1) | done(1), running(2) | done(2)
+    expect(atCall).toEqual([
+      { reports: 3, statuses: ['running', 'pending'] },
+      { reports: 5, statuses: ['done', 'running'] },
+    ]);
+    expect(onProgress).toHaveBeenCalledTimes(6);
   });
 
   it('analyzeNote skips an ineligible page without a model call', async () => {

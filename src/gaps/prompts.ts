@@ -105,6 +105,8 @@ const GENERIC_SUMMARIZE = `You reduce one passage of lecture speech to its key p
 
 Rules:
 - Write one point per line, each line starting with "- ".
+- The passage is numbered: every line of speech starts with its reference number in square brackets, like [4].
+- End every point with the reference numbers of the lines it comes from, in square brackets: [4] for one line, [4, 5] for several.
 - Keep substantive content only: ${SUBSTANTIVE}.
 - Drop asides, greetings, small talk, repetition and restatements.
 - Copy names, dates and numbers verbatim; never round a number or paraphrase a name.
@@ -117,6 +119,8 @@ const GEMMA_SUMMARIZE = `You reduce one passage of lecture speech to its key poi
 
 Rules:
 - Write one point per line, each line starting with "- ".
+- The passage is numbered: every line of speech starts with its reference number in square brackets, like [4].
+- End every point with the reference numbers of the lines it comes from, in square brackets: [4] for one line, [4, 5] for several.
 - Keep substantive content only: ${SUBSTANTIVE}.
 - Drop asides, greetings, small talk, repetition and restatements.
 - Copy names, dates and numbers verbatim; never round a number or paraphrase a name.
@@ -151,13 +155,21 @@ export function gapModelFamily(model: string): string {
   return 'generic';
 }
 
+/**
+ * The current version of each kind. Summarize is v2: it numbers the passage
+ * lines and asks every bullet to cite the ones it came from, so a quote found
+ * in a bullet can be placed at those lines rather than across its whole chunk.
+ */
+const KIND_VERSION: Record<GapPromptKind, number> = { summarize: 2, compare: 1 };
+
 function versionFor(kind: GapPromptKind, family: string): string {
-  return `gap-${kind}-${family}-v1`;
+  return `gap-${kind}-${family}-v${KIND_VERSION[kind]}`;
 }
 
 function buildSummarize(input: SummarizeInput): string {
   return [
     `Passage ${input.index + 1} of ${input.total} of one lecture recording. It may start or end mid-sentence, so summarize only what is here and do not treat it as a whole lecture.`,
+    'Each line of speech starts with its reference number in square brackets; cite those numbers at the end of each point.',
     '',
     'PASSAGE:',
     input.chunk.trim(),

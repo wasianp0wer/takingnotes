@@ -20,9 +20,9 @@ describe('gapModelFamily', () => {
 describe('getGapPrompt', () => {
   it('versions each prompt by kind and family', () => {
     expect(getGapPrompt('compare', 'gemma4:12b').promptVersion).toBe('gap-compare-gemma-v1');
-    expect(getGapPrompt('summarize', 'gemma4:12b').promptVersion).toBe('gap-summarize-gemma-v1');
+    expect(getGapPrompt('summarize', 'gemma4:12b').promptVersion).toBe('gap-summarize-gemma-v2');
     expect(getGapPrompt('compare', 'mistral:7b').promptVersion).toBe('gap-compare-generic-v1');
-    expect(getGapPrompt('summarize', 'mistral:7b').promptVersion).toBe('gap-summarize-generic-v1');
+    expect(getGapPrompt('summarize', 'mistral:7b').promptVersion).toBe('gap-summarize-generic-v2');
   });
 
   it('never shares a version between the two kinds', () => {
@@ -67,6 +67,16 @@ describe('getGapPrompt', () => {
     }
   });
 
+  it('asks every family to cite the numbered passage lines each bullet comes from', () => {
+    for (const model of MODELS) {
+      const spec = getGapPrompt('summarize', model);
+      const text = `${spec.system}\n${spec.build({ chunk: '[1] a [2] b', index: 0, total: 1 })}`;
+      expect(text).toMatch(/reference number/i);
+      expect(text).toContain('[4]');
+      expect(text).toContain('[4, 5]');
+    }
+  });
+
   it('embeds what it is given and keeps the two prompts apart', () => {
     const compare = getGapPrompt('compare', 'gemma4:12b');
     const built = compare.build({ notes: 'THE-NOTES', speech: 'THE-SPEECH', summarized: false });
@@ -96,10 +106,10 @@ describe('gapPromptVersion', () => {
 
   it('names both prompts, summarize first, for a summarized comparison', () => {
     expect(gapPromptVersion('gemma4:12b', true)).toBe(
-      'gap-summarize-gemma-v1+gap-compare-gemma-v1',
+      'gap-summarize-gemma-v2+gap-compare-gemma-v1',
     );
     expect(gapPromptVersion('mistral:7b', true)).toBe(
-      'gap-summarize-generic-v1+gap-compare-generic-v1',
+      'gap-summarize-generic-v2+gap-compare-generic-v1',
     );
   });
 });

@@ -2,7 +2,8 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { GapAnalyzer } from '@/gaps/analyzer';
+import { createGapAnalyzer, type GapAnalyzer } from '@/gaps/analyzer';
+import { createFakeTextGenerator } from '@/gaps/fakeTextGenerator';
 import { describeGapSkip } from '@/gaps/eligibility';
 import { speechWindowForPage } from '@/gaps/window';
 import { resetGapRuns } from '@/gaps/gapRuns';
@@ -502,6 +503,98 @@ describe('GapPanel', () => {
     expect(buttonByText('Find gaps').disabled).toBe(false);
   });
 
+  it('shows a multi-recording run as it progresses, not "Not analyzed yet" until it ends', async () => {
+    // One sitting per recording, one page per sitting: the shape of a note
+    // whose session holds several recordings (K12). The viewed page is the
+    // second sitting's, so it waits while the first sitting's page runs.
+    const t0 = 1_000_000;
+    const session = await createSession({ title: 'Session' });
+    const note = await createNote({
+      title: 'Note',
+      deviceId: 'dev',
+      pageBaseline: 0,
+      sessionId: session.id,
+    });
+    const pageIds: string[] = [];
+    for (const [i, from] of [t0, t0 + 3_600_000].entries()) {
+      const recording = await createRecording(
+        {
+          sessionId: session.id,
+          noteId: note.id,
+          title: `Rec ${i + 1}`,
+          startedAt: from,
+          endedAt: from + 600_000,
+          durationMs: 600_000,
+        },
+        audio(),
+      );
+      await setRecordingTranscript(recording.id, {
+        text: 'speech',
+        segments: [
+          {
+            startMs: 5_000,
+            endMs: 590_000,
+            text: `Sitting ${i + 1} was about 1919.`,
+          },
+        ],
+        model: 'Xenova/whisper-base.en',
+        language: 'en',
+        status: 'done',
+        error: null,
+        updatedAt: 0,
+      });
+      const page = await createPage({
+        noteId: note.id,
+        pageIndex: i,
+        devicePageNum: i + 1,
+        source: 'live',
+        strokes: [stroke(from + 100_000, from + 200_000)],
+        finalizedAt: from + 210_000,
+      });
+      await setPageTranscript(page.id, {
+        markdown: `Notes from sitting ${i + 1}.`,
+        model: 'gemma4:12b',
+        promptVersion: 'gemma-v1',
+        status: 'done',
+        error: null,
+        updatedAt: 0,
+      });
+      pageIds.push(page.id);
+    }
+
+    // Each model call is held until the test lets it go.
+    const generator = createFakeTextGenerator([
+      JSON.stringify([{ text: 'A point.', kind: 'claim', sourceQuote: 'about 1919' }]),
+    ]);
+    const held: Array<() => void> = [];
+    generator.onGenerate = () => new Promise<void>((resolve) => held.push(resolve));
+    const analyzer = createGapAnalyzer({ generator, model: 'gemma4:12b' });
+
+    await render({ noteId: note.id, pageId: pageIds[1], analyzer });
+    expect(container.textContent).toContain('Not analyzed yet.');
+
+    await click(buttonByText('Find gaps'));
+    await vi.waitFor(async () => {
+      await settle(1);
+      expect(held).toHaveLength(1); // the first sitting's page is with the model
+      expect(container.textContent).toContain('Waiting to analyze…');
+    });
+    expect(container.textContent).not.toContain('Not analyzed yet.');
+
+    held.shift()!();
+    await vi.waitFor(async () => {
+      await settle(1);
+      expect(held).toHaveLength(1); // now the viewed page is
+      expect(container.textContent).toContain('Looking for gaps…');
+    });
+
+    held.shift()!();
+    await vi.waitFor(async () => {
+      await settle(1);
+      expect(buttonByText('Review suggestions (2)').disabled).toBe(false);
+    });
+  });
+
   it('says when the note has no recording and disables Find gaps', async () => {
     const { noteId, pageId } = await seedPage({ withRecording: false });
 
@@ -592,7 +685,7 @@ describe('GapPanel', () => {
 
     await click(buttonByText('Find gaps'));
 
-    expect(analyzer.analyzeNote).toHaveBeenCalledWith(noteId);
+    expect(analyzer.analyzeNote).toHaveBeenCalledWith(noteId, expect.anything());
     expect(analyzer.analyzePage).not.toHaveBeenCalled();
   });
 
@@ -683,8 +776,14 @@ describe('GapPanel', () => {
     await render({ noteId, pageId, analyzer });
     await click(buttonByText('Find gaps'));
 
-    expect(recreatedId).not.toBe('');
-    expect(getDraft(noteId).get(recreatedId)).toBe('accepted');
+    // The run and its draft reconcile are IndexedDB chains; wait for the
+    // reconcile rather than for a fixed number of ticks.
+    await vi.waitFor(async () => {
+      await settle(1);
+      expect(recreatedId).not.toBe('');
+      expect(getDraft(noteId).get(recreatedId)).toBe('accepted');
+      expect(buttonByText('Review suggestions (1)').disabled).toBe(false);
+    });
     expect(getDraft(noteId).has(original.id)).toBe(false);
 
     await click(buttonByText('Review suggestions (1)'));
