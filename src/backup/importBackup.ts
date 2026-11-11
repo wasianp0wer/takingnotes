@@ -17,7 +17,7 @@ import {
   isBackupLocalStorageKey,
   type BackupStoreName,
 } from '@/backup/stores';
-import { retireDatabase } from '@/backup/retiredDb';
+import { markImportedThisSession, retireDatabase } from '@/backup/retiredDb';
 import { ACTIVE_DB_KEY, RETIRED_DB_KEY, getActiveDbName, setActiveDbName } from '@/storage/activeDb';
 import { DB_NAME, DB_VERSION, closeNotesDb, openNamedDb, type NotesDb } from '@/storage/db';
 
@@ -293,7 +293,7 @@ function swapIn(storage: Storage, manifest: BackupManifest, staging: string, old
  * removed on a later start once the pointer verifies (`./retiredDb`). The
  * caller flushes storage (desktop) and reloads the page afterwards.
  *
- * `countTabs` and `openStaging` exist for tests.
+ * `countTabs`, `openStaging` and `session` exist for tests.
  */
 export async function importBackup(
   file: Blob,
@@ -302,6 +302,8 @@ export async function importBackup(
     storage?: Storage;
     countTabs?: () => Promise<number | null>;
     openStaging?: (name: string) => Promise<IDBPDatabase<NotesDb>>;
+    /** sessionStorage for the import marker; defaults to the global one. */
+    session?: Storage | null;
   } = {},
 ): Promise<void> {
   const { manifest, binaryStart } = await readValidated(file);
@@ -345,6 +347,9 @@ export async function importBackup(
     // swap, so check again right before it.
     await checkBlockers();
     await closeNotesDb();
+    // Before the swap: the importing tab (and its reload) must never delete
+    // the retired database. Throws, aborting the import, if it can't be set.
+    markImportedThisSession(opts.session);
     swapIn(storage, manifest, staging, oldName);
   } catch (err) {
     db?.close();

@@ -1525,8 +1525,9 @@ build) exposes:
 - `probeOllama(baseUrl)`: a localhost-only reachability check from the main
   process (redirects are not followed). With it, the Ollama setup check can
   tell "not running" from "refused by `OLLAMA_ORIGINS`".
-- `flushStorage()`: `session.defaultSession.flushStorageData()`, so
-  `localStorage` is on disk now. Backup import awaits it before reloading.
+- `flushStorage()`: `session.defaultSession.flushStorageData()`, which starts
+  writing `localStorage` to disk (it does not guarantee the write landed).
+  Backup import awaits it before reloading.
 
 Every IPC handler ignores senders that are not on the app origin.
 
@@ -1553,8 +1554,12 @@ Import never deletes the previous database. Chromium writes `localStorage`
 lazily, so a crash right after import could lose the pointer, and the app
 would then reopen the previous database; it must still exist. Its name is
 recorded in `takingnotes.retiredDb` (a JSON list, written before the pointer,
-rolled back with it). On each start `cleanupRetiredDatabases`
-(`src/backup/retiredDb.ts`, called from `main.tsx`, not awaited) deletes a
+rolled back with it). The import also sets the sessionStorage marker
+`takingnotes.importedThisSession` before the swap. On each start
+`cleanupRetiredDatabases` (`src/backup/retiredDb.ts`, called from `main.tsx`,
+not awaited) keeps everything while that marker is present or sessionStorage
+is unreadable, so the import's own reload (where the pointer may exist only
+in memory) never deletes anything. In a later browser session it deletes a
 retired database only if the pointer reads back to a valid name, the database
 it names opens with every expected store, and the retired name is not the
 active one. Otherwise it keeps it. Neither key is exported or imported. On the

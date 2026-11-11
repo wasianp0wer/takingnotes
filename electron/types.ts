@@ -57,10 +57,11 @@ export interface DesktopBridge {
    */
   probeOllama(baseUrl: string): Promise<boolean>;
   /**
-   * Writes the session's DOMStorage (localStorage) to disk now, via
-   * `session.defaultSession.flushStorageData()`. Chromium otherwise writes it
-   * lazily; backup import awaits this before reloading so the active-db
-   * pointer survives a crash or force-quit.
+   * Asks Chromium to start writing DOMStorage (localStorage) to disk, via
+   * `session.defaultSession.flushStorageData()`, instead of waiting for its
+   * lazy write. It starts the write; it does not guarantee it has landed.
+   * Backup import awaits this before reloading, to shrink the window in
+   * which a crash loses the new active-db pointer.
    */
   flushStorage(): Promise<void>;
 }

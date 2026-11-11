@@ -10,7 +10,7 @@ import {
   importBackup,
   inspectBackup,
 } from '@/backup/importBackup';
-import { cleanupRetiredDatabases } from '@/backup/retiredDb';
+import { IMPORTED_THIS_SESSION_KEY, cleanupRetiredDatabases } from '@/backup/retiredDb';
 import { BACKUP_STORES, OUT_OF_LINE_STORES } from '@/backup/stores';
 import { ACTIVE_DB_KEY, RETIRED_DB_KEY, getActiveDbName } from '@/storage/activeDb';
 import { DB_NAME, DB_VERSION, closeNotesDb, openNamedDb, openNotesDb, type NotesDb } from '@/storage/db';
@@ -45,6 +45,7 @@ const oneTab = async () => 1;
 
 beforeEach(async () => {
   vi.stubGlobal('localStorage', memoryStorage());
+  vi.stubGlobal('sessionStorage', memoryStorage());
 });
 afterEach(async () => {
   await closeNotesDb();
@@ -239,13 +240,50 @@ describe('importBackup', () => {
     old.close();
     expect(JSON.parse(storage.getItem(RETIRED_DB_KEY)!)).toEqual([DB_NAME]);
 
-    // The "restart": the app opens the pointed-to db, then the cleanup runs.
+    // The "restart" in a fresh browser session (no import marker): the app
+    // opens the pointed-to db, then the cleanup runs.
     await closeNotesDb();
     expect((await openNotesDb()).name).toBe(pointer);
-    await cleanupRetiredDatabases(storage);
+    await cleanupRetiredDatabases(storage, memoryStorage());
     expect(await dbNames()).toEqual([pointer]);
     expect(storage.getItem(RETIRED_DB_KEY)).toBeNull();
     expect(await (await openNotesDb()).count('notes')).toBe(1);
+  });
+
+  it("cleanup after the import's own reload keeps the old database", async () => {
+    await seedAll('old');
+    const storage = memoryStorage();
+    const session = memoryStorage();
+    vi.stubGlobal('localStorage', storage);
+    vi.stubGlobal('sessionStorage', session);
+    const blob = manifestBlob({ stores: { notes: [{ key: null, value: { id: 'imported' } }] } });
+
+    await importBackup(blob, { storage, countTabs: oneTab });
+    expect(session.getItem(IMPORTED_THIS_SESSION_KEY)).not.toBeNull();
+
+    // The reload right after the import: same tab, same sessionStorage. The
+    // pointer reads back, but may exist only in memory, so nothing is deleted.
+    const pointer = getActiveDbName(storage);
+    await closeNotesDb();
+    expect((await openNotesDb()).name).toBe(pointer);
+    await cleanupRetiredDatabases(storage, session);
+    expect(await dbNames()).toEqual([DB_NAME, pointer].sort());
+    expect(JSON.parse(storage.getItem(RETIRED_DB_KEY)!)).toEqual([DB_NAME]);
+  });
+
+  it('cleanup still deletes the old database in a fresh session once the marker is absent', async () => {
+    await seedAll('old');
+    const storage = memoryStorage();
+    vi.stubGlobal('localStorage', storage);
+    const blob = manifestBlob({ stores: { notes: [{ key: null, value: { id: 'imported' } }] } });
+    await importBackup(blob, { storage, countTabs: oneTab });
+    const pointer = getActiveDbName(storage);
+
+    await closeNotesDb();
+    const freshSession = memoryStorage();
+    await cleanupRetiredDatabases(storage, freshSession);
+    expect(await dbNames()).toEqual([pointer]);
+    expect(storage.getItem(RETIRED_DB_KEY)).toBeNull();
   });
 
   it('retiredDb key is never exported or imported', async () => {

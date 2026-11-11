@@ -195,8 +195,8 @@ function registerOllamaIpc(): void {
 }
 
 /**
- * `storage:flush`: writes DOMStorage to disk now. Backup import awaits it
- * before reloading, so the new active-db pointer is not lost to a crash.
+ * `storage:flush`: asks Chromium to start writing DOMStorage to disk (it does
+ * not wait for the write). Backup import calls it before reloading.
  */
 function registerStorageIpc(): void {
   ipcMain.handle(FLUSH_STORAGE, (event) => {

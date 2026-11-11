@@ -115,9 +115,11 @@ export function BackupSettings({
       setBusy(false);
       return;
     }
-    // Desktop: put the new active-db pointer on disk before the reload. The
-    // import already succeeded, so a failed flush still reloads; the previous
-    // database is kept either way (see src/backup/retiredDb.ts).
+    // Desktop: ask Chromium to start writing DOMStorage (the new active-db
+    // pointer) to disk before the reload. `flushStorageData()` only starts
+    // the write; it does not guarantee it has landed. The previous database
+    // is safe either way: it is never deleted in this browser session (see
+    // src/backup/retiredDb.ts), so a failed flush still reloads.
     try {
       await getDesktopBridge()?.flushStorage();
     } catch {

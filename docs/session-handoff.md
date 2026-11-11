@@ -14,7 +14,7 @@ owner's behalf.
 | `electron` | **This session's work**, cut from `main` at `59ed3a4`. The packaging commit is `build(desktop): mac dmg and windows nsis packaging, tester guide and handoff`; the final whole-branch review fixes follow it. **Not merged, not pushed.** |
 | `main` | Unchanged |
 
-Verified after the final-review fixes: **web suite 2066 tests in 164 files,
+Verified after the final-review fixes: **web suite 2070 tests in 164 files,
 electron suite 69 tests in 7 files** (`npm test` runs both), `npx tsc -b` clean,
 `npm run lint` 0 errors (6 warnings, all pre-existing: `huionTransport.ts`,
 `useTriageData.ts`, and one `set-state-in-effect` in `OllamaSetupStatus.tsx`
@@ -59,8 +59,10 @@ bytes. The app's own code in `app.asar` is 5.2 MB; the rest is Electron.
   - It never deletes the previous database. That one is recorded in
     `takingnotes.retiredDb` and deleted on a later start, only once the new
     pointer reads back and the database it names has every store
-    (`src/backup/retiredDb.ts`). The desktop build also flushes
-    `localStorage` to disk before the reload. So a crash right after an
+    (`src/backup/retiredDb.ts`). It is never deleted in the browser session
+    that imported, including its own reload, because a sessionStorage marker
+    (`takingnotes.importedThisSession`) blocks it there. The desktop build also
+    asks Chromium to start flushing `localStorage` before the reload. So a crash right after an
     import reopens the old data rather than an empty database.
   - It replaces every `takingnotes.*` and legacy `takingnotes_*` key, the
     legacy `takingnotes_downloaded_memory` included (M8).

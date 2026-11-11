@@ -1,7 +1,7 @@
 import { openDB } from 'idb';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { cleanupRetiredDatabases, retireDatabase } from '@/backup/retiredDb';
+import { IMPORTED_THIS_SESSION_KEY, cleanupRetiredDatabases, retireDatabase } from '@/backup/retiredDb';
 import { ACTIVE_DB_KEY, RETIRED_DB_KEY } from '@/storage/activeDb';
 import { DB_NAME, closeNotesDb, openNamedDb } from '@/storage/db';
 
@@ -42,6 +42,7 @@ const NEW = `${DB_NAME}-abc`;
 
 beforeEach(() => {
   vi.stubGlobal('localStorage', memoryStorage());
+  vi.stubGlobal('sessionStorage', memoryStorage());
 });
 afterEach(async () => {
   await closeNotesDb();
@@ -65,10 +66,30 @@ describe('cleanupRetiredDatabases', () => {
     await createNotesDb(NEW);
     const storage = memoryStorage({ [ACTIVE_DB_KEY]: NEW, [RETIRED_DB_KEY]: JSON.stringify([DB_NAME]) });
 
-    await cleanupRetiredDatabases(storage);
+    // A fresh browser session: no import marker.
+    await cleanupRetiredDatabases(storage, memoryStorage());
 
     expect(await dbNames()).toEqual([NEW]);
     expect(storage.getItem(RETIRED_DB_KEY)).toBeNull();
+  });
+
+  it('keeps everything in the session that performed the import', async () => {
+    await createNotesDb(DB_NAME);
+    await createNotesDb(NEW);
+    const storage = memoryStorage({ [ACTIVE_DB_KEY]: NEW, [RETIRED_DB_KEY]: JSON.stringify([DB_NAME]) });
+    await cleanupRetiredDatabases(storage, memoryStorage({ [IMPORTED_THIS_SESSION_KEY]: '1' }));
+    expect(await dbNames()).toEqual([DB_NAME, NEW].sort());
+    expect(JSON.parse(storage.getItem(RETIRED_DB_KEY)!)).toEqual([DB_NAME]);
+  });
+
+  it('keeps everything when sessionStorage is missing or throws', async () => {
+    await createNotesDb(DB_NAME);
+    await createNotesDb(NEW);
+    const storage = memoryStorage({ [ACTIVE_DB_KEY]: NEW, [RETIRED_DB_KEY]: JSON.stringify([DB_NAME]) });
+    await cleanupRetiredDatabases(storage, null);
+    const throwing = { getItem: () => { throw new Error('SecurityError'); } } as unknown as Storage;
+    await cleanupRetiredDatabases(storage, throwing);
+    expect(await dbNames()).toEqual([DB_NAME, NEW].sort());
   });
 
   it('cleanup keeps the retired db when the pointer is missing', async () => {
