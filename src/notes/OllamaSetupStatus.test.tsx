@@ -75,6 +75,9 @@ describe('OllamaSetupStatus', () => {
       expect(probeOllama).toHaveBeenCalledWith('http://localhost:11434');
       expect(container.textContent).toContain('Ollama is running but refused');
       expect(container.textContent).not.toContain("isn't running");
+      // How to allow the desktop app's origin.
+      expect(container.textContent).toContain('launchctl setenv OLLAMA_ORIGINS "app://*"');
+      expect(container.textContent).toContain('then quit and reopen Ollama');
     } finally {
       delete w.takingnotesDesktop;
     }
@@ -86,5 +89,9 @@ describe('OllamaSetupStatus', () => {
     await flush();
     expect(container.textContent).toContain("Ollama isn't running at http://localhost:11434.");
     expect(container.textContent).toContain('Ollama is running but refused');
+    // The web build allows the page's own origin.
+    expect(window.location.origin).toMatch(/^https?:\/\//);
+    expect(container.textContent).toContain(`launchctl setenv OLLAMA_ORIGINS "${window.location.origin}"`);
+    expect(container.textContent).not.toContain('app://*');
   });
 });

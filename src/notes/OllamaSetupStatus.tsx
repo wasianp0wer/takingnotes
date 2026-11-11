@@ -19,6 +19,15 @@ export interface OllamaSetupStatusProps {
   fetchImpl?: FetchLike;
 }
 
+/**
+ * The value OLLAMA_ORIGINS must allow: every `app://` origin in the desktop
+ * shell, the page's own origin in the web build.
+ */
+function originToAllow(): string {
+  if (getDesktopBridge()) return 'app://*';
+  return typeof window === 'undefined' ? '' : window.location.origin;
+}
+
 /** The desktop shell's probe, bound to its bridge; undefined in the web build. */
 function desktopProbe(): ((baseUrl: string) => Promise<boolean>) | undefined {
   const bridge = getDesktopBridge();
@@ -70,11 +79,19 @@ export function OllamaSetupStatus({ compact, probeReachable = desktopProbe(), fe
       Ollama isn&apos;t running at {baseUrl}. Install it from https://ollama.com and open it, then check again.
     </p>
   );
+  const allow = originToAllow();
   const blocked = (
-    <p>
-      Ollama is running but refused this app&apos;s requests. Set OLLAMA_ORIGINS to include this app&apos;s address,
-      then restart Ollama.
-    </p>
+    <>
+      <p>
+        Ollama is running but refused this app&apos;s requests. Set OLLAMA_ORIGINS to include this app&apos;s address,
+        then restart Ollama.
+      </p>
+      <p>
+        The value to allow is {allow}. On macOS, run{' '}
+        <code className="rounded bg-muted px-1">launchctl setenv OLLAMA_ORIGINS &quot;{allow}&quot;</code> in Terminal,
+        then quit and reopen Ollama.
+      </p>
+    </>
   );
 
   return (
