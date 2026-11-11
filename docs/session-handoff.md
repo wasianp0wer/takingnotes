@@ -11,11 +11,11 @@ owner's behalf.
 
 | Branch | Contents |
 |---|---|
-| `electron` | **This session's work**, cut from `main` at `59ed3a4`. The last commit is `build(desktop): mac dmg and windows nsis packaging, tester guide and handoff`. **Not merged, not pushed.** |
+| `electron` | **This session's work**, cut from `main` at `59ed3a4`. The packaging commit is `build(desktop): mac dmg and windows nsis packaging, tester guide and handoff`; the final whole-branch review fixes follow it. **Not merged, not pushed.** |
 | `main` | Unchanged |
 
-Verified at the packaging commit: **web suite 2050 tests in 163 files, electron
-suite 63 tests in 6 files** (`npm test` runs both), `npx tsc -b` clean,
+Verified after the final-review fixes: **web suite 2066 tests in 164 files,
+electron suite 69 tests in 7 files** (`npm test` runs both), `npx tsc -b` clean,
 `npm run lint` 0 errors (6 warnings, all pre-existing: `huionTransport.ts`,
 `useTriageData.ts`, and one `set-state-in-effect` in `OllamaSetupStatus.tsx`
 from Task 6), and `npm run build` succeeds (Vite prints its usual
@@ -56,18 +56,36 @@ bytes. The app's own code in `app.asar` is 5.2 MB; the rest is Electron.
   - It is all-or-nothing. It refuses a newer `DB_VERSION`, and it is blocked
     while a recording, session or transcription is running, or while another
     tab has the database open.
+  - It never deletes the previous database. That one is recorded in
+    `takingnotes.retiredDb` and deleted on a later start, only once the new
+    pointer reads back and the database it names has every store
+    (`src/backup/retiredDb.ts`). The desktop build also flushes
+    `localStorage` to disk before the reload. So a crash right after an
+    import reopens the old data rather than an empty database.
+  - It replaces every `takingnotes.*` and legacy `takingnotes_*` key, the
+    legacy `takingnotes_downloaded_memory` included (M8).
 - **Ollama setup check (Task 6), both builds.** In Settings and as a notice on a
   failed transcript, it reports one of four states: not running, model
   missing (with `ollama pull <model>` and a copy button), requests refused
-  (how to set `OLLAMA_ORIGINS`), or ready.
+  (the value to allow, `app://*` on desktop or the page origin on the web,
+  and the macOS `launchctl setenv OLLAMA_ORIGINS "…"` command, then quit and
+  reopen Ollama), or ready.
 - **Desktop shell (Task 7).** `electron/`:
   - The renderer is served from `app://takingnotes/` with an SPA fallback.
   - `contextIsolation`, `sandbox`, no Node in the page, a narrow preload bridge
-    (`window.takingnotesDesktop`: `platform`, `devices`, `probeOllama`).
+    (`window.takingnotesDesktop`: `platform`, `devices`, `probeOllama`,
+    `flushStorage`). Every IPC handler checks the sender is on the app origin.
   - A CSP on every response.
   - Navigation guards: off-origin links open the system browser, frames and
     redirects are refused, there are no new windows and no `<webview>`.
-  - Single instance; the data lives in `~/Library/Application Support/TakingNotes`.
+  - Single instance. The profile path is set explicitly (`electron/profile.ts`)
+    before the single-instance lock: the packaged app uses
+    `~/Library/Application Support/TakingNotes` (the same path as before, so
+    there is no migration). `desktop:dev` uses `…/TakingNotes Dev`, so it
+    neither shares the installed app's data nor hits its lock. An explicit
+    `--user-data-dir` wins. The app ID does not key this path.
+  - Electron fuses: `runAsNode`, `NODE_OPTIONS` and `--inspect` off;
+    `onlyLoadAppFromAsar` on; asar integrity validation off.
   - The window title stays **TakingNotes** (`page-title-updated` is prevented;
     `index.html`'s `<title>` belongs to the web build and is unchanged).
 - **Device picker and permissions (Tasks 9–10).**
@@ -86,8 +104,8 @@ bytes. The app's own code in `app.asar` is 5.2 MB; the rest is Electron.
   - `electron-builder.json` and `build/entitlements.mac.plist`.
   - The `desktop:dist:mac` and `desktop:dist:win` scripts.
   - `electron/packaging.test.ts` pins the app ID, the Info.plist strings,
-    `files`, the targets, the entitlements and the exact `electron-builder`
-    version.
+    `files`, the targets, the entitlements, the Electron fuses and the exact
+    `electron-builder` version.
   - `docs/desktop-testers.md`.
 
 ### Spike results
@@ -111,7 +129,7 @@ Full record: `docs/desktop-spike.md`. In short, on the built `app://` app
 
 On `release/mac-arm64/TakingNotes.app` from `npm run desktop:dist:mac`. It was
 launched with a temporary `--user-data-dir` and remote debugging and driven over
-CDP, as in the spike. Nobody clicked anything, and the real profile was not
+CDP, as in the spike. Nothing was clicked by hand, and the real profile was not
 created.
 - The page loaded at `app://takingnotes/`, and the bridge had `platform`,
   `devices` and `probeOllama`.
@@ -130,6 +148,15 @@ created.
 - The Bluetooth and microphone prompts were deliberately **not** triggered.
 - Gatekeeper's first-launch flow for a downloaded (quarantined) copy was
   **not** exercised. That is the owner's second-Mac check below.
+- **After the final-review fixes** (fuses, profile path, `flushStorage`), the
+  app was rebuilt and checked the same way. `npx @electron/fuses read` showed
+  RunAsNode, EnableNodeOptionsEnvironmentVariable and
+  EnableNodeCliInspectArguments Disabled, and OnlyLoadAppFromAsar Enabled.
+  `codesign --verify --deep --strict` passed. With a temporary
+  `--user-data-dir`, the app rendered the Sessions view at
+  `app://takingnotes/`; the bridge had `flushStorage`, which resolved; and
+  `require`/`process` were undefined. IndexedDB landed in the temporary
+  profile, and neither `…/TakingNotes` nor `…/TakingNotes Dev` was created.
 
 ### Owner checks (tests can't reach these)
 
@@ -141,8 +168,11 @@ On a **packaged** build, not the dev shell (spec §10):
   a syllabus PDF.
 - [ ] Run a regex search.
 - [ ] Round-trip a real backup from the browser into the app (spec §8: export
-  from the web build at the **same** dev-server host and port you use today,
-  then import in the app; the browser copy stays as a fallback).
+  from the web build at the **exact same** dev-server address you use today,
+  then import in the app; the browser copy stays as a fallback). **Check the
+  port (M4):** if 3000 is busy, Vite silently moves to the next port. That is
+  a different origin with an empty database, so the export is empty. Check
+  the summary's counts before you import.
 - [ ] Install on a second Mac and follow `docs/desktop-testers.md` from
   scratch. This is also the first real test of the "Open Anyway" path.
 
@@ -157,10 +187,9 @@ Also unreached by this session's tests and spikes:
   usage string it shows).
 - [ ] **Windows is untested.** The installer builds (below), but it has never
   been run.
-- [ ] **One web test is flaky under heavy machine load.** The ledger names
-  `GapPanel` (carries draft choices…), `NotesHalf`, `ThemeBuilderDialog` and
-  `AdvancedSearch` as intermittent when the machine is saturated. They pass
-  on an idle machine, and the full suite was green for this commit.
+- [ ] **A few web tests are intermittently flaky under heavy machine load**
+  (GapPanel, NotesHalf, ThemeBuilderDialog, AdvancedSearch). They pass on an
+  idle machine, and the full suite was green for this commit.
 
 ### Tech debt (spec §9)
 
@@ -177,11 +206,28 @@ Also unreached by this session's tests and spikes:
   desktop build. That needs a CSP that follows the setting, or Ollama calls
   routed through the main process (the skipped Task 8).
 - Once desktop is the only target, the multi-tab guards can be simplified.
+- **⚑ Import skips data migrations (I2).** Import writes an older backup's
+  records into a staging database already opened at the current
+  `DB_VERSION`, so the `if (oldVersion < N)` blocks in `upgradeNotesDb` never
+  run over them. That is harmless while versions 1–5 are schema-only. Any
+  future version bump that migrates data must first make import open staging
+  at `manifest.dbVersion`, then reopen at `DB_VERSION`. Flagged at
+  `upgradeNotesDb` and at the staging open in `importBackup.ts`.
+- **Backup manifest size limit (M3).** The manifest JSON is built and parsed as
+  one string, and strokes live in it. A stroke library beyond a few hundred
+  MB can't be exported. Binaries are unaffected.
+- **Renderer security: the Whisper ORT runtime has no SRI (M6).**
+  transformers.js fetches onnxruntime's loader from jsdelivr and runs it via a
+  `blob:` URL, with no integrity check. Bundling the ORT files (see the
+  offline item above) would close this.
+- **Cloudflare Pages (M7).** If Pages builds from git, set
+  `ELECTRON_SKIP_BINARY_DOWNLOAD=1` in its build environment, so `npm install`
+  doesn't download Electron for a web build.
 - Smaller items deferred by task reviews are listed per task in
   `.superpowers/sdd/2026-11-11-electron-desktop/progress.md`. That file is
-  local and untracked. Examples: orphaned staging databases after a crash are
-  never swept, `ollama:probe` follows redirects, and the `app://` handler
-  ignores `Range`.
+  local and untracked. Examples: an orphaned staging database after a crash
+  mid-import is never swept (a retired database is, see above), and the
+  `app://` handler ignores `Range`.
 
 ### The builder's calls (spec §11)
 
@@ -196,10 +242,12 @@ Also unreached by this session's tests and spikes:
 - **All-or-nothing import: a staging database plus a `localStorage` pointer
   flip.** Records go into a fresh `takingnotes-<base36 timestamp>` database.
   The blockers are checked again right before the swap. Then the app's
-  `localStorage` keys are replaced and the active-DB pointer is set, and the
-  app reloads. A failure while staging leaves the old database untouched. A
-  failure during the swap puts the previous `localStorage` keys and pointer
-  back.
+  `localStorage` keys are replaced, the old database is recorded as retired,
+  and the active-DB pointer is set. The desktop build then flushes storage,
+  and the app reloads. The old database is deleted only by a later start that
+  verifies the pointer (see "What was built"). A failure while staging leaves
+  the old database untouched. A failure during the swap puts the previous
+  `localStorage` keys, retired list and pointer back.
 - **Shell build: esbuild** (`scripts/build-electron.mjs`), bundling
   `electron/main.ts` and `preload.ts` to CommonJS. electron-vite and
   vite-plugin-electron were not used; the renderer stays the ordinary Vite

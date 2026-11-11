@@ -1489,10 +1489,19 @@ below. Code wins where this disagrees.
   without an extension fall back to `index.html`, and missing assets get a 404.
   Dev loads `TAKINGNOTES_DEV_URL` (Vite).
 - The origin `app://takingnotes` owns the IndexedDB and `localStorage`. The
-  profile is Electron's `userData`, keyed by the app ID `org.takingnotes.app`
-  and the name `TakingNotes`. On macOS that is
-  `~/Library/Application Support/TakingNotes`. **Never change the app ID or the
-  name:** a change orphans every user's data.
+  profile is Electron's `userData`, which `main.ts` sets explicitly with
+  `app.setPath('userData', …)` from `userDataPath()` (`electron/profile.ts`),
+  before the single-instance lock: packaged, `<appData>/TakingNotes` (on macOS
+  `~/Library/Application Support/TakingNotes`); under `desktop:dev`
+  (`TAKINGNOTES_DEV_URL` set), `<appData>/TakingNotes Dev`, so dev never shares
+  the installed app's data or lock. An explicit `--user-data-dir` is left
+  alone. The app ID `org.takingnotes.app` is the bundle ID (macOS keys
+  permission grants to it); it does not key the profile. **Never change the
+  `TakingNotes` directory name or the app ID:** the first orphans every user's
+  data, the second their permission grants.
+- Electron fuses (set by electron-builder's `electronFuses`): `runAsNode`,
+  `NODE_OPTIONS` and `--inspect` are off, and the app loads only from
+  `app.asar`. Asar integrity validation is off.
 - Every `app://` response carries the CSP from `security.ts`: `'self'`, Ollama
   on `localhost`/`127.0.0.1`, jsdelivr and Hugging Face for transformers.js,
   `blob:` in `script-src` (onnxruntime's loader) and the Google Fonts hosts.
@@ -1514,8 +1523,12 @@ build) exposes:
   Every request is answered exactly once, and a cancel settles
   `requestDevice()` the way the browser does.
 - `probeOllama(baseUrl)`: a localhost-only reachability check from the main
-  process. With it, the Ollama setup check can tell "not running" from
-  "refused by `OLLAMA_ORIGINS`".
+  process (redirects are not followed). With it, the Ollama setup check can
+  tell "not running" from "refused by `OLLAMA_ORIGINS`".
+- `flushStorage()`: `session.defaultSession.flushStorageData()`, so
+  `localStorage` is on disk now. Backup import awaits it before reloading.
+
+Every IPC handler ignores senders that are not on the app origin.
 
 Ollama itself is fetched directly from the renderer. A default Ollama allows
 `app://*`, so it does not go through main (the plan's Task 8 was skipped).
@@ -1535,3 +1548,20 @@ These apply to both builds. `.tnbackup` export and import live in `src/backup/`
 (format in `format.ts`). Import writes into a fresh staging database and then
 switches `localStorage` `takingnotes.activeDb` (`src/storage/activeDb.ts`) to
 it. `openNotesDb` opens whatever database that pointer names.
+
+Import never deletes the previous database. Chromium writes `localStorage`
+lazily, so a crash right after import could lose the pointer, and the app
+would then reopen the previous database; it must still exist. Its name is
+recorded in `takingnotes.retiredDb` (a JSON list, written before the pointer,
+rolled back with it). On each start `cleanupRetiredDatabases`
+(`src/backup/retiredDb.ts`, called from `main.tsx`, not awaited) deletes a
+retired database only if the pointer reads back to a valid name, the database
+it names opens with every expected store, and the retired name is not the
+active one. Otherwise it keeps it. Neither key is exported or imported. On the
+desktop build, the import also awaits `flushStorage()` before reloading.
+
+⚑ Import writes an older backup into a staging database opened at the current
+`DB_VERSION`, so `upgradeNotesDb`'s `oldVersion` blocks never run over
+imported records. That is harmless while versions 1–5 are schema-only. A future
+version bump that migrates data must first make import open staging at
+`manifest.dbVersion` and then reopen at `DB_VERSION`.

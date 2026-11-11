@@ -44,6 +44,18 @@ Handwriting transcription runs on your Mac through Ollama.
    requests being refused) and how to fix it. Click **Check again** after
    fixing it.
 
+**If it says Ollama refused the app's requests**, Ollama is set to accept
+requests only from certain addresses, and this app's (`app://*`) isn't one of
+them. In Terminal, run:
+
+```sh
+launchctl setenv OLLAMA_ORIGINS "app://*"
+```
+
+Then quit Ollama (menu bar icon → **Quit Ollama**), open it again, and click
+**Check again**. The setting lasts until you restart your Mac; run the command
+again after a restart if the message comes back.
+
 Audio transcription (Whisper) needs no setup. The model downloads the first
 time you transcribe a recording and is cached after that, so the first time
 needs an internet connection.
