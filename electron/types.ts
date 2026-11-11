@@ -50,4 +50,10 @@ export interface DesktopDevicesBridge {
 export interface DesktopBridge {
   readonly platform: DesktopPlatform;
   readonly devices: DesktopDevicesBridge;
+  /**
+   * Whether anything answers HTTP at `<baseUrl>/api/tags`, asked from the main
+   * process (no CORS). False for a network error, a 2 s timeout, or any URL
+   * that isn't `http://localhost` / `http://127.0.0.1`.
+   */
+  probeOllama(baseUrl: string): Promise<boolean>;
 }

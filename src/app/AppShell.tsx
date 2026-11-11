@@ -6,6 +6,7 @@ import { RecorderControl } from '@/audio/RecorderControl';
 import { SessionControls } from '@/capture/SessionControls';
 import { usePageTurnCapture } from '@/capture/usePageTurnCapture';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { DevicePickerDialog } from '@/desktop/DevicePickerDialog';
 import { useHuionDevice } from '@/device/TabletProvider';
 import { AdvancedSearch } from '@/search/AdvancedSearch';
 import { HeaderSearch } from '@/search/HeaderSearch';
@@ -105,6 +106,11 @@ export function AppShell() {
       {/* Mounted once; renders (full screen) only while advanced search is open. */}
       <AdvancedSearch />
       </SearchProvider>
+      {/* Desktop only (renders nothing in the browser). Outside the tabs and
+          every conditional subtree on purpose: it must stay subscribed to the
+          bridge for the document's whole life, or a device request's `open`
+          is lost and requestDevice() never settles. */}
+      <DevicePickerDialog />
     </SessionsUiProvider>
   );
 }

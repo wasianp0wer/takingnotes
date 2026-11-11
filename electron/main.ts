@@ -15,11 +15,13 @@ import {
   webContents as allWebContents,
   type HIDDevice,
   type IpcMainEvent,
+  type IpcMainInvokeEvent,
   type WebContents,
 } from 'electron';
 import { APP_ORIGIN, APP_SCHEME, resolveAppRequest } from './appProtocol';
-import { CHOOSER_CANCEL, CHOOSER_MESSAGE, CHOOSER_SELECT } from './channels';
+import { CHOOSER_CANCEL, CHOOSER_MESSAGE, CHOOSER_SELECT, OLLAMA_PROBE } from './channels';
 import { createDeviceChooser, type DeviceChooser } from './devices';
+import { probeOllama } from './ollamaProbe';
 import { isDeviceAllowed, isPermissionAllowed, wantsMicrophone } from './permissions';
 import { contentSecurityPolicy, navigationAction, originOf } from './security';
 import type { ChooserDevice } from './types';
@@ -144,15 +146,36 @@ function hidToChooser(device: HIDDevice): ChooserDevice {
   return { id: device.deviceId, name: device.name };
 }
 
+/** Whether an IPC message came from a frame on the app origin. */
+function isAppOriginSender(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
+  return !!event.senderFrame && isAppOriginUrl(event.senderFrame.url);
+}
+
 /** The chooser for the webContents an IPC message came from, if it has one. */
 function chooserForSender(event: IpcMainEvent): DeviceChooser | null {
-  if (!event.senderFrame || !isAppOriginUrl(event.senderFrame.url)) return null;
+  if (!isAppOriginSender(event)) return null;
   return choosers.get(event.sender.id) ?? null;
 }
 
 function isAppOriginUrl(url: string): boolean {
   const origin = originOf(url);
   return origin === APP_ORIGIN || (devUrl !== null && origin === originOf(devUrl));
+}
+
+/**
+ * `ollama:probe` (spec §6): lets the Ollama setup check tell "not running"
+ * from "running but refusing this origin". Localhost only; see ./ollamaProbe.
+ */
+function registerOllamaIpc(): void {
+  ipcMain.handle(OLLAMA_PROBE, async (event, baseUrl: unknown) => {
+    if (!isAppOriginSender(event)) return false;
+    return probeOllama(baseUrl, async (url, init) => {
+      const response = await net.fetch(url, init);
+      // Only the fact of an answer matters; don't keep the body open.
+      void response.body?.cancel().catch(() => {});
+      return response;
+    });
+  });
 }
 
 function registerChooserIpc(): void {
@@ -285,6 +308,7 @@ if (!app.requestSingleInstanceLock()) {
     registerAppProtocol();
     configureSessionPermissions();
     registerChooserIpc();
+    registerOllamaIpc();
     mainWindow = createWindow();
 
     app.on('activate', () => {

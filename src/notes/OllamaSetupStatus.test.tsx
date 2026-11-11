@@ -2,9 +2,11 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { DesktopBridge } from '@/desktop/bridge';
 import type { FetchLike } from '@/llm/ollamaClient';
 import { OllamaSetupStatus } from '@/notes/OllamaSetupStatus';
 import { setSettingValue } from '@/storage/settingKeys';
+import { fakeDesktopBridge } from '@/test/fakeDesktopBridge';
 import { resetDatabase } from '@/test/resetDb';
 
 declare global {
@@ -60,5 +62,29 @@ describe('OllamaSetupStatus', () => {
     await act(async () => root.render(<OllamaSetupStatus compact fetchImpl={tagsOf('gemma4:12b')} />));
     await flush();
     expect(container.textContent).not.toContain('Ollama ready');
+  });
+  it('uses the desktop bridge probe by default, so a refused request reads as blocked', async () => {
+    const fake = fakeDesktopBridge();
+    const probeOllama = vi.fn(async () => true);
+    const w = window as Window & { takingnotesDesktop?: DesktopBridge };
+    w.takingnotesDesktop = { ...fake.bridge, probeOllama };
+    try {
+      const fetchImpl = vi.fn<FetchLike>(async () => { throw new TypeError('cors'); });
+      await act(async () => root.render(<OllamaSetupStatus fetchImpl={fetchImpl} />));
+      await flush();
+      expect(probeOllama).toHaveBeenCalledWith('http://localhost:11434');
+      expect(container.textContent).toContain('Ollama is running but refused');
+      expect(container.textContent).not.toContain("isn't running");
+    } finally {
+      delete w.takingnotesDesktop;
+    }
+  });
+
+  it('without a desktop bridge, a failed request shows both possibilities', async () => {
+    const fetchImpl = vi.fn<FetchLike>(async () => { throw new TypeError('down'); });
+    await act(async () => root.render(<OllamaSetupStatus fetchImpl={fetchImpl} />));
+    await flush();
+    expect(container.textContent).toContain("Ollama isn't running at http://localhost:11434.");
+    expect(container.textContent).toContain('Ollama is running but refused');
   });
 });

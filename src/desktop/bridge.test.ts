@@ -20,6 +20,7 @@ describe('getDesktopBridge', () => {
         select: () => {},
         cancel: () => {},
       },
+      probeOllama: async () => false,
     };
     (window as BridgeWindow).takingnotesDesktop = bridge;
     expect(getDesktopBridge()).toBe(bridge);

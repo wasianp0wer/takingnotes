@@ -14,7 +14,9 @@ import { createNote } from '@/storage/notes';
 import { createPage } from '@/storage/pages';
 import { createRecording, setRecordingTranscript } from '@/storage/recordings';
 import type { NoteRecord } from '@/storage/types';
+import type { DesktopBridge } from '@/desktop/bridge';
 import { createFakeDeviceController } from '@/test/fakeDeviceController';
+import { fakeDesktopBridge } from '@/test/fakeDesktopBridge';
 import { resetDatabase } from '@/test/resetDb';
 import { resetTranscriptionQueueForTests } from '@/transcription/startTranscription';
 
@@ -376,6 +378,32 @@ describe('AppShell', () => {
     await settle();
     expect(advancedDialog()).toBeNull();
     expect(document.activeElement).toBe(byLabel('Search'));
+  });
+
+  it('the desktop device picker stays subscribed across tab switches and opens on request', async () => {
+    const fake = fakeDesktopBridge();
+    const w = window as Window & { takingnotesDesktop?: DesktopBridge };
+    w.takingnotesDesktop = fake.bridge;
+    try {
+      await renderShell();
+      expect(fake.listeners.size).toBe(1);
+      const [listener] = fake.listeners;
+
+      await clickTab('Triage');
+      await clickTab('Sessions');
+      await clickTab('Triage');
+
+      // The same subscription, never dropped and re-made: an `open` sent at
+      // any moment reaches the picker, so requestDevice() never hangs.
+      expect(fake.listeners.size).toBe(1);
+      expect([...fake.listeners][0]).toBe(listener);
+
+      await act(async () => fake.emit({ type: 'open', requestId: 'r1', kind: 'hid', devices: [] }));
+      const dialog = document.querySelector('[role="dialog"]');
+      expect(dialog?.textContent).toContain('Choose a USB device');
+    } finally {
+      delete w.takingnotesDesktop;
+    }
   });
 
   it('the legacy migration runs once', async () => {
