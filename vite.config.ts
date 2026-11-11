@@ -1,4 +1,5 @@
 import path from "path"
+import { readFileSync } from 'node:fs'
 import react from "@vitejs/plugin-react"
 import { defineConfig, type Plugin } from "vite"
 
@@ -20,7 +21,10 @@ function stripOrtWasm(): Plugin {
 }
 
 // https://vite.dev/config/
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string }
+
 export default defineConfig({
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   base: './',
   plugins: [react(), stripOrtWasm()],
   resolve: {
