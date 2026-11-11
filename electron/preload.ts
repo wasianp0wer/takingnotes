@@ -3,7 +3,7 @@
 // Its shape is `DesktopBridge` in ./types, which the renderer also reads
 // (src/desktop/bridge.ts), so the two cannot drift apart.
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
-import { CHOOSER_CANCEL, CHOOSER_MESSAGE, CHOOSER_SELECT, OLLAMA_PROBE } from './channels';
+import { CHOOSER_CANCEL, CHOOSER_MESSAGE, CHOOSER_SELECT, FLUSH_STORAGE, OLLAMA_PROBE } from './channels';
 import type { ChooserMessage, DesktopBridge } from './types';
 
 const bridge: DesktopBridge = {
@@ -29,6 +29,9 @@ const bridge: DesktopBridge = {
     // Main answers a boolean; anything else (e.g. a refused sender) is "not reachable".
     const reachable: unknown = await ipcRenderer.invoke(OLLAMA_PROBE, String(baseUrl));
     return reachable === true;
+  },
+  async flushStorage() {
+    await ipcRenderer.invoke(FLUSH_STORAGE);
   },
 };
 

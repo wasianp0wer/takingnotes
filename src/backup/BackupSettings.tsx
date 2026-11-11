@@ -10,6 +10,7 @@ import {
   type BackupSummary,
 } from '@/backup/importBackup';
 import { Button } from '@/components/ui/button';
+import { getDesktopBridge } from '@/desktop/bridge';
 import { Progress } from '@/components/ui/progress';
 
 export interface BackupDeps {
@@ -108,12 +109,21 @@ export function BackupSettings({
       await deps.importBackup(pending.file, {
         onProgress: (done, total) => setProgress({ done, total }),
       });
-      reload();
     } catch (error) {
       setErrors(errorMessages(error));
       setProgress(null);
       setBusy(false);
+      return;
     }
+    // Desktop: put the new active-db pointer on disk before the reload. The
+    // import already succeeded, so a failed flush still reloads; the previous
+    // database is kept either way (see src/backup/retiredDb.ts).
+    try {
+      await getDesktopBridge()?.flushStorage();
+    } catch {
+      // Chromium still writes it lazily.
+    }
+    reload();
   }
 
   return (

@@ -19,7 +19,7 @@ import {
   type WebContents,
 } from 'electron';
 import { APP_ORIGIN, APP_SCHEME, resolveAppRequest } from './appProtocol';
-import { CHOOSER_CANCEL, CHOOSER_MESSAGE, CHOOSER_SELECT, OLLAMA_PROBE } from './channels';
+import { CHOOSER_CANCEL, CHOOSER_MESSAGE, CHOOSER_SELECT, FLUSH_STORAGE, OLLAMA_PROBE } from './channels';
 import { createDeviceChooser, type DeviceChooser } from './devices';
 import { probeOllama } from './ollamaProbe';
 import { isDeviceAllowed, isPermissionAllowed, wantsMicrophone } from './permissions';
@@ -178,6 +178,17 @@ function registerOllamaIpc(): void {
   });
 }
 
+/**
+ * `storage:flush`: writes DOMStorage to disk now. Backup import awaits it
+ * before reloading, so the new active-db pointer is not lost to a crash.
+ */
+function registerStorageIpc(): void {
+  ipcMain.handle(FLUSH_STORAGE, (event) => {
+    if (!isAppOriginSender(event)) return;
+    session.defaultSession.flushStorageData();
+  });
+}
+
 function registerChooserIpc(): void {
   ipcMain.on(CHOOSER_SELECT, (event, requestId: unknown, deviceId: unknown) => {
     if (typeof requestId !== 'string' || typeof deviceId !== 'string') return;
@@ -311,6 +322,7 @@ if (!app.requestSingleInstanceLock()) {
     configureSessionPermissions();
     registerChooserIpc();
     registerOllamaIpc();
+    registerStorageIpc();
     mainWindow = createWindow();
 
     app.on('activate', () => {

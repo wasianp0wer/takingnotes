@@ -30,6 +30,7 @@ export function fakeDesktopBridge(): FakeDesktopBridge {
       cancel,
     },
     probeOllama: async () => false,
+    flushStorage: async () => {},
   };
   return { bridge, listeners, select, cancel, emit: (msg) => listeners.forEach((fn) => fn(msg)) };
 }

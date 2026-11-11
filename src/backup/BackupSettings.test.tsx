@@ -6,6 +6,8 @@ import { BackupSettings } from '@/backup/BackupSettings';
 import { BackupFormatError } from '@/backup/format';
 import { ImportBlockedError } from '@/backup/guards';
 import { BackupTooNewError } from '@/backup/importBackup';
+import type { DesktopBridge } from '@/desktop/bridge';
+import { fakeDesktopBridge } from '@/test/fakeDesktopBridge';
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
@@ -103,6 +105,56 @@ describe('BackupSettings', () => {
     await flush();
     expect(deps.importBackup).toHaveBeenCalled();
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('awaits the desktop storage flush before reloading', async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const flushStorage = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          order.push('flush-start');
+          release = () => {
+            order.push('flush-done');
+            resolve();
+          };
+        }),
+    );
+    const w = window as Window & { takingnotesDesktop?: DesktopBridge };
+    w.takingnotesDesktop = { ...fakeDesktopBridge().bridge, flushStorage };
+    try {
+      const reload = vi.fn(() => order.push('reload'));
+      render(makeDeps(), reload);
+      await pickFile();
+      await act(async () => button('Replace and import').click());
+      await flush();
+      expect(flushStorage).toHaveBeenCalledTimes(1);
+      expect(reload).not.toHaveBeenCalled();
+      await act(async () => release());
+      await flush();
+      expect(order).toEqual(['flush-start', 'flush-done', 'reload']);
+    } finally {
+      delete w.takingnotesDesktop;
+    }
+  });
+
+  it('still reloads when the desktop flush fails', async () => {
+    const w = window as Window & { takingnotesDesktop?: DesktopBridge };
+    w.takingnotesDesktop = {
+      ...fakeDesktopBridge().bridge,
+      flushStorage: vi.fn(async () => {
+        throw new Error('flush failed');
+      }),
+    };
+    try {
+      const { reload } = render();
+      await pickFile();
+      await act(async () => button('Replace and import').click());
+      await flush();
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      delete w.takingnotesDesktop;
+    }
   });
 
   it('shows blocker messages and does not reload', async () => {

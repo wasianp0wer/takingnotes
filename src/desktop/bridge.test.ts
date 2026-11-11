@@ -21,6 +21,7 @@ describe('getDesktopBridge', () => {
         cancel: () => {},
       },
       probeOllama: async () => false,
+      flushStorage: async () => {},
     };
     (window as BridgeWindow).takingnotesDesktop = bridge;
     expect(getDesktopBridge()).toBe(bridge);
