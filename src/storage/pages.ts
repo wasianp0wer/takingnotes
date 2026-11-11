@@ -306,6 +306,70 @@ export async function setPageText(id: string, text: string): Promise<PageRecord>
 }
 
 /**
+ * True when a page holds nothing yet, so switching it between handwritten and
+ * typed can replace it in place instead of leaving an empty page behind. Only
+ * an *open* page qualifies (a finalized page is history, however empty), and
+ * anything that could hang off a page disqualifies it: a stroke, non-blank
+ * typed text (whitespace only counts as blank, as it does in `setPageText`), a
+ * transcript, a render or a gap analysis.
+ */
+export function isBlankPage(page: PageRecord): boolean {
+  return (
+    page.finalizedAt === null &&
+    page.strokes.length === 0 &&
+    (page.text ?? '').trim() === '' &&
+    page.transcript === null &&
+    page.render === null &&
+    !page.gapAnalysis
+  );
+}
+
+export interface ReplaceBlankPageInput {
+  source: 'live' | 'typed';
+  devicePageNum: number | null;
+  /** Ink the new page starts with - the stroke that triggered a typed-to-live switch. */
+  strokes: PageStroke[];
+  capturedAt: number;
+}
+
+/**
+ * Re-creates a blank page as a fresh page of the given kind under the same id,
+ * note and `pageIndex`, so nothing that refers to it is left dangling. The
+ * blank check and the write share one transaction, so a write that gave the
+ * page content first (a typed-page autosave) wins and this returns `null`
+ * without touching it - as it also does for a missing page.
+ */
+export async function replaceBlankPage(
+  id: string,
+  input: ReplaceBlankPageInput,
+): Promise<PageRecord | null> {
+  const db = await openNotesDb();
+  const tx = db.transaction('pages', 'readwrite');
+  const existing = await tx.store.get(id);
+  if (!existing || !isBlankPage(existing)) {
+    await tx.done;
+    return null;
+  }
+  const page: PageRecord = {
+    id: existing.id,
+    noteId: existing.noteId,
+    pageIndex: existing.pageIndex,
+    devicePageNum: input.devicePageNum,
+    source: input.source,
+    strokes: input.strokes,
+    pointCount: countPoints(input.strokes),
+    capturedAt: input.capturedAt,
+    render: null,
+    transcript: null,
+    finalizedAt: null,
+    ...(input.source === 'typed' ? { text: '' } : {}),
+  };
+  await tx.store.put(page);
+  await tx.done;
+  return page;
+}
+
+/**
  * When a page last received writing: the latest stroke end, falling back to
  * `capturedAt` for a page whose strokes carry no timestamps (ROM, legacy, or a
  * typed page). Shared by startup recovery and by `resumeNote`, both of which

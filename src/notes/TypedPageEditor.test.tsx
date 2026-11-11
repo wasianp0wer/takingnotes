@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TypedPageEditor } from '@/notes/TypedPageEditor';
+import { hasUnsavedTypedText } from '@/notes/typedDrafts';
 import { createNote } from '@/storage/notes';
 import { createTypedPage, getPage, setPageText } from '@/storage/pages';
 import { resetDatabase } from '@/test/resetDb';
@@ -93,6 +94,21 @@ describe('TypedPageEditor', () => {
     expect(stored?.text).toBe('Newton on motion');
     expect(stored?.transcript?.markdown).toBe('Newton on motion');
     expect(stored?.transcript?.status).toBe('done');
+  });
+
+  it('registers unsaved typing as a draft until it is saved, so the engine will not replace the page', async () => {
+    const pageId = await seedTypedPage();
+
+    await mountEditor({ pageId, initialText: '', debounceMs: 40 });
+    typeInto(textarea(), 'first words');
+
+    // Before the debounce fires the database still says the page is blank.
+    expect((await getPage(pageId))?.text).toBe('');
+    expect(hasUnsavedTypedText(pageId)).toBe(true);
+
+    await settle(10);
+    expect((await getPage(pageId))?.text).toBe('first words');
+    expect(hasUnsavedTypedText(pageId)).toBe(false);
   });
 
   it('flushes pending text on unmount before the debounce fires', async () => {

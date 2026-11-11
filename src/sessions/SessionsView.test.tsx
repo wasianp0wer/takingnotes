@@ -20,10 +20,10 @@ import { createSessionsUiStore, SESSIONS_UI_STORAGE_KEY } from '@/sessions/sessi
 import type { SessionsUiStore } from '@/sessions/sessionsUiStore';
 import { useLiveFollow } from '@/sessions/useLiveFollow';
 import { createNote, getNote, setNoteSummary } from '@/storage/notes';
-import { createPage, getPage, setPageTranscript } from '@/storage/pages';
+import { createPage, getPage, listPages, setPageTranscript } from '@/storage/pages';
 import { createRecording, getRecording, setRecordingTranscript } from '@/storage/recordings';
 import type { NoteRecord, PageRecord, RecordingRecord, TranscriptStatus } from '@/storage/types';
-import { createFakeDeviceController } from '@/test/fakeDeviceController';
+import { createFakeDeviceController, type FakeDeviceController } from '@/test/fakeDeviceController';
 import { resetDatabase } from '@/test/resetDb';
 import type { TranscriptionQueue } from '@/transcription/queue';
 
@@ -34,6 +34,7 @@ declare global {
 let container: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
 let engine: LiveCaptureEngine;
+let fake: FakeDeviceController;
 let queue: FakeQueue;
 let audioQueue: FakeAudioQueue;
 let store: SessionsUiStore;
@@ -144,7 +145,8 @@ beforeEach(async () => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  engine = createCaptureEngine({ controller: createFakeDeviceController() });
+  fake = createFakeDeviceController();
+  engine = createCaptureEngine({ controller: fake });
   queue = createFakeQueue();
   audioQueue = createFakeAudioQueue();
   store = createSessionsUiStore(null);
@@ -629,16 +631,19 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
     expect(chip).toBeDefined();
   });
 
-  it('creates a typed page via Type page and saves what is typed into it', async () => {
+  it('turns the blank first page into a typed page via Type page and saves what is typed into it', async () => {
     await render();
     await click(buttonByText('New note'));
+    const blank = engine.getState().activePageId!;
 
     await click(buttonByText('Type page'));
 
-    expect(engine.getState().pageIndex).toBe(1);
+    // Replaced in place: same page, same position, no empty page left behind.
+    expect(engine.getState()).toMatchObject({ activePageId: blank, pageIndex: 0 });
     const activePageId = engine.getState().activePageId!;
     expect((await getPage(activePageId))?.source).toBe('typed');
-    expect(store.getState().pageIndex).toBe(1);
+    expect(await listPages(engine.getState().activeNoteId!)).toHaveLength(1);
+    expect(store.getState().pageIndex).toBe(0);
 
     const ta = container.querySelector('textarea')!;
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
@@ -654,6 +659,55 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
     const saved = await getPage(activePageId);
     expect(saved?.text).toBe('Newton: F=ma');
     expect(saved?.transcript?.markdown).toBe('Newton: F=ma');
+  });
+
+  it('switches a blank typed page back to handwriting in place when the pen writes', async () => {
+    await render();
+    await click(buttonByText('New note'));
+    await click(buttonByText('Type page'));
+    const pageId = engine.getState().activePageId!;
+    expect(container.querySelector('textarea')).not.toBeNull();
+
+    await act(async () => {
+      fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
+      fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+    });
+    await act(async () => engine.flush());
+    await settle();
+
+    expect(engine.getState()).toMatchObject({ activePageId: pageId, pageIndex: 0 });
+    expect((await getPage(pageId))?.source).toBe('live');
+    // The view reloaded the page under its unchanged id: the editor is gone.
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(container.querySelector('canvas')).not.toBeNull();
+  });
+
+  it('keeps typing that has not autosaved yet when the pen writes, opening a new page', async () => {
+    await render();
+    await click(buttonByText('New note'));
+    await click(buttonByText('Type page'));
+    const typedId = engine.getState().activePageId!;
+
+    const ta = container.querySelector('textarea')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+    await act(async () => {
+      setter.call(ta, 'half a thought');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    // Well inside the 500ms debounce: nothing is in the database yet.
+    expect((await getPage(typedId))?.text).toBe('');
+
+    await act(async () => {
+      fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
+      fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+    });
+    await act(async () => engine.flush());
+    await settle();
+
+    const pages = await listPages(engine.getState().activeNoteId!);
+    expect(pages.map((p) => p.source)).toEqual(['typed', 'live']);
+    expect(pages[0]).toMatchObject({ id: typedId, text: 'half a thought' });
+    expect(engine.getState().pageIndex).toBe(1);
   });
 
   it('shows the transcribing message for the active, unfinalized live page', async () => {
