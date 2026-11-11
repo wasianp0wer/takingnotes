@@ -37,3 +37,7 @@ samples/
 # Throwaway spike harness (task #1)
 scripts/spike/
 logs/
+
+# Electron shell build output and packaged installers
+dist-electron/
+release/
