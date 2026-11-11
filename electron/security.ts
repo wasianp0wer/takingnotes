@@ -48,7 +48,7 @@ export function contentSecurityPolicy(): string {
  * because WHATWG `URL.origin` is the opaque `"null"` for non-special schemes
  * such as `app:`.
  */
-function originOf(url: string): string | null {
+export function originOf(url: string): string | null {
   try {
     const parsed = new URL(url);
     if (!parsed.host) return null;

@@ -3,9 +3,26 @@
 // so they can be tested without Electron.
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { app, BrowserWindow, net, protocol, shell, type WebContents } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  net,
+  protocol,
+  session,
+  shell,
+  systemPreferences,
+  webContents as allWebContents,
+  type HIDDevice,
+  type IpcMainEvent,
+  type WebContents,
+} from 'electron';
 import { APP_ORIGIN, APP_SCHEME, resolveAppRequest } from './appProtocol';
-import { contentSecurityPolicy, navigationAction } from './security';
+import { CHOOSER_CANCEL, CHOOSER_MESSAGE, CHOOSER_SELECT } from './channels';
+import { createDeviceChooser, type DeviceChooser } from './devices';
+import { isDeviceAllowed, isPermissionAllowed, wantsMicrophone } from './permissions';
+import { contentSecurityPolicy, navigationAction, originOf } from './security';
+import type { ChooserDevice } from './types';
 
 /** Fixed forever: it keys the per-app profile directory, and with it the user's data. */
 const APP_ID = 'org.takingnotes.app';
@@ -89,6 +106,142 @@ function guardWebContents(contents: WebContents): void {
   });
 }
 
+/** One device chooser per webContents that has the preload (in practice: the main window). */
+const choosers = new Map<number, DeviceChooser>();
+
+/**
+ * Gives `contents` an in-app device chooser (spec §5). Electron has no picker
+ * of its own: without a `select-bluetooth-device` handler that calls
+ * preventDefault, Electron picks the first device found; the HID equivalent
+ * cancels. Both now go to the renderer's picker over the bridge.
+ */
+function attachDeviceChooser(contents: WebContents): DeviceChooser {
+  const chooser = createDeviceChooser((msg) => {
+    if (!contents.isDestroyed()) contents.send(CHOOSER_MESSAGE, msg);
+  });
+  choosers.set(contents.id, chooser);
+
+  contents.on('select-bluetooth-device', (event, devices, callback) => {
+    event.preventDefault();
+    const list: ChooserDevice[] = devices.map((d) => ({ id: d.deviceId, name: d.deviceName }));
+    chooser.offer('bluetooth', list, callback);
+  });
+
+  // A pending request belongs to the document that made it.
+  const dropPending = () => chooser.cancelPending();
+  contents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame && !details.isSameDocument) dropPending();
+  });
+  contents.on('render-process-gone', dropPending);
+  contents.once('destroyed', () => {
+    dropPending();
+    choosers.delete(contents.id);
+  });
+  return chooser;
+}
+
+function hidToChooser(device: HIDDevice): ChooserDevice {
+  return { id: device.deviceId, name: device.name };
+}
+
+/** The chooser for the webContents an IPC message came from, if it has one. */
+function chooserForSender(event: IpcMainEvent): DeviceChooser | null {
+  if (!event.senderFrame || !isAppOriginUrl(event.senderFrame.url)) return null;
+  return choosers.get(event.sender.id) ?? null;
+}
+
+function isAppOriginUrl(url: string): boolean {
+  const origin = originOf(url);
+  return origin === APP_ORIGIN || (devUrl !== null && origin === originOf(devUrl));
+}
+
+function registerChooserIpc(): void {
+  ipcMain.on(CHOOSER_SELECT, (event, requestId: unknown, deviceId: unknown) => {
+    if (typeof requestId !== 'string' || typeof deviceId !== 'string') return;
+    chooserForSender(event)?.select(requestId, deviceId);
+  });
+  ipcMain.on(CHOOSER_CANCEL, (event, requestId: unknown) => {
+    if (typeof requestId !== 'string') return;
+    chooserForSender(event)?.cancel(requestId);
+  });
+}
+
+/**
+ * Permission and device handlers on the default session (spec §5): the fixed
+ * list in ./permissions, only for the app origin. HID selection goes through
+ * the same chooser as Bluetooth.
+ */
+function configureSessionPermissions(): void {
+  const ses = session.defaultSession;
+
+  ses.setPermissionRequestHandler((_contents, permission, callback, details) => {
+    const mediaTypes = 'mediaTypes' in details ? details.mediaTypes : undefined;
+    const origin = ('securityOrigin' in details && details.securityOrigin) || details.requestingUrl;
+    if (!isPermissionAllowed(permission, origin, { mediaTypes }, devUrl)) {
+      callback(false);
+      return;
+    }
+    // macOS: Chromium also needs the OS-level microphone grant (TCC). This shows
+    // the system prompt the first time, and resolves at once after that.
+    if (process.platform === 'darwin' && wantsMicrophone(permission, { mediaTypes })) {
+      systemPreferences.askForMediaAccess('microphone').then(callback, () => callback(false));
+      return;
+    }
+    callback(true);
+  });
+
+  ses.setPermissionCheckHandler((_contents, permission, requestingOrigin, details) => {
+    const mediaTypes = details.mediaType ? [details.mediaType] : undefined;
+    const origin = details.securityOrigin || requestingOrigin;
+    return isPermissionAllowed(permission, origin, { mediaTypes }, devUrl);
+  });
+
+  ses.setDevicePermissionHandler((details) => isDeviceAllowed(details, devUrl));
+
+  ses.on('select-hid-device', (event, details, callback) => {
+    event.preventDefault();
+    const contents = details.frame ? allWebContents.fromFrame(details.frame) : undefined;
+    const chooser = contents ? choosers.get(contents.id) : undefined;
+    if (!chooser || !details.frame || !isAppOriginUrl(details.frame.url)) {
+      callback();
+      return;
+    }
+    let devices = details.deviceList.map(hidToChooser);
+    // Electron reports hot-plugged devices separately while the picker is open.
+    const added = (_event: unknown, d: { device: HIDDevice }) => {
+      devices = [...devices.filter((x) => x.id !== d.device.deviceId), hidToChooser(d.device)];
+      chooser.update(devices);
+    };
+    const removed = (_event: unknown, d: { device: HIDDevice }) => {
+      devices = devices.filter((x) => x.id !== d.device.deviceId);
+      chooser.update(devices);
+    };
+    // The chooser answers every request exactly once (pick, cancel, or
+    // superseded), so that is where the hot-plug listeners come off.
+    chooser.open('hid', devices, (deviceId) => {
+      ses.removeListener('hid-device-added', added);
+      ses.removeListener('hid-device-removed', removed);
+      if (deviceId) callback(deviceId);
+      else callback();
+    });
+    ses.on('hid-device-added', added);
+    ses.on('hid-device-removed', removed);
+  });
+
+  // Windows/Linux only (macOS pairs on its own). The brief calls this
+  // `bluetooth-pairing-request`; Electron 45's API is this session handler.
+  // Untested: no Windows machine. Plain confirmation is accepted; PIN pairing
+  // would need UI the app doesn't have, so it is cancelled and logged.
+  ses.setBluetoothPairingHandler((details, callback) => {
+    if (details.pairingKind === 'confirm') {
+      callback({ confirmed: true });
+      return;
+    }
+    console.warn(`[takingnotes] Bluetooth pairing "${details.pairingKind}" for ${details.deviceId} is not supported; cancelled.`);
+    callback({ confirmed: false });
+  });
+}
+
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
     width: 1280,
@@ -102,6 +255,7 @@ function createWindow(): BrowserWindow {
     },
   });
 
+  attachDeviceChooser(window.webContents);
   window.on('closed', () => {
     mainWindow = null;
   });
@@ -129,6 +283,8 @@ if (!app.requestSingleInstanceLock()) {
 
   void app.whenReady().then(() => {
     registerAppProtocol();
+    configureSessionPermissions();
+    registerChooserIpc();
     mainWindow = createWindow();
 
     app.on('activate', () => {
