@@ -47,6 +47,13 @@ describe('probeOllama', () => {
     }
   });
 
+  it('never follows a redirect, and a 3xx still counts as reachable', async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init: RequestInit) => new Response(null, { status: 302, headers: { Location: 'http://example.com/' } }));
+    await expect(probeOllama('http://localhost:11434', fetchImpl)).resolves.toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ redirect: 'manual' });
+  });
+
   it('false on a network error', async () => {
     const fetchImpl = vi.fn(async () => {
       throw new TypeError('net::ERR_CONNECTION_REFUSED');

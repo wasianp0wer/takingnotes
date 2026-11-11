@@ -27,11 +27,18 @@ export function ollamaTagsUrl(baseUrl: unknown): string | null {
   return url.toString();
 }
 
-export type ProbeFetch = (url: string, init: { signal: AbortSignal }) => Promise<unknown>;
+/**
+ * `redirect: 'manual'`: the probe never follows a 3xx off localhost (a
+ * redirect still counts as an answer, so as reachable).
+ */
+export type ProbeFetch = (
+  url: string,
+  init: { signal: AbortSignal; redirect: 'manual' },
+) => Promise<unknown>;
 
 /**
  * True when Ollama's address gave any HTTP response at all (whatever the
- * status); false on a network error, a timeout, or a disallowed URL.
+ * status, a redirect included, which is not followed); false on a network error, a timeout, or a disallowed URL.
  */
 export async function probeOllama(
   baseUrl: unknown,
@@ -49,7 +56,7 @@ export async function probeOllama(
     }, timeoutMs);
   });
   const answered = Promise.resolve()
-    .then(() => fetchImpl(target, { signal: controller.signal }))
+    .then(() => fetchImpl(target, { signal: controller.signal, redirect: 'manual' }))
     .then(
       () => true,
       () => false,
