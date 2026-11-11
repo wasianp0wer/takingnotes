@@ -56,6 +56,19 @@ describe('electron-builder.json', () => {
     expect(mac.entitlements).toBe('build/entitlements.mac.plist');
   });
 
+  it('flips the Electron fuses that turn the app binary into a general Node runtime', () => {
+    // ELECTRON_RUN_AS_NODE, NODE_OPTIONS and --inspect would each let anyone
+    // run arbitrary code as the signed app (and with its mic/Bluetooth grants);
+    // onlyLoadAppFromAsar stops a loose app/ folder being loaded instead.
+    // Asar integrity validation stays off: not verified with ad-hoc signing.
+    expect(config.electronFuses).toEqual({
+      runAsNode: false,
+      enableNodeOptionsEnvironmentVariable: false,
+      enableNodeCliInspectArguments: false,
+      onlyLoadAppFromAsar: true,
+    });
+  });
+
   it('builds an x64 NSIS installer for Windows', () => {
     expect(win.target).toEqual([{ target: 'nsis', arch: ['x64'] }]);
   });

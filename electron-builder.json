@@ -7,6 +7,12 @@
     "output": "release"
   },
   "icon": "icon.png",
+  "electronFuses": {
+    "runAsNode": false,
+    "enableNodeOptionsEnvironmentVariable": false,
+    "enableNodeCliInspectArguments": false,
+    "onlyLoadAppFromAsar": true
+  },
   "mac": {
     "category": "public.app-category.productivity",
     "target": [
