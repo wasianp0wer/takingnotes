@@ -7,7 +7,13 @@ import {
   GAP_TRAIL_MS,
 } from '@/gaps/constants';
 import { gapEligibility } from '@/gaps/eligibility';
-import { findQuoteInBullets, findQuoteInSegments, type TimedText } from '@/gaps/quoteTime';
+import {
+  citedBullet,
+  findQuoteInBullets,
+  findQuoteInSegments,
+  type TimedText,
+  type TimeRange,
+} from '@/gaps/quoteTime';
 import { gapPromptVersion, getGapPrompt } from '@/gaps/prompts';
 import { dropReviewed, validateGapPoints, type GapPoint } from '@/gaps/validate';
 import { overlapMs, segmentsInWindow, speechTextOf, speechWindowForPage } from '@/gaps/window';
@@ -22,6 +28,7 @@ import type {
   GapSuggestionRecord,
   PageRecord,
   RecordingRecord,
+  TranscriptSegment,
 } from '@/storage/types';
 
 export interface GapAnalyzerDeps {
@@ -176,20 +183,38 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
    * so a parallel fan-out would only queue, and it would turn one slow call into
    * a whole-page timeout. A chunk that summarizes to nothing is skipped rather
    * than failing the run.
+   *
+   * Each speech segment goes to the summarizer as a numbered line (`[n] ...`),
+   * and the prompt asks every bullet to cite the lines it came from. Those
+   * citations are what carry a point's place in the recording up to the
+   * comparison: without them a bullet only knows its chunk, minutes wide.
    */
-  async function summarizeChunks(chunks: TimedText[], signal?: AbortSignal): Promise<TimedText[]> {
+  async function summarizeChunks(
+    segments: TranscriptSegment[],
+    signal?: AbortSignal,
+  ): Promise<TimedText[]> {
     const spec = getGapPrompt('summarize', deps.model);
+    const lines = new Map<number, TimeRange>();
+    const numbered: TranscriptSegment[] = [];
+    for (const segment of segments) {
+      const text = segment.text.trim();
+      if (text.length === 0) continue;
+      const ref = numbered.length + 1;
+      lines.set(ref, { startMs: segment.startMs, endMs: segment.endMs });
+      numbered.push({ ...segment, text: `[${ref}] ${text}` });
+    }
+    const chunks = chunkSegments(numbered, { budget: chunkChars, overlap: chunkOverlap });
+
     const bullets: TimedText[] = [];
     for (const [index, chunk] of chunks.entries()) {
       const summary = await deps.generator.generate(
         spec.build({ chunk: chunk.text, index, total: chunks.length }),
         { model: deps.model, system: spec.system, signal },
       );
-      // Each bullet line keeps its chunk's span, so a quote found in a bullet
-      // can be placed in the recording without asking the model for a time.
       for (const line of summary.split('\n')) {
-        const text = line.trim();
-        if (text.length > 0) bullets.push({ startMs: chunk.startMs, endMs: chunk.endMs, text });
+        if (line.trim().length === 0) continue;
+        const bullet = citedBullet(line, lines, chunk);
+        if (bullet.text.length > 0) bullets.push(bullet);
       }
     }
     return bullets;
@@ -276,10 +301,7 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
       let compared = speech;
       let bullets: TimedText[] = [];
       if (summarized) {
-        bullets = await summarizeChunks(
-          chunkSegments(segments, { budget: chunkChars, overlap: chunkOverlap }),
-          opts.signal,
-        );
+        bullets = await summarizeChunks(segments, opts.signal);
         // Every chunk summarizing to nothing must not become "the lecture said
         // nothing": compare the raw speech instead, still flagged `summarized`,
         // which is the honest word for "the speech went through the lossy path".

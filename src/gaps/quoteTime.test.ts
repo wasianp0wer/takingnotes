@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { findQuoteInBullets, findQuoteInSegments, normalizeForMatch } from '@/gaps/quoteTime';
+import {
+  citedBullet,
+  findQuoteInBullets,
+  findQuoteInSegments,
+  normalizeForMatch,
+} from '@/gaps/quoteTime';
 
 describe('normalizeForMatch', () => {
   it('lowercases, collapses non-alphanumeric runs and trims', () => {
@@ -54,6 +59,24 @@ describe('findQuoteInSegments', () => {
       { startMs: 1000, endMs: 2000, text: 'Then ATP itself.' },
     ];
     expect(findQuoteInSegments(words, 'ATP')).toEqual({ startMs: 1000, endMs: 2000 });
+  });
+
+  it('spans the pieces of a quote the model joined with an ellipsis', () => {
+    expect(findQuoteInSegments(segments, 'Hello there, the Krebs... makes ATP next topic')).toEqual({
+      startMs: 0,
+      endMs: 4000,
+    });
+  });
+
+  it('spans the sentences of a quote that are each found, skipping one that was not said', () => {
+    expect(findQuoteInSegments(segments, 'The Krebs cycle. Something nobody said here.')).toEqual({
+      startMs: 1000,
+      endMs: 2500,
+    });
+  });
+
+  it('does not place a quote by a fragment too short to be evidence', () => {
+    expect(findQuoteInSegments(segments, 'Nobody said this at all. Next topic.')).toBeNull();
   });
 
   it('ignores segments with empty text', () => {
@@ -112,6 +135,67 @@ describe('findQuoteInBullets', () => {
     expect(findQuoteInBullets(bullets, '- Mitochondria make ATP')).toEqual({
       startMs: 0,
       endMs: 60000,
+    });
+  });
+});
+
+describe('findQuoteInBullets across bullets', () => {
+  const bullets = [
+    { text: '- Mitochondria make ATP', startMs: 0, endMs: 10_000 },
+    { text: '- Krebs cycle runs in matrix', startMs: 20_000, endMs: 30_000 },
+  ];
+
+  it('spans every bullet a multi-sentence quote was copied from', () => {
+    expect(
+      findQuoteInBullets(bullets, 'Mitochondria make ATP. Krebs cycle runs in matrix.'),
+    ).toEqual({ startMs: 0, endMs: 30_000 });
+  });
+
+  it('spans the bullets either side of an ellipsis', () => {
+    expect(findQuoteInBullets(bullets, 'Mitochondria make ATP ... runs in matrix')).toEqual({
+      startMs: 0,
+      endMs: 30_000,
+    });
+  });
+});
+
+describe('citedBullet', () => {
+  const lines = new Map([
+    [1, { startMs: 0, endMs: 4_000 }],
+    [2, { startMs: 5_000, endMs: 9_000 }],
+    [3, { startMs: 10_000, endMs: 14_000 }],
+  ]);
+  const chunk = { startMs: 0, endMs: 14_000 };
+
+  it('takes the span of the one line a bullet cites and strips the mark', () => {
+    expect(citedBullet('- Entropy rises [2]', lines, chunk)).toEqual({
+      text: '- Entropy rises',
+      startMs: 5_000,
+      endMs: 9_000,
+    });
+  });
+
+  it('spans several cited lines, written as a list, a range or separate marks', () => {
+    const want = { text: '- Point', startMs: 5_000, endMs: 14_000 };
+    expect(citedBullet('- Point [2, 3]', lines, chunk)).toEqual(want);
+    expect(citedBullet('- Point [2-3]', lines, chunk)).toEqual(want);
+    expect(citedBullet('- Point [2][3]', lines, chunk)).toEqual(want);
+    expect(citedBullet('- Point (lines 2, 3)', lines, chunk)).toEqual({
+      text: '- Point (lines 2, 3)',
+      ...chunk,
+    });
+  });
+
+  it('keeps the chunk span when a bullet cites nothing or only unknown lines', () => {
+    expect(citedBullet('- Point', lines, chunk)).toEqual({ text: '- Point', ...chunk });
+    expect(citedBullet('- Point [9]', lines, chunk)).toEqual({ text: '- Point', ...chunk });
+  });
+
+  it('leaves a bracket that is not a citation in the text', () => {
+    expect(citedBullet('- The array [a, b] is sorted [3]', lines, chunk)).toEqual({
+      text: '- The array [a, b] is sorted',
+      startMs: 10_000,
+      endMs: 14_000,
     });
   });
 });
