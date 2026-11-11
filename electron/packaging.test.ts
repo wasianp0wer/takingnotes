@@ -1,5 +1,5 @@
 // Pins the packaging values the desktop app can't run correctly without: the
-// app ID keys the user's data directory, the Info.plist strings are what macOS
+// app ID is the bundle ID macOS keys permissions to, the Info.plist strings are what macOS
 // requires before it grants the mic or Bluetooth, and `files` must ship both
 // the renderer and the shell.
 import { readFileSync } from 'node:fs';

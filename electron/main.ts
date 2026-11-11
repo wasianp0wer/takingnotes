@@ -22,11 +22,17 @@ import { APP_ORIGIN, APP_SCHEME, resolveAppRequest } from './appProtocol';
 import { CHOOSER_CANCEL, CHOOSER_MESSAGE, CHOOSER_SELECT, FLUSH_STORAGE, OLLAMA_PROBE } from './channels';
 import { createDeviceChooser, type DeviceChooser } from './devices';
 import { probeOllama } from './ollamaProbe';
+import { userDataPath } from './profile';
 import { isDeviceAllowed, isPermissionAllowed, wantsMicrophone } from './permissions';
 import { contentSecurityPolicy, navigationAction, originOf } from './security';
 import type { ChooserDevice } from './types';
 
-/** Fixed forever: it keys the per-app profile directory, and with it the user's data. */
+/**
+ * The Windows AppUserModelID; equal to electron-builder's `appId`, which is
+ * the macOS bundle ID. Keep both fixed. It does NOT key the profile
+ * directory: `userData` is set explicitly below from `userDataPath`
+ * (./profile), never derived from this ID.
+ */
 const APP_ID = 'org.takingnotes.app';
 const PRODUCT_NAME = 'TakingNotes';
 
@@ -39,6 +45,16 @@ const preloadPath = path.join(__dirname, 'preload.cjs');
 
 app.setAppUserModelId(APP_ID);
 app.setName(PRODUCT_NAME);
+
+// The profile directory, set explicitly (not left to `setName`) and before the
+// single-instance lock, which lives in it. Packaged: the same
+// `<appData>/TakingNotes` as before. Dev: `<appData>/TakingNotes Dev`.
+const profilePath = userDataPath({
+  appData: app.getPath('appData'),
+  devUrl,
+  hasUserDataDirSwitch: app.commandLine.hasSwitch('user-data-dir'),
+});
+if (profilePath !== null) app.setPath('userData', profilePath);
 
 // Must run before `ready`. `standard` + `secure` give the scheme a real origin
 // that counts as a secure context (IndexedDB, WebGPU, module workers);
