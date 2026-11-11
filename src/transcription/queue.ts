@@ -9,7 +9,7 @@ import {
   setPageTranscript,
 } from '@/storage/pages';
 import type { PageStroke, TranscriptRecord, TranscriptStatus } from '@/storage/types';
-import { getPromptFor } from '@/transcription/prompts';
+import { promptVersionFor } from '@/transcription/prompts';
 import type { PageDims, RenderedPage } from '@/transcription/rasterize';
 import type { PageTranscriber } from '@/transcription/types';
 
@@ -146,7 +146,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
 
       const settings = await deps.getSettings();
       model = settings.model;
-      promptVersion = getPromptFor(settings.model).promptVersion;
+      promptVersion = promptVersionFor(settings.model);
 
       if (page.pointCount === 0 || page.strokes.length === 0) {
         await writeTranscript(pageId, 'done', { model, promptVersion, markdown: '' });
@@ -164,9 +164,11 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       await writeTranscript(pageId, 'running', { model, promptVersion });
       changes.emit(pageId);
 
+      // The prompt needs to know whether this is the note's first page: its
+      // first underlined line is the session title, every other one a heading.
       const result = await deps
         .createTranscriber(settings.baseUrl)
-        .transcribePage(rendered.blob, { model: settings.model });
+        .transcribePage(rendered.blob, { model: settings.model, firstPage: page.pageIndex === 0 });
       await writeTranscript(pageId, 'done', {
         model: result.model,
         promptVersion: result.promptVersion,
@@ -229,7 +231,7 @@ export function createTranscriptionQueue(deps: TranscriptionQueueDeps): Transcri
       const settings = await deps.getSettings();
       await writeTranscript(pageId, 'pending', {
         model: settings.model,
-        promptVersion: getPromptFor(settings.model).promptVersion,
+        promptVersion: promptVersionFor(settings.model),
       });
       changes.emit(pageId);
     } catch (error) {

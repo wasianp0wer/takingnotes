@@ -59,11 +59,11 @@ export function createOllamaTranscriber(opts: OllamaTranscriberOptions): PageTra
   });
 
   return {
-    async transcribePage(image, { model, signal }): Promise<TranscriptionResult> {
+    async transcribePage(image, { model, firstPage, signal }): Promise<TranscriptionResult> {
       // Checked before encoding the image: an aborted page must not spend a
       // base64 pass on a result nobody is waiting for.
       client.throwIfAborted(signal);
-      const { promptVersion, prompt } = getPromptFor(model);
+      const { promptVersion, prompt } = getPromptFor(model, { firstPage });
       const images = [await blobToBase64(image)];
 
       const data = await client.generate(

@@ -4,7 +4,6 @@ import type { ComponentProps, ElementType } from 'react';
 import type { Components, ExtraProps } from 'react-markdown';
 import Markdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
-import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 
@@ -16,11 +15,13 @@ import remarkMath from 'remark-math';
  *
  * - Raw HTML is never rendered (react-markdown's default, no rehype-raw): model
  *   output is untrusted.
- * - remark-breaks keeps single newlines, since a handwritten page's line breaks
- *   are part of what was written.
+ * - Single newlines are standard Markdown: they join into one paragraph, and a
+ *   blank line starts a new one. The prompt (v2) asks the model to lay the
+ *   page out that way, and this keeps the display forgiving when it slips -
+ *   a handwritten line end is not a line break the writer intended.
  * - Malformed LaTeX renders as KaTeX's inline error text rather than throwing.
  */
-const REMARK_PLUGINS = [remarkGfm, remarkMath, remarkBreaks];
+const REMARK_PLUGINS = [remarkGfm, remarkMath];
 const REHYPE_PLUGINS: Parameters<typeof Markdown>[0]['rehypePlugins'] = [
   [rehypeKatex, { throwOnError: false, strict: 'ignore' }],
 ];

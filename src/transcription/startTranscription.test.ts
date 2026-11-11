@@ -39,7 +39,7 @@ beforeEach(async () => {
   mocks.transcribePage.mockResolvedValue({
     markdown: 'text',
     model: 'llava:13b',
-    promptVersion: 'llava-v1',
+    promptVersion: 'llava-v2',
   });
   mocks.createOllamaTranscriber.mockReturnValue({ transcribePage: mocks.transcribePage });
   mocks.renderPage.mockResolvedValue({
@@ -146,12 +146,15 @@ describe('ensureTranscriptionQueue', () => {
       { pageWidth: 1409, pageHeight: 1869 },
       1536,
     );
-    expect(mocks.transcribePage).toHaveBeenCalledWith(expect.any(Blob), { model: 'llava:13b' });
+    expect(mocks.transcribePage).toHaveBeenCalledWith(expect.any(Blob), {
+      model: 'llava:13b',
+      firstPage: true,
+    });
 
     const stored = await getPage(page.id);
     expect(stored?.transcript?.status).toBe('done');
     expect(stored?.transcript?.markdown).toBe('text');
-    expect(stored?.transcript?.promptVersion).toBe('llava-v1');
+    expect(stored?.transcript?.promptVersion).toBe('llava-v2');
     expect(stored?.render).toEqual({ type: 'image/png', width: 600, height: 800 });
   });
 });

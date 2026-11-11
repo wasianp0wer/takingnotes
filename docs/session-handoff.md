@@ -141,12 +141,14 @@ below). A PR from this branch would carry Phases 1–3 as well.
    fonts, so nothing is downloaded. A theme has one transcript font, so typed
    pages and audio segments use it too.
 6. **Transcripts render as Markdown with LaTeX maths.**
-   - **Why:** Gemma writes `$…$` maths such as `$\rightarrow$`. Our Gemma prompt
-     (`src/transcription/prompts.ts`) asks for Markdown but says nothing about
-     maths. The prompt was not changed.
+   - **Why:** Gemma writes `$…$` maths such as `$\rightarrow$`. The v2 prompts
+     (`src/transcription/prompts.ts`, 2026-10-20) now ask for LaTeX maths
+     explicitly; see "Transcription prompt v2" below.
    - **How:** `src/notes/TranscriptMarkdown.tsx` uses react-markdown with
-     remark-gfm, remark-math, remark-breaks (which keeps a page's line breaks)
-     and rehype-katex (`throwOnError: false`). Raw HTML is never rendered.
+     remark-gfm, remark-math and rehype-katex (`throwOnError: false`). Raw HTML
+     is never rendered. Single newlines join into a paragraph (standard
+     Markdown); remark-breaks was removed with prompt v2, since a handwritten
+     line end is not a line break the writer intended.
    - **Loading:** it is lazy-loaded (`LazyTranscriptMarkdown.tsx`, about 440 kB),
      so the startup bundle is unchanged at 484 kB. The text shows plain for a
      moment first.
@@ -155,6 +157,33 @@ below). A PR from this branch would carry Phases 1–3 as well.
    - **Limit:** `$$…$$` on one line typesets inline; only on its own lines is it
      a block.
    - Supersedes F1-A4 (marked in `docs/features/f1-spec.md`).
+7. **Transcription prompt v2** (`src/transcription/prompts.ts`, 2026-10-20).
+   Gemma was inconsistent about headings, line breaks and diagrams, so the
+   prompt now defines the cues instead of leaving them to the model. All four
+   families share one rule block plus one family guard, and all bump to `v2`.
+   - **Headings:** underlined text, and only underlined text, is a heading.
+     On the first page of a note the first underlined line is `# ` and the rest
+     `## `; on later pages every underlined line is `## `. The model sees one
+     image, so the queue passes `firstPage: page.pageIndex === 0` through
+     `PageTranscriber.transcribePage`. *Owner call pending:* a session that
+     spans several notes gets one H1 per note.
+   - **Line breaks:** a handwritten line end is not an output line break; lines
+     that continue a thought join into a paragraph, and a blank line starts a
+     new one. The renderer dropped remark-breaks to match (item 6).
+   - **Diagrams:** inline notation (`a <- b`, `x -> y`, relations) stays as
+     text or LaTeX; a ruled table becomes a Markdown table; a freestanding
+     drawing is never drawn in characters but replaced with one italic note,
+     `*[Diagram: …]*`, naming what it shows and its labels.
+   - **Also new:** maths as LaTeX between `$`, struck-through words omitted,
+     inserted words placed at the caret.
+   - **Versioning:** the page position is not part of `promptVersion`; it is
+     a fact about the page, not a tuning. `promptVersionFor(model)` gives the
+     version alone for the queue's `pending` mark, which has no page loaded.
+     Existing transcripts keep showing `gemma-v1` under the box; Retry re-runs
+     a page with v2. There is no bulk re-transcribe.
+   - **Not yet done:** the v2 wording has not been run against real pages. The
+     first thing to check is whether Gemma honours the paragraph rule and the
+     `*[Diagram: …]*` form; both are plain-language rules it may need examples for.
 
 ### What the review process caught
 

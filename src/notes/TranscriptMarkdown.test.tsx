@@ -58,9 +58,16 @@ describe('TranscriptMarkdown', () => {
     expect(container.querySelector('strong')?.textContent).toBe('1865');
   });
 
-  it('keeps single line breaks from the page as line breaks', () => {
+  it('joins a single newline into one paragraph: a handwritten line end is not a break', () => {
     render('first line\nsecond line');
-    expect(container.querySelector('br')).not.toBeNull();
+    expect(container.querySelector('br')).toBeNull();
+    expect(container.querySelectorAll('p').length).toBe(1);
+    expect(container.querySelector('p')?.textContent).toBe('first line\nsecond line');
+  });
+
+  it('starts a new paragraph at a blank line', () => {
+    render('first point\n\nsecond point');
+    expect(container.querySelectorAll('p').length).toBe(2);
   });
 
   it('renders GFM tables', () => {

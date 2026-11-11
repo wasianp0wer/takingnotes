@@ -61,7 +61,7 @@ function transcript(status: TranscriptStatus, extra?: Partial<TranscriptRecord>)
   return {
     markdown: '',
     model: 'gemma4:12b',
-    promptVersion: 'gemma-v1',
+    promptVersion: 'gemma-v2',
     status,
     error: null,
     updatedAt: 10,
@@ -160,7 +160,26 @@ describe('createTranscriptionQueue', () => {
       1024,
     );
     expect(createTranscriber).toHaveBeenCalledWith('http://o');
-    expect(transcribePage).toHaveBeenCalledWith(RENDER_BLOB, { model: 'gemma4:12b' });
+    expect(transcribePage).toHaveBeenCalledWith(RENDER_BLOB, {
+      model: 'gemma4:12b',
+      firstPage: true,
+    });
+  });
+
+  it('tells the transcriber when a page is not the first of its note', async () => {
+    await seedPage({ pageIndex: 0, finalizedAt: null });
+    const laterPageId = await seedPage({ pageIndex: 2, finalizedAt: null });
+    const queue = createQueue();
+    await queue.start();
+
+    pageFinalized.emit(laterPageId);
+    await queue.idle();
+
+    expect(transcribePage).toHaveBeenCalledTimes(1);
+    expect(transcribePage).toHaveBeenCalledWith(RENDER_BLOB, {
+      model: 'gemma4:12b',
+      firstPage: false,
+    });
   });
 
   it('walks a page through pending, running and done, notifying subscribers', async () => {
@@ -218,7 +237,7 @@ describe('createTranscriptionQueue', () => {
     expect(failed?.transcript?.error).toBe('boom');
     expect(failed?.transcript?.markdown).toBe('');
     expect(failed?.transcript?.model).toBe('gemma4:12b');
-    expect(failed?.transcript?.promptVersion).toBe('gemma-v1');
+    expect(failed?.transcript?.promptVersion).toBe('gemma-v2');
     expect(await statusOf(second)).toBe('done');
   });
 
@@ -259,7 +278,7 @@ describe('createTranscriptionQueue', () => {
     expect(page?.transcript).toEqual({
       markdown: '',
       model: 'gemma4:12b',
-      promptVersion: 'gemma-v1',
+      promptVersion: 'gemma-v2',
       status: 'done',
       error: null,
       updatedAt: 1000,

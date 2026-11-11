@@ -44,7 +44,7 @@ describe('createOllamaTranscriber', () => {
     const fetch = vi.fn<FetchLike>(async () => generateOk());
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1/', fetch });
 
-    await t.transcribePage(png(), { model: MODEL });
+    await t.transcribePage(png(), { model: MODEL, firstPage: true });
 
     expect(fetch).toHaveBeenCalledTimes(1);
     const [url, init] = fetch.mock.calls[0];
@@ -53,11 +53,22 @@ describe('createOllamaTranscriber', () => {
     expect(init?.headers).toEqual({ 'Content-Type': 'application/json' });
     const body = bodyOf(fetch.mock.calls[0]);
     expect(body.model).toBe(MODEL);
-    expect(body.prompt).toBe(getPromptFor(MODEL).prompt);
+    expect(body.prompt).toBe(getPromptFor(MODEL, { firstPage: true }).prompt);
     expect(body.stream).toBe(false);
     expect(body.think).toBe(false);
     expect(body.options).toEqual({ num_predict: 2000, temperature: 0 });
     expect((body.images as string[])[0]).toBe(btoa('png-bytes'));
+  });
+
+  it('sends the later-page prompt when the page is not the first of its note', async () => {
+    const fetch = vi.fn<FetchLike>(async () => generateOk());
+    const t = createOllamaTranscriber({ baseUrl: 'http://h:1/', fetch });
+
+    await t.transcribePage(png(), { model: MODEL, firstPage: false });
+
+    const body = bodyOf(fetch.mock.calls[0]);
+    expect(body.prompt).toBe(getPromptFor(MODEL, { firstPage: false }).prompt);
+    expect(body.prompt).not.toBe(getPromptFor(MODEL, { firstPage: true }).prompt);
   });
 
   it('base64-encodes a blob larger than one chunk without corrupting bytes', async () => {
@@ -66,7 +77,7 @@ describe('createOllamaTranscriber', () => {
     const fetch = vi.fn<FetchLike>(async () => generateOk());
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch });
 
-    await t.transcribePage(new Blob([bytes], { type: 'image/png' }), { model: MODEL });
+    await t.transcribePage(new Blob([bytes], { type: 'image/png' }), { model: MODEL, firstPage: true });
 
     const images = bodyOf(fetch.mock.calls[0]).images as string[];
     expect(images[0]).toBe(Buffer.from(bytes).toString('base64'));
@@ -76,7 +87,7 @@ describe('createOllamaTranscriber', () => {
     const fetch = vi.fn<FetchLike>(async () => generateOk());
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch, numPredict: 42 });
 
-    await t.transcribePage(png(), { model: MODEL });
+    await t.transcribePage(png(), { model: MODEL, firstPage: true });
 
     expect(bodyOf(fetch.mock.calls[0]).options).toEqual({
       num_predict: 42,
@@ -88,10 +99,10 @@ describe('createOllamaTranscriber', () => {
     const fetch = vi.fn<FetchLike>(async () => generateOk());
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch });
 
-    await expect(t.transcribePage(png(), { model: MODEL })).resolves.toEqual({
+    await expect(t.transcribePage(png(), { model: MODEL, firstPage: true })).resolves.toEqual({
       markdown: '# Title\n- a',
       model: MODEL,
-      promptVersion: 'gemma-v1',
+      promptVersion: 'gemma-v2',
     });
   });
 
@@ -101,7 +112,7 @@ describe('createOllamaTranscriber', () => {
     );
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch });
 
-    const result = await t.transcribePage(png(), { model: MODEL });
+    const result = await t.transcribePage(png(), { model: MODEL, firstPage: true });
     expect(result.markdown).toBe('# Title\n- a');
   });
 
@@ -116,7 +127,7 @@ describe('createOllamaTranscriber', () => {
       .mockResolvedValueOnce(generateOk());
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch });
 
-    const result = await t.transcribePage(png(), { model: 'llava:13b' });
+    const result = await t.transcribePage(png(), { model: 'llava:13b', firstPage: true });
 
     expect(result.markdown).toBe('# Title\n- a');
     expect(fetch).toHaveBeenCalledTimes(2);
@@ -133,7 +144,7 @@ describe('createOllamaTranscriber', () => {
     );
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch });
 
-    await expect(t.transcribePage(png(), { model: 'llava:13b' })).rejects.toThrow(
+    await expect(t.transcribePage(png(), { model: 'llava:13b', firstPage: true })).rejects.toThrow(
       /does not support thinking/,
     );
     expect(fetch).toHaveBeenCalledTimes(2);
@@ -146,7 +157,7 @@ describe('createOllamaTranscriber', () => {
     );
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch });
 
-    await expect(t.transcribePage(png(), { model: 'x' })).rejects.toThrow(
+    await expect(t.transcribePage(png(), { model: 'x', firstPage: true })).rejects.toThrow(
       /model "x" not found/,
     );
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -158,7 +169,7 @@ describe('createOllamaTranscriber', () => {
     });
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch });
 
-    await expect(t.transcribePage(png(), { model: MODEL })).rejects.toThrow(
+    await expect(t.transcribePage(png(), { model: MODEL, firstPage: true })).rejects.toThrow(
       'Could not reach Ollama at http://h:1: Failed to fetch',
     );
   });
@@ -167,7 +178,7 @@ describe('createOllamaTranscriber', () => {
     const fetch = hangingFetch();
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch, timeoutMs: 20 });
 
-    await expect(t.transcribePage(png(), { model: MODEL })).rejects.toThrow(
+    await expect(t.transcribePage(png(), { model: MODEL, firstPage: true })).rejects.toThrow(
       'Transcription timed out after 0.02s',
     );
   });
@@ -177,7 +188,7 @@ describe('createOllamaTranscriber', () => {
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch });
     const controller = new AbortController();
 
-    const promise = t.transcribePage(png(), { model: MODEL, signal: controller.signal });
+    const promise = t.transcribePage(png(), { model: MODEL, firstPage: true, signal: controller.signal });
     await Promise.resolve();
     controller.abort();
 
@@ -189,7 +200,7 @@ describe('createOllamaTranscriber', () => {
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch });
 
     await expect(
-      t.transcribePage(png(), { model: MODEL, signal: AbortSignal.abort() }),
+      t.transcribePage(png(), { model: MODEL, firstPage: true, signal: AbortSignal.abort() }),
     ).rejects.toMatchObject({ name: 'AbortError' });
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -200,7 +211,7 @@ describe('createOllamaTranscriber', () => {
     );
     const t = createOllamaTranscriber({ baseUrl: 'http://h:1', fetch });
 
-    await expect(t.transcribePage(png(), { model: MODEL })).rejects.toBeInstanceOf(
+    await expect(t.transcribePage(png(), { model: MODEL, firstPage: true })).rejects.toBeInstanceOf(
       DegenerateOutputError,
     );
   });

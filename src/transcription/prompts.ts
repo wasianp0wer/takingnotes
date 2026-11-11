@@ -1,9 +1,18 @@
 /**
  * Prompt registry keyed by model family (spec §3, decision D8).
  *
+ * Every family gets the same rules (v2, owner 2026-10-20: underlined text is
+ * the heading cue, a handwritten line break is not an output line break, and
+ * freestanding diagrams are described rather than drawn), followed by one
+ * guard that family in particular needs. The prompt also carries one fact
+ * about the page - whether it is the first page of the session - because the
+ * model sees a single image and cannot otherwise tell a session title from a
+ * section heading.
+ *
  * Prompts are plain string constants and `getPromptFor` is pure: the queue
  * stores `promptVersion` alongside every transcript, so the same model must
- * always yield the same version.
+ * always yield the same version. The page position is not part of the version:
+ * it is a fact about the page, not a tuning of the prompt.
  */
 
 export interface PromptSpec {
@@ -12,55 +21,59 @@ export interface PromptSpec {
   prompt: string;
 }
 
-const GENERIC_PROMPT = `Transcribe this image of a handwritten page exactly as it is written.
+/** What the prompt needs to know about the page's place in its note. */
+export interface PagePosition {
+  /** True for the first page of the note; its first underlined line is the session title. */
+  firstPage: boolean;
+}
 
-Rules:
-- Output Markdown only. Use Markdown headings for headings, Markdown lists for bulleted or numbered lists, and keep the indentation of nested items.
-- Preserve the structure of the page. Reproduce hand-drawn diagrams, arrows and tables as simple ASCII art or indented text in the position where they appear.
-- Write [illegible] in place of any word you cannot read. Never guess at a word.
-- Do not translate, summarise, correct or reorder anything.
-- No commentary, no preamble, no explanation, no code fences.
+const PROMPT_VERSION = 'v2';
 
-Return the page's Markdown and nothing else.`;
+const FIRST_PAGE_HEADING_RULE =
+  '- This is the first page of the session. The first underlined line is the session title: write it as "# ". Every other underlined line is "## ".';
 
-const GEMMA_PROMPT = `Transcribe this image of a handwritten page exactly as it is written.
+const LATER_PAGE_HEADING_RULE =
+  '- This is not the first page of the session, so every underlined line is "## ".';
 
-Rules:
-- Output Markdown only. Use Markdown headings for headings, Markdown lists for bulleted or numbered lists, and keep the indentation of nested items.
-- Keep hand-drawn structure: reproduce diagrams, branching trees and arrows as simple ASCII art (for example \`->\`, \`|\`, indentation) in the position where they appear. A flattened diagram loses the idea.
-- Write [illegible] in place of any word you cannot read. Never guess at a word, and do not pad the output with repeated lines.
-- Do not translate, summarise, correct or reorder anything.
-- No commentary, no preamble, no explanation, no code fences.
+function sharedRules(position: PagePosition): string {
+  const headingRule = position.firstPage ? FIRST_PAGE_HEADING_RULE : LATER_PAGE_HEADING_RULE;
+  return `Transcribe the handwritten page in this image into Markdown.
 
-Return the page's Markdown and nothing else.`;
+The words must be exact: never translate, summarise, correct, reorder or guess. Write [illegible] in place of any word you cannot read. The layout is clean Markdown, not a copy of where lines fall on the page.
 
-const QWEN_VL_PROMPT = `Transcribe this image of a handwritten page exactly as it is written.
+Headings
+- Underlined text is a heading. Text that is not underlined is never a heading, however large it is written.
+${headingRule}
 
-Rules:
-- Output Markdown only. Use Markdown headings for headings, Markdown lists for bulleted or numbered lists, and keep the indentation of nested items.
-- Preserve the structure of the page. Reproduce hand-drawn diagrams, arrows and tables as simple ASCII art or indented text in the position where they appear.
-- Write [illegible] in place of any word you cannot read. Never guess at a word.
-- Do not describe the image, do not output bounding boxes, coordinates or JSON, and do not add HTML.
-- No commentary, no preamble, no explanation, no code fences.
+Paragraphs
+- A new handwritten line is not a new line in the output. When a line continues the sentence or thought above it, join them into one paragraph.
+- Start a new paragraph, with a blank line, only where the writer clearly began a new point: after a heading, between separate notes, or where the sense changes.
 
-Return the page's Markdown and nothing else.`;
+Lists
+- A dash, dot, arrow or number at the start of a line marks a list item. Write it as "- " or "1. " and keep the indentation of nested items.
 
-const LLAVA_PROMPT = `Transcribe this image of a handwritten page exactly as it is written.
+Notation and diagrams
+- Notation inside the flow of the text stays as text: arrows between words (a <- b, x -> y -> z, p <-> q), equals and inequality signs, implications, simple relations. Write these with LaTeX ($\\leftarrow$, $\\rightarrow$, $\\leftrightarrow$, $\\Rightarrow$) or the plain symbol, in the place they appear.
+- A hand-drawn table with rows and columns becomes a Markdown table.
+- A freestanding drawing is different: a tree, flowchart, box-and-arrow picture, graph, timeline, sketch, or anything whose meaning depends on where things sit on the page. Never recreate one of these with characters or ASCII art. In its place write one italic bracketed note that says what it shows and includes its labels, for example: *[Diagram: a tree with "Executive" at the root branching to "President" and "Cabinet".]*
+- The test: if it can be written as one line of text or maths without losing meaning, write it. If it needs a two-dimensional layout, describe it.
 
-Rules:
-- Output Markdown only. Use Markdown headings for headings, Markdown lists for bulleted or numbered lists, and keep the indentation of nested items.
-- This is a transcription task, not a description task. Do not say what the image shows, do not mention handwriting, paper or ink — write out the words themselves.
-- Reproduce hand-drawn diagrams, arrows and tables as simple ASCII art or indented text in the position where they appear.
-- Write [illegible] in place of any word you cannot read. Never guess at a word.
-- No commentary, no preamble, no explanation, no code fences.
+Maths
+- Write mathematical notation as LaTeX between $...$, or $$...$$ on a line of its own.
 
-Return the page's Markdown and nothing else.`;
+Corrections
+- Leave out words that are struck through. Put inserted words where the caret points.
 
-const PROMPTS: Record<string, string> = {
-  gemma: GEMMA_PROMPT,
-  'qwen-vl': QWEN_VL_PROMPT,
-  llava: LLAVA_PROMPT,
-  generic: GENERIC_PROMPT,
+Output
+- Markdown only. No commentary, no preamble, no code fences, and nothing about the paper, ink or handwriting.`;
+}
+
+/** The one guard each family has needed in practice, appended after the shared rules. */
+const FAMILY_GUARDS: Record<string, string> = {
+  gemma: '- Do not pad the output with repeated lines.',
+  'qwen-vl': '- Do not output bounding boxes, coordinates, JSON or HTML.',
+  llava:
+    '- This is a transcription task, not a description task. Do not say what the image shows; write out the words themselves.',
 };
 
 const FAMILY_PATTERNS: Array<[RegExp, string]> = [
@@ -84,12 +97,23 @@ export function modelFamily(model: string): string {
   return 'generic';
 }
 
-/** The prompt to send for a model, plus the version recorded with the transcript. */
-export function getPromptFor(model: string): PromptSpec {
+/**
+ * The version a transcript of `model` will record, for a caller that has not
+ * loaded the page yet (the queue's `pending` mark). Equal to the `promptVersion`
+ * of `getPromptFor` for either page position.
+ */
+export function promptVersionFor(model: string): string {
+  return `${modelFamily(model)}-${PROMPT_VERSION}`;
+}
+
+/** The prompt to send for a model and page, plus the version recorded with the transcript. */
+export function getPromptFor(model: string, position: PagePosition): PromptSpec {
   const family = modelFamily(model);
+  const guard = FAMILY_GUARDS[family];
+  const prompt = guard ? `${sharedRules(position)}\n${guard}` : sharedRules(position);
   return {
     family,
-    promptVersion: `${family}-v1`,
-    prompt: PROMPTS[family] ?? GENERIC_PROMPT,
+    promptVersion: promptVersionFor(model),
+    prompt,
   };
 }
