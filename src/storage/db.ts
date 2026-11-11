@@ -102,6 +102,14 @@ let dbPromise: Promise<IDBPDatabase<NotesDb>> | null = null;
 // future version bump needs to run only the steps a given user is
 // missing. Each `if (oldVersion < N)` block is one schema generation and
 // must never be edited once it has shipped.
+//
+// ⚑ MIGRATION DEBT (I2): backup import (`src/backup/importBackup.ts`) writes
+// an older backup's records into a staging database already opened at
+// DB_VERSION, so these blocks never run over imported records. That is
+// harmless while every version (1-5) is schema-only. Before any version bump
+// that migrates DATA, first make import open staging at
+// `manifest.dbVersion`, write the records, then reopen at DB_VERSION so the
+// upgrade runs over them.
 function upgradeNotesDb(
   db: IDBPDatabase<NotesDb>,
   oldVersion: number,
