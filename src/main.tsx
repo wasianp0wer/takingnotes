@@ -2,6 +2,7 @@ import { StrictMode, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import { AppShell } from '@/app/AppShell'
+import { registerTabPresence } from '@/backup/tabPresence'
 import { CaptureProvider } from '@/capture/CaptureContext'
 import { createCaptureEngine } from '@/capture/engine'
 import { TabletProvider, useHuionDevice } from '@/device/TabletProvider'
@@ -34,6 +35,13 @@ try {
   applyMirroredThemeEarly(window.localStorage)
 } catch {
   // localStorage can throw when blocked; the stylesheet defaults apply.
+}
+
+// Lets backup import see other open tabs. A no-op without Web Locks.
+try {
+  registerTabPresence()
+} catch {
+  // Presence is advisory; never block startup on it.
 }
 
 createRoot(document.getElementById('root')!).render(
