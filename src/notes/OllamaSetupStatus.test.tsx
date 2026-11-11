@@ -38,13 +38,19 @@ const button = (label: string) => [...container.querySelectorAll('button')].find
 describe('OllamaSetupStatus', () => {
   it('shows pull command and copies it', async () => {
     const writeText = vi.fn(async () => {});
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
-    await act(async () => root.render(<OllamaSetupStatus fetchImpl={tagsOf('llava:7b')} />));
-    await flush();
-    expect(container.textContent).toContain("The model gemma4:12b isn't installed.");
-    expect(container.textContent).toContain('ollama pull gemma4:12b');
-    await act(async () => button('Copy').click());
-    expect(writeText).toHaveBeenCalledWith('ollama pull gemma4:12b');
+    try {
+      await act(async () => root.render(<OllamaSetupStatus fetchImpl={tagsOf('llava:7b')} />));
+      await flush();
+      expect(container.textContent).toContain("The model gemma4:12b isn't installed.");
+      expect(container.textContent).toContain('ollama pull gemma4:12b');
+      await act(async () => button('Copy').click());
+      expect(writeText).toHaveBeenCalledWith('ollama pull gemma4:12b');
+    } finally {
+      if (original) Object.defineProperty(navigator, 'clipboard', original);
+      else delete (navigator as { clipboard?: unknown }).clipboard;
+    }
   });
 
   it('check again re-runs', async () => {

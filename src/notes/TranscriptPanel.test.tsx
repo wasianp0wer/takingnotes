@@ -1,6 +1,6 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PageRecord, TranscriptRecord } from '@/storage/types';
 
@@ -12,8 +12,19 @@ declare global {
 
 let container: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
+/**
+ * A failed transcript mounts `<OllamaSetupStatus compact />`, which asks
+ * Ollama for its models. Stubbed so these tests never touch the network.
+ * Restored only after the file: that request starts after an IndexedDB read,
+ * so it can land after the test that caused it has finished.
+ */
+let fetchStub: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
+  fetchStub = vi.fn(async () => {
+    throw new TypeError('no network in tests');
+  });
+  vi.stubGlobal('fetch', fetchStub);
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -23,6 +34,10 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+});
+
+afterAll(() => {
+  vi.unstubAllGlobals();
 });
 
 function page(transcript: Partial<TranscriptRecord>): PageRecord {
@@ -72,6 +87,16 @@ describe('TranscriptPanel', () => {
   it("sets a finished transcript in the theme's transcript font", () => {
     render(page({ markdown: 'Newton: F=ma' }));
     expect(elementWithText('Newton: F=ma')?.classList.contains('font-transcript')).toBe(true);
+  });
+
+  it("a failed transcript's Ollama check goes to the stub, not the network", async () => {
+    render(page({ status: 'failed', error: 'boom' }));
+    for (let i = 0; i < 50 && fetchStub.mock.calls.length === 0; i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 10));
+      });
+    }
+    expect(String(fetchStub.mock.calls[0]?.[0])).toBe('http://localhost:11434/api/tags');
   });
 
   it("sets a retained previous transcript in the theme's transcript font", () => {
