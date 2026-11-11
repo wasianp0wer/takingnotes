@@ -46,7 +46,18 @@ export interface GapAnalyzerDeps {
 
 export interface GapAnalyzer {
   analyzePage(pageId: string, opts?: { signal?: AbortSignal }): Promise<GapSuggestionRecord[]>;
-  analyzeNote(noteId: string, opts?: { signal?: AbortSignal }): Promise<void>;
+  analyzeNote(noteId: string, opts?: AnalyzeNoteOptions): Promise<void>;
+}
+
+export interface AnalyzeNoteOptions {
+  signal?: AbortSignal;
+  /**
+   * Called after each write a panel would show: a page marked `pending`,
+   * `running`, `done` or `failed`, or a stale mark cleared. A note-wide run
+   * takes a model call or more per page, so without this the panel learns
+   * nothing until every page is finished.
+   */
+  onProgress?: () => void;
 }
 
 function errorMessage(error: unknown): string {
@@ -161,21 +172,33 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
     promptVersion: string,
     summarized: boolean,
     error: string | null,
+    onProgress?: () => void,
   ): Promise<void> {
     try {
       await setPageGapAnalysis(pageId, meta(status, promptVersion, summarized, error));
     } catch (storageError) {
       console.error('[gaps] could not record analysis state', pageId, storageError);
     }
+    report(onProgress);
+  }
+
+  /** A listener that throws must not fail the page it is only being told about. */
+  function report(onProgress: (() => void) | undefined): void {
+    try {
+      onProgress?.();
+    } catch (listenerError) {
+      console.error('[gaps] progress listener failed', listenerError);
+    }
   }
 
   /** Puts a page back to never-analyzed, with the same guard as `writeMeta`. */
-  async function clearMeta(pageId: string): Promise<void> {
+  async function clearMeta(pageId: string, onProgress?: () => void): Promise<void> {
     try {
       await setPageGapAnalysis(pageId, null);
     } catch (storageError) {
       console.error('[gaps] could not clear analysis state', pageId, storageError);
     }
+    report(onProgress);
   }
 
   /**
@@ -248,7 +271,7 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
    */
   async function runPage(
     pageId: string,
-    opts: { signal?: AbortSignal },
+    opts: AnalyzeNoteOptions,
     resolvedRecording?: RecordingRecord | null,
   ): Promise<{ skipped: boolean; created: GapSuggestionRecord[] }> {
     const page = await getPage(pageId);
@@ -278,7 +301,7 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
     // that actually failed.
     const promptVersionDirect = gapPromptVersion(deps.model, false);
     let summarized = false;
-    await writeMeta(pageId, 'running', promptVersionDirect, false, null);
+    await writeMeta(pageId, 'running', promptVersionDirect, false, null, opts.onProgress);
 
     try {
       throwIfAborted(opts.signal);
@@ -293,7 +316,7 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
         // `proposed` suggestions here would destroy what an earlier run that
         // did compare speech found, with no way back. They stay, and the panel
         // says the window matched no speech rather than "no gaps found".
-        await writeMeta(pageId, 'done', promptVersionDirect, false, null);
+        await writeMeta(pageId, 'done', promptVersionDirect, false, null, opts.onProgress);
         return { skipped: false, created: [] };
       }
 
@@ -339,7 +362,7 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
         }),
       );
 
-      await writeMeta(pageId, 'done', promptVersion, summarized, null);
+      await writeMeta(pageId, 'done', promptVersion, summarized, null, opts.onProgress);
       return { skipped: false, created };
     } catch (error) {
       await writeMeta(
@@ -348,6 +371,7 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
         gapPromptVersion(deps.model, summarized),
         summarized,
         errorMessage(error),
+        opts.onProgress,
       );
       throw error;
     }
@@ -369,7 +393,7 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
    * A page that throws is logged and the run continues (P1-A10); its own
    * `failed` meta is already on disk. An abort ends the loop and rethrows.
    */
-  async function analyzeNote(noteId: string, opts: { signal?: AbortSignal } = {}): Promise<void> {
+  async function analyzeNote(noteId: string, opts: AnalyzeNoteOptions = {}): Promise<void> {
     const pages: PageRecord[] = await listPages(noteId);
     if (pages.length === 0) return;
 
@@ -385,7 +409,7 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
       const recording = await recordingForPage(page.noteId, window);
       resolved.set(page.id, recording);
       if (!gapEligibility(page, recording, window).ok) continue;
-      await writeMeta(page.id, 'pending', promptVersion, false, null);
+      await writeMeta(page.id, 'pending', promptVersion, false, null, opts.onProgress);
       marked.add(page.id);
     }
 
@@ -398,7 +422,7 @@ export function createGapAnalyzer(deps: GapAnalyzerDeps): GapAnalyzer {
         // stale `pending` would leave the panel saying "Waiting to analyze..."
         // for good. Only marks this run wrote are cleared, so a page that was
         // already ineligible keeps whatever an earlier run recorded.
-        if (run.skipped && marked.has(page.id)) await clearMeta(page.id);
+        if (run.skipped && marked.has(page.id)) await clearMeta(page.id, opts.onProgress);
       } catch (error) {
         if (isAbort(error)) throw error;
         console.error('[gaps] page analysis failed', page.id, error);

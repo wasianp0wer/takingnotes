@@ -1138,6 +1138,36 @@ describe('createGapAnalyzer', () => {
     }
   });
 
+  it('analyzeNote reports progress each time a page status changes on disk', async () => {
+    const markdowns = ['Page one notes.', 'Page two notes.'];
+    const { noteId, pageIds } = await seedNote(markdowns);
+    const generator = createFakeTextGenerator([ONE_POINT]);
+    const onProgress = vi.fn();
+
+    // At each model call: how many reports have been made, and what the pages'
+    // statuses are on disk. A report is made only after its write has landed.
+    const atCall: Array<{
+      reports: number;
+      statuses: Array<GapAnalysisStatus | undefined>;
+    }> = [];
+    generator.onGenerate = async () => {
+      const reports = onProgress.mock.calls.length;
+      const statuses = await Promise.all(
+        pageIds.map(async (id) => (await gapAnalysisOf(id))?.status),
+      );
+      atCall.push({ reports, statuses });
+    };
+
+    await analyzerFor(generator).analyzeNote(noteId, { onProgress });
+
+    // pending, pending, running(1) | done(1), running(2) | done(2)
+    expect(atCall).toEqual([
+      { reports: 3, statuses: ['running', 'pending'] },
+      { reports: 5, statuses: ['done', 'running'] },
+    ]);
+    expect(onProgress).toHaveBeenCalledTimes(6);
+  });
+
   it('analyzeNote skips an ineligible page without a model call', async () => {
     const { noteId, pageIds } = await seedNote(['Page one notes.', null]);
     const generator = createFakeTextGenerator([ONE_POINT]);

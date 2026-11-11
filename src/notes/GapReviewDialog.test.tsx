@@ -242,7 +242,12 @@ describe('GapReviewDialog', () => {
 
     await click(submitButton());
 
-    expect(p.onSubmitted).toHaveBeenCalledTimes(1);
+    // The submit is a chain of IndexedDB writes; wait for its end rather than
+    // for a fixed number of ticks, which a busy test run can outlast.
+    await vi.waitFor(async () => {
+      await settle(1);
+      expect(p.onSubmitted).toHaveBeenCalledTimes(1);
+    });
     expect(p.onOpenChange).toHaveBeenCalledWith(false);
     expect((await getGap(gaps[0].id))?.status).toBe('accepted');
     expect((await getGap(gaps[1].id))?.status).toBe('rejected');
