@@ -80,3 +80,14 @@ export function isExternalHttpUrl(url: string, devUrl: string | null = null): bo
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
   return !isAllowedNavigation(url, devUrl);
 }
+
+export type NavigationAction = 'allow' | 'open-external' | 'deny';
+
+/**
+ * What the shell does with a navigation, redirect or window-open to `url`:
+ * stay in the app, hand an http(s) link to the system browser, or refuse.
+ */
+export function navigationAction(url: string, devUrl: string | null): NavigationAction {
+  if (isAllowedNavigation(url, devUrl)) return 'allow';
+  return isExternalHttpUrl(url, devUrl) ? 'open-external' : 'deny';
+}

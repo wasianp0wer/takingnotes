@@ -13,7 +13,7 @@
     "lint": "node scripts/run.mjs lint",
     "preview": "node scripts/run.mjs preview",
     "clean": "node scripts/clean.mjs",
-    "test": "vitest run && npm run test:electron",
+    "test": "node scripts/test-all.mjs",
     "test:watch": "vitest",
     "test:electron": "vitest run --config electron/vitest.config.ts",
     "desktop:dev": "node scripts/electron-dev.mjs",

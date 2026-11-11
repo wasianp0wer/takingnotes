@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { contentSecurityPolicy, isAllowedNavigation, isExternalHttpUrl } from './security';
+import { contentSecurityPolicy, isAllowedNavigation, isExternalHttpUrl, navigationAction } from './security';
 
 function directive(csp: string, name: string): string[] {
   const found = csp
@@ -98,5 +98,25 @@ describe('isExternalHttpUrl', () => {
     expect(isExternalHttpUrl('javascript:alert(1)')).toBe(false);
     expect(isExternalHttpUrl('mailto:a@b.c')).toBe(false);
     expect(isExternalHttpUrl('nonsense')).toBe(false);
+  });
+});
+
+describe('navigationAction', () => {
+  const dev = 'http://localhost:5199';
+
+  it('allows the app origin and, in dev, the dev server', () => {
+    expect(navigationAction('app://takingnotes/notes/1', null)).toBe('allow');
+    expect(navigationAction('http://localhost:5199/x', dev)).toBe('allow');
+  });
+
+  it('hands other http(s) URLs to the system browser', () => {
+    expect(navigationAction('https://ollama.com/download', null)).toBe('open-external');
+    expect(navigationAction('http://localhost:5199/', null)).toBe('open-external');
+  });
+
+  it('denies every other scheme', () => {
+    for (const url of ['file:///etc/passwd', 'javascript:alert(1)', 'about:blank', 'data:text/html,hi', 'app://evil/', 'nonsense']) {
+      expect(navigationAction(url, dev)).toBe('deny');
+    }
   });
 });

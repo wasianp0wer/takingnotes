@@ -162,3 +162,25 @@ exited with code 0 within a second while the first kept running (it received
 
 - The window title comes from `index.html`'s `<title>`
   ("takingnotes.ink - Drawing & Animation"), not "TakingNotes".
+
+## Navigation hardening (fix round 1)
+
+`main.ts` now applies one guard (`navigationAction` in `security.ts`) to every
+webContents via `app.on('web-contents-created')`: `will-navigate` (off-origin
+http(s) opens the system browser, anything else is refused),
+`will-frame-navigate` (sub-frames only; refused off-origin) and `will-redirect`
+(refused off-origin); `will-attach-webview` is always refused, and window-open
+is always denied. Rerunning the harness with a listener registered after the
+guard showed:
+
+- in-origin sub-frame loads and navigations (`app://takingnotes/manifest.json`
+  → `icon.svg`) reach `will-frame-navigate` and are allowed;
+- an off-origin sub-frame navigation never reaches the guard: CSP blocks it in
+  the renderer first ("Framing 'https://example.com/' violates … default-src
+  'self'"), and Chromium refuses `file://` ("Not allowed to load local
+  resource"). So the deny path of the frame and redirect guards could not be
+  exercised end to end; it is defence in depth, covered by the
+  `navigationAction` unit tests;
+- `customElements.get('webview')` is undefined (no `<webview>` tag);
+- all earlier checks (render, IndexedDB, regex worker, pdf.js, Ollama,
+  Whisper) still pass.
