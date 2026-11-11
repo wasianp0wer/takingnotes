@@ -84,6 +84,30 @@ describe('backup codec', () => {
     expect(Array.from(new Uint8Array(collected[0]))).toEqual([1, 2])
   })
 
+  it('refuses non-plain objects instead of flattening them to {}', () => {
+    const sink = () => 0
+    for (const [label, bad] of [
+      ['Date', new Date(0)],
+      ['Map', new Map([[1, 2]])],
+      ['Set', new Set([1])],
+      ['Blob', new Blob(['x'])],
+      ['class instance', new (class Thing {})()],
+    ] as const) {
+      expect(() => encodeRecord({ nested: [{ v: bad }] }, sink), label).toThrow(
+        /cannot back up a non-plain object/i,
+      )
+    }
+  })
+
+  it('accepts plain objects, null-prototype objects, arrays and binaries', () => {
+    const bare = Object.assign(Object.create(null) as Record<string, unknown>, { a: 1 })
+    expect(encodeRecord({ bare, list: [1, { b: null }], bytes: new Uint8Array([1]) }, () => 7)).toEqual({
+      bare: { a: 1 },
+      list: [1, { b: null }],
+      bytes: { $tnbin: 7 },
+    })
+  })
+
   it('rejects a file without the magic', async () => {
     const err = await catchError(readBackupHeader(new Blob([Uint8Array.of(0x50, 0x4b, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)])))
     expect(err).toBeInstanceOf(BackupFormatError)

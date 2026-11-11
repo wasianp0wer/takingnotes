@@ -51,7 +51,9 @@ function isBinRef(value: unknown): value is { [BIN_KEY]: number } {
 /**
  * Replaces every ArrayBuffer (or typed-array view, by the bytes it covers)
  * at any depth with `{ $tnbin: index }`. `sink` stores the buffer and returns
- * its index. The same buffer met twice in one call is sunk once.
+ * its index. The same buffer met twice in one call is sunk once. Throws a
+ * TypeError for any other non-plain object (Date, Map, Set, Blob, a class
+ * instance): JSON cannot carry it, and it would otherwise become `{}`.
  */
 export function encodeRecord(value: unknown, sink: (buf: ArrayBuffer) => number): unknown {
   const seen = new Map<ArrayBuffer, number>();
@@ -71,6 +73,13 @@ export function encodeRecord(value: unknown, sink: (buf: ArrayBuffer) => number)
     }
     if (Array.isArray(v)) return v.map(walk);
     if (typeof v === 'object' && v !== null) {
+      // JSON would flatten a Date, Map, Set, Blob or class instance to {}
+      // without a word; refuse it so a backup never silently loses data.
+      const proto = Object.getPrototypeOf(v) as unknown;
+      if (proto !== Object.prototype && proto !== null) {
+        const name = (v as { constructor?: { name?: string } }).constructor?.name || 'unknown';
+        throw new TypeError(`Cannot back up a non-plain object (${name}) in a record`);
+      }
       const out: Record<string, unknown> = {};
       for (const [k, child] of Object.entries(v)) out[k] = walk(child);
       return out;
