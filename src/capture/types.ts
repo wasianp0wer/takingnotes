@@ -50,7 +50,9 @@ export interface CaptureEngine {
   resumeNote(noteId: string): Promise<{ sessionId: string; noteId: string }>;
   /**
    * Finalizes the active page and makes a new one the active page.
-   * No active note → no-op, resolves null.
+   * No active note → no-op, resolves null. A *blank* active typed page is
+   * instead switched to a live page in place (same id and index) - see
+   * `isBlankPage` in src/storage/pages.ts.
    */
   newPage(reason: NewPageReason): Promise<string | null>;
   /**
@@ -61,6 +63,11 @@ export interface CaptureEngine {
    * *live* page instead of writing ink into it (K34) - that is this
    * interface's implementation's business (`src/capture/engine.ts`), not
    * this method's; this method only ever produces a typed page.
+   *
+   * Switching type on a page that holds nothing yet replaces it rather than
+   * adding a page: a blank live page becomes the typed page and a blank typed
+   * page is kept, both under the same id and index. Pen input on a blank
+   * typed page likewise turns it into the live page.
    */
   newTypedPage(): Promise<string | null>;
 

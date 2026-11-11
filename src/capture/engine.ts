@@ -2,15 +2,20 @@ import { createStrokeSegmenter, DEFAULT_MAX_GAP_MS } from '@/capture/segmenter';
 import type { CaptureEngine, CaptureState, NewPageReason } from '@/capture/types';
 import type { DeviceController } from '@/device/controller';
 import { createEmitter } from '@/device/emitter';
+import { notifyPagesChanged } from '@/notes/pageChanges';
+import { hasUnsavedTypedText } from '@/notes/typedDrafts';
 import { createNote, getNote, listNotes, updateNote } from '@/storage/notes';
 import {
   createPage,
   createTypedPage,
   finalizePage,
+  getPage,
+  isBlankPage,
   isPageFinalized,
   isTypedPage,
   listPages,
   pageEndedAt,
+  replaceBlankPage,
   setPageStrokes,
 } from '@/storage/pages';
 import { createSession, getSession, listSessions, updateSession } from '@/storage/sessions';
@@ -346,6 +351,42 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     return isTypedPage(page) ? null : page.id;
   }
 
+  /**
+   * Switching page type on a page that holds nothing yet replaces it in place
+   * (same id, note and `pageIndex`) instead of leaving an empty page behind.
+   * Only ever the *active* page: `pageId` must still be what `state` names,
+   * which an op reads after every earlier op has published.
+   *
+   * A blank typed page becomes the live page `b` starts writing to. Its text
+   * may still be sitting in the editor's debounce rather than the database,
+   * hence `hasUnsavedTypedText`; `replaceBlankPage` re-checks the stored page
+   * inside its own transaction. Resolves the page id, or null when the page
+   * has content and the caller should open a new page as before.
+   */
+  async function replaceBlankTypedPage(
+    typedId: string,
+    b: Buffer,
+    pageNum: number | null,
+  ): Promise<string | null> {
+    const noteId = state.activeNoteId;
+    if (noteId === null || state.activePageId !== typedId || hasUnsavedTypedText(typedId)) return null;
+    const buffered = [...b.strokes];
+    const page = await replaceBlankPage(typedId, {
+      source: 'live',
+      devicePageNum: pageNum,
+      strokes: buffered,
+      capturedAt: now(),
+    });
+    if (page === null) return null;
+    b.pageId = page.id;
+    if (b.strokes.length === buffered.length) b.dirty = false;
+    // Same id and index, so nothing in `state` moves; the notes view has to be
+    // told the page itself changed.
+    notifyPagesChanged(noteId);
+    void flushBuffer(b);
+    return page.id;
+  }
+
   /** The closing half of `endNote`, with the "is a note open" check already done. */
   function closeNote(): Promise<void> {
     const old = closeBuffer();
@@ -598,6 +639,13 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
     const next = buffer;
 
     return enqueue(async () => {
+      // A blank typed page is switched to handwriting in place rather than
+      // followed by a new live page (a live page has no ink in `old` to keep).
+      if (typedId !== null && old.pageId === null && old.strokes.length === 0) {
+        const pageNum = reason === 'device-turn' ? devicePageNum() : null;
+        const replaced = await replaceBlankTypedPage(typedId, next, pageNum);
+        if (replaced !== null) return replaced;
+      }
       const finalizedId = await closeOldPage(old);
       if (typedId !== null) await finalizeTypedPage(typedId);
       const noteId = state.activeNoteId;
@@ -656,9 +704,15 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
 
     return enqueue(async () => {
       try {
+        const noteId = state.activeNoteId;
+        const reused = noteId === null ? null : await reuseBlankPageAsTyped(old, typedId, noteId);
+        if (reused !== null) {
+          activeTypedPageId = reused;
+          return reused;
+        }
+
         const finalizedId = await closeOldPage(old);
         if (typedId !== null) await finalizeTypedPage(typedId);
-        const noteId = state.activeNoteId;
         if (noteId === null) return null;
 
         const pageIndex = state.pageIndex + 1;
@@ -672,6 +726,37 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
         typedPagePending = false;
       }
     });
+  }
+
+  /**
+   * `newTypedPage`'s in-place switch: the active page, if blank, *is* the
+   * typed page. A blank live page is re-created as a typed one; a blank typed
+   * page is simply kept (a second empty typed page would be the very orphan
+   * this avoids). Resolves the page id, or null to fall back to a new page.
+   */
+  async function reuseBlankPageAsTyped(
+    old: Buffer,
+    typedId: string | null,
+    noteId: string,
+  ): Promise<string | null> {
+    if (old.strokes.length > 0) return null;
+    if (typedId !== null) {
+      if (old.pageId !== null || state.activePageId !== typedId) return null;
+      if (hasUnsavedTypedText(typedId)) return null;
+      const page = await getPage(typedId);
+      return page && isTypedPage(page) && isBlankPage(page) ? typedId : null;
+    }
+    if (old.pageId === null || state.activePageId !== old.pageId) return null;
+    const page = await replaceBlankPage(old.pageId, {
+      source: 'typed',
+      devicePageNum: null,
+      strokes: [],
+      capturedAt: now(),
+    });
+    if (page === null) return null;
+    old.dirty = false;
+    notifyPagesChanged(noteId);
+    return page.id;
   }
 
   /**
@@ -707,6 +792,9 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
       try {
         const typedId = activeTypedPageId;
         activeTypedPageId = null;
+        // A blank typed page becomes this live page instead of being left
+        // behind empty.
+        if (typedId !== null && (await replaceBlankTypedPage(typedId, b, null)) !== null) return;
         if (typedId !== null) await finalizeTypedPage(typedId);
         const noteId = state.activeNoteId;
         if (noteId === null) return;

@@ -11,7 +11,7 @@ import type { SessionEntry } from '@/sessions/catalog';
 import { NotesHalf } from '@/sessions/NotesHalf';
 import type { NotesHalfProps } from '@/sessions/NotesHalf';
 import { createNote, getNote } from '@/storage/notes';
-import { createPage, createTypedPage, listPages } from '@/storage/pages';
+import { createPage, createTypedPage, getPage, listPages } from '@/storage/pages';
 import type { NoteRecord, PageRecord } from '@/storage/types';
 import { createFakeDeviceController } from '@/test/fakeDeviceController';
 import { resetDatabase } from '@/test/resetDb';
@@ -302,12 +302,14 @@ describe('NotesHalf', () => {
     expect(buttonByText('Type page').disabled).toBe(true);
   });
 
-  it('creates a typed page via Type page once a note is active', async () => {
+  it('Type page on a note whose page is still blank turns that page into the typed page', async () => {
     await renderWith({});
     await click(buttonByText('New note'));
+    const blank = engine.getState().activePageId;
     expect(buttonByText('Type page').disabled).toBe(false);
     await click(buttonByText('Type page'));
-    expect(engine.getState().pageIndex).toBe(1);
+    expect(engine.getState()).toMatchObject({ activePageId: blank, pageIndex: 0 });
+    expect((await getPage(blank!))?.source).toBe('typed');
   });
 
   it('disables New note while the session is locked', async () => {
