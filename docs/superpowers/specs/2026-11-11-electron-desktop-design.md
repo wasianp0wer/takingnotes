@@ -301,3 +301,6 @@ On a packaged build, not the dev shell:
 - The exact UI wording.
 
 Each of these is recorded in the plan as the builder's call.
+
+As built, the calls are recorded in `docs/session-handoff.md` (2026-11-11
+section, "The builder's calls").

@@ -17,7 +17,9 @@
     "test:watch": "vitest",
     "test:electron": "vitest run --config electron/vitest.config.ts",
     "desktop:dev": "node scripts/electron-dev.mjs",
-    "desktop:build": "npm run build && node scripts/build-electron.mjs"
+    "desktop:build": "npm run build && node scripts/build-electron.mjs",
+    "desktop:dist:mac": "npm run desktop:build && electron-builder --mac",
+    "desktop:dist:win": "npm run desktop:build && electron-builder --win"
   },
   "engines": {
     "node": ">=20 <23"
@@ -56,6 +58,7 @@
     "@vitejs/plugin-react": "^5.1.1",
     "autoprefixer": "^10.4.23",
     "electron": "45.3.0",
+    "electron-builder": "26.18.1",
     "esbuild": "0.28.2",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",

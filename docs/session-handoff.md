@@ -1,5 +1,251 @@
 # Session handoff
 
+## 2026-11-11 session: TakingNotes as a desktop app (branch `electron`)
+
+Paste or reference this at the start of the next session. It is the summary of
+record for the Electron work: what is where, what was built, what the spike
+found, what the owner still has to check by hand, and what was decided on the
+owner's behalf.
+
+### Where the work is
+
+| Branch | Contents |
+|---|---|
+| `electron` | **This session's work**, cut from `main` at `59ed3a4`. The last commit is `build(desktop): mac dmg and windows nsis packaging, tester guide and handoff`. **Not merged, not pushed.** |
+| `main` | Unchanged |
+
+Verified at the packaging commit: **web suite 2050 tests in 163 files, electron
+suite 63 tests in 6 files** (`npm test` runs both), `npx tsc -b` clean,
+`npm run lint` 0 errors (6 warnings, all pre-existing: `huionTransport.ts`,
+`useTriageData.ts`, and one `set-state-in-effect` in `OllamaSetupStatus.tsx`
+from Task 6), and `npm run build` succeeds (Vite prints its usual
+chunk-size advisory for the worker and pdf.js chunks).
+
+Key docs:
+- spec `docs/superpowers/specs/2026-11-11-electron-desktop-design.md`
+- plan `docs/superpowers/plans/2026-11-11-electron-desktop.md` (11 tasks)
+- spike results `docs/desktop-spike.md`
+- tester guide `docs/desktop-testers.md`
+- contract `docs/architecture.md` §10
+
+**Next step is the owner's:** run the checklist below on the packaged build,
+then merge `electron` into `main` or keep it.
+
+### How to build
+
+| Command | What it does |
+|---|---|
+| `npm run desktop:dev` | Vite on 5199 plus the shell, with HMR |
+| `npm run desktop:build` | `npm run build` (renderer into `dist/`) plus esbuild (shell into `dist-electron/*.cjs`) |
+| `npm run desktop:dist:mac` | the above, then electron-builder: `release/TakingNotes-<version>-arm64.dmg` and `release/TakingNotes-<version>-arm64-mac.zip`, plus the unpacked `release/mac-arm64/TakingNotes.app` |
+| `npm run desktop:dist:win` | the above, then `release/TakingNotes Setup <version>.exe` (NSIS, x64) and `release/win-unpacked/` |
+
+At 0.24.0 the dmg is 123,664,629 bytes (118 MiB) and the zip 119,629,262
+bytes. The app's own code in `app.asar` is 5.2 MB; the rest is Electron.
+`release/` and `dist-electron/` are gitignored. The version comes from
+`package.json`; bump it before a build you send out.
+
+### What was built
+
+- **Backup export and import (Tasks 1–5), both builds.** Settings → Backup has
+  **Export backup…** and **Import backup…**, and shows `TakingNotes <version>`.
+  - The export holds every IndexedDB store except `pcmCache`, plus the app's
+    `localStorage` keys. Audio and page images are copied byte for byte.
+  - The import shows the counts and export date, warns that it replaces
+    everything, and then replaces everything. It never merges.
+  - It is all-or-nothing. It refuses a newer `DB_VERSION`, and it is blocked
+    while a recording, session or transcription is running, or while another
+    tab has the database open.
+- **Ollama setup check (Task 6), both builds.** In Settings and as a notice on a
+  failed transcript, it reports one of four states: not running, model
+  missing (with `ollama pull <model>` and a copy button), requests refused
+  (how to set `OLLAMA_ORIGINS`), or ready.
+- **Desktop shell (Task 7).** `electron/`:
+  - The renderer is served from `app://takingnotes/` with an SPA fallback.
+  - `contextIsolation`, `sandbox`, no Node in the page, a narrow preload bridge
+    (`window.takingnotesDesktop`: `platform`, `devices`, `probeOllama`).
+  - A CSP on every response.
+  - Navigation guards: off-origin links open the system browser, frames and
+    redirects are refused, there are no new windows and no `<webview>`.
+  - Single instance; the data lives in `~/Library/Application Support/TakingNotes`.
+  - The window title stays **TakingNotes** (`page-title-updated` is prevented;
+    `index.html`'s `<title>` belongs to the web build and is unchanged).
+- **Device picker and permissions (Tasks 9–10).**
+  - `select-bluetooth-device` and `select-hid-device` feed an in-app Radix
+    picker over the bridge. Cancel rejects or settles `requestDevice()` the
+    way the browser does.
+  - Permissions are granted only to the app origin and only from a fixed list.
+  - The mic also asks macOS (`askForMediaAccess`).
+  - A Windows Bluetooth pairing handler exists. It is untested.
+  - `ollama:probe` in the main process lets the setup check tell "not running"
+    from "refused".
+- **Task 8 (Ollama through the main process) was skipped.** The spike showed
+  that a default Ollama (0.40.13) allows `app://*`, so the renderer keeps
+  fetching Ollama directly (see below).
+- **Packaging (Task 11).**
+  - `electron-builder.json` and `build/entitlements.mac.plist`.
+  - The `desktop:dist:mac` and `desktop:dist:win` scripts.
+  - `electron/packaging.test.ts` pins the app ID, the Info.plist strings,
+    `files`, the targets, the entitlements and the exact `electron-builder`
+    version.
+  - `docs/desktop-testers.md`.
+
+### Spike results
+
+Full record: `docs/desktop-spike.md`. In short, on the built `app://` app
+(Electron 45.3.0, macOS 15, Apple Silicon):
+- **Pass:** rendering, IndexedDB on the `app://takingnotes` origin, the regex
+  worker, the Whisper worker on WebGPU (`metal-3`), pdf.js, Ollama from
+  `app://`, and `desktop:dev` with HMR. The Cache API holds the Whisper model,
+  so the second run needs no network.
+- **Two CSP changes were needed:** `blob:` in `script-src` and the Google Fonts
+  hosts (see the builder's calls below).
+- **Ollama:** `GET /api/tags`, a preflighted `POST /api/show` and the
+  `127.0.0.1` address all returned 200 from `app://` with `OLLAMA_ORIGINS`
+  unset. This was checked on Ollama 0.40.13 only.
+- **Device picker (Task 10):** the HID picker opened, listed devices, and
+  Cancel settled the request. `probeOllama` told open from closed ports and
+  refused non-localhost URLs.
+
+### Packaged-app checks run in this session
+
+On `release/mac-arm64/TakingNotes.app` from `npm run desktop:dist:mac`. It was
+launched with a temporary `--user-data-dir` and remote debugging and driven over
+CDP, as in the spike. Nobody clicked anything, and the real profile was not
+created.
+- The page loaded at `app://takingnotes/`, and the bridge had `platform`,
+  `devices` and `probeOllama`.
+- The main process reported `isPackaged: true`, `app.getVersion()` `0.24.0`,
+  and window title **TakingNotes**. `document.title` was still the web build's
+  title, as intended.
+- Settings showed **TakingNotes 0.24.0** under Backup and **Ollama ready**
+  (screenshot taken).
+- `plutil -p …/Contents/Info.plist` showed both strings:
+  - `NSMicrophoneUsageDescription` = "TakingNotes records lecture audio for your notes."
+  - `NSBluetoothAlwaysUsageDescription` = "TakingNotes connects to your drawing tablet over Bluetooth."
+  - It also showed `CFBundleIdentifier` `org.takingnotes.app`.
+- `codesign --verify --deep --strict` passed, on the app in `release/` and
+  inside the mounted dmg. The signature is `adhoc` with the three
+  entitlements. The dmg holds `TakingNotes.app` and an `Applications` link.
+- The Bluetooth and microphone prompts were deliberately **not** triggered.
+- Gatekeeper's first-launch flow for a downloaded (quarantined) copy was
+  **not** exercised. That is the owner's second-Mac check below.
+
+### Owner checks (tests can't reach these)
+
+On a **packaged** build, not the dev shell (spec §10):
+- [ ] Pair the Huion X10 and draw.
+- [ ] Record with the mic, interrupt, reopen the app, and confirm the recording
+  plays and transcribes.
+- [ ] Transcribe a page through Ollama, run Whisper on a recording, and import
+  a syllabus PDF.
+- [ ] Run a regex search.
+- [ ] Round-trip a real backup from the browser into the app (spec §8: export
+  from the web build at the **same** dev-server host and port you use today,
+  then import in the app; the browser copy stays as a fallback).
+- [ ] Install on a second Mac and follow `docs/desktop-testers.md` from
+  scratch. This is also the first real test of the "Open Anyway" path.
+
+Also unreached by this session's tests and spikes:
+- [ ] **Bluetooth `requestDevice` end to end.** It was never called, because it
+  raises the macOS Bluetooth permission prompt. The Bluetooth picker path is
+  covered by unit tests only.
+- [ ] **Picking a real tablet in the picker.** No tablet was attached.
+  Selection is unit-tested only, and so are the Huion filters on the real
+  Connect button.
+- [ ] **The microphone prompt in the packaged app** (the TCC prompt and the
+  usage string it shows).
+- [ ] **Windows is untested.** The installer builds (below), but it has never
+  been run.
+- [ ] **One web test is flaky under heavy machine load.** The ledger names
+  `GapPanel` (carries draft choices…), `NotesHalf`, `ThemeBuilderDialog` and
+  `AdvancedSearch` as intermittent when the machine is saturated. They pass
+  on an idle machine, and the full suite was green for this commit.
+
+### Tech debt (spec §9)
+
+- **Bundle or launch Ollama from the app.** The owner wants this planned.
+- **Auto-update.** It realistically needs signing first. electron-builder
+  already writes `latest-mac.yml`, `latest.yml` and blockmaps, which a future
+  updater can use; nothing reads them now.
+- **Apple Developer signing and notarization, and Windows signing.** The mac
+  app is ad-hoc signed only and the Windows installer is unsigned, so
+  SmartScreen will warn.
+- **Real testing on Windows hardware** (BLE pairing, HID, mic).
+- Optionally, bundle the Whisper model and ORT wasm for offline first run.
+- **Support Ollama on another machine** (a non-localhost base URL) in the
+  desktop build. That needs a CSP that follows the setting, or Ollama calls
+  routed through the main process (the skipped Task 8).
+- Once desktop is the only target, the multi-tab guards can be simplified.
+- Smaller items deferred by task reviews are listed per task in
+  `.superpowers/sdd/2026-11-11-electron-desktop/progress.md`. That file is
+  local and untracked. Examples: orphaned staging databases after a crash are
+  never swept, `ollama:probe` follows redirects, and the `app://` handler
+  ignores `Range`.
+
+### The builder's calls (spec §11)
+
+- **Backup container: a custom framed `.tnbackup` format, not a zip**
+  (`src/backup/format.ts`). It is `TNBACKUP1\n`, then the manifest's byte
+  length as 12 decimal digits, then the manifest JSON (the records and the
+  `localStorage` keys), then the binaries concatenated. Records refer to the
+  binaries by offset and length, so binary data is never base64. Import
+  slices the binaries from the `File` one batch at a time. The audio and
+  images of a 1 GB+ backup are therefore never all in memory at once; the
+  manifest itself is. There is no zip library to depend on.
+- **All-or-nothing import: a staging database plus a `localStorage` pointer
+  flip.** Records go into a fresh `takingnotes-<base36 timestamp>` database.
+  The blockers are checked again right before the swap. Then the app's
+  `localStorage` keys are replaced and the active-DB pointer is set, and the
+  app reloads. A failure while staging leaves the old database untouched. A
+  failure during the swap puts the previous `localStorage` keys and pointer
+  back.
+- **Shell build: esbuild** (`scripts/build-electron.mjs`), bundling
+  `electron/main.ts` and `preload.ts` to CommonJS. electron-vite and
+  vite-plugin-electron were not used; the renderer stays the ordinary Vite
+  build.
+- **Packaging: electron-builder 26.18.1, pinned exactly.** The config is
+  JSON (`electron-builder.json`), so the test can read it without a YAML
+  dependency.
+- **Electron 45.3.0, pinned exactly.**
+- **Apple Silicon only (`arm64`). No Intel or universal build.** A universal
+  app carries two copies of Electron and would roughly double the 118 MiB dmg.
+  The testers are on Apple Silicon. Adding `x64` to the mac target `arch`
+  lists makes a separate Intel dmg if one is ever needed.
+- **Two departures from the Task 11 brief, both pinned by the packaging test:**
+  - `mac.identity` is `"-"` (ad-hoc), not `null`. In electron-builder 26,
+    `null` skips signing entirely. The bundle then fails
+    `codesign --verify` ("code has no resources but signature indicates they
+    must be present"), and macOS tends to call a downloaded copy "damaged"
+    rather than offering Open Anyway. `"-"` gives the ad-hoc signature the
+    spec asks for, with the entitlements applied.
+  - `files` adds `"!node_modules/**"`, and `npmRebuild` is `false`. Without
+    them electron-builder copied every production dependency into the app:
+    a 234 MB `app.asar` plus 199 MB unpacked, including `onnxruntime-node`
+    binaries. That made a 238 MiB dmg. The renderer and shell are fully
+    bundled, so the app loads none of it.
+- **The CSP goes beyond the plan's list:**
+  - `blob:` in `script-src`. transformers.js 4.3.0 wraps onnxruntime's loader
+    in a `blob:` URL and `import()`s it; without `blob:`, neither the WebGPU
+    nor the wasm backend starts. Allowing `https://cdn.jsdelivr.net` in
+    `script-src` would run remote code directly; only same-origin script can
+    mint a `blob:` URL.
+  - `https://fonts.googleapis.com` in `style-src` and
+    `https://fonts.gstatic.com` in `font-src`, for the UI font that
+    `src/index.css` imports. Self-hosting the font would let both go.
+- **Task 8 skipped:** the default `OLLAMA_ORIGINS` on 0.40.13 includes
+  `app://*`. Cost if wrong: a tester with a custom `OLLAMA_ORIGINS` sees the
+  setup check's "refused" message, which explains the fix.
+- **The Windows build works from macOS.** `npm run desktop:dist:win` on this
+  Mac produced `release/TakingNotes Setup 0.24.0.exe`, a 122,861,460-byte NSIS
+  installer (`file`: "Nullsoft Installer self-extracting archive"), and
+  `win-unpacked/TakingNotes.exe` (PE32+ x86-64). Wine was not needed and is
+  not installed. Neither file has been run. It is unsigned.
+- **Bridge, picker and UI wording** are as recorded in the plan and in each
+  task's commit.
+
+---
+
 ## 2026-10-19/20 session: Sessions UI, search and themes (branch `sessions-ui`)
 
 Paste or reference this at the start of the next session. It is the summary of

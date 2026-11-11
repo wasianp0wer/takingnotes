@@ -1,0 +1,27 @@
+{
+  "appId": "org.takingnotes.app",
+  "productName": "TakingNotes",
+  "files": ["dist/**", "dist-electron/**", "package.json", "!node_modules/**"],
+  "npmRebuild": false,
+  "directories": {
+    "output": "release"
+  },
+  "icon": "icon.png",
+  "mac": {
+    "category": "public.app-category.productivity",
+    "target": [
+      { "target": "dmg", "arch": ["arm64"] },
+      { "target": "zip", "arch": ["arm64"] }
+    ],
+    "identity": "-",
+    "hardenedRuntime": false,
+    "entitlements": "build/entitlements.mac.plist",
+    "extendInfo": {
+      "NSMicrophoneUsageDescription": "TakingNotes records lecture audio for your notes.",
+      "NSBluetoothAlwaysUsageDescription": "TakingNotes connects to your drawing tablet over Bluetooth."
+    }
+  },
+  "win": {
+    "target": [{ "target": "nsis", "arch": ["x64"] }]
+  }
+}

@@ -279,6 +279,8 @@ function createWindow(): BrowserWindow {
   });
 
   attachDeviceChooser(window.webContents);
+  // index.html's <title> belongs to the web build; the desktop window keeps the product name.
+  window.on('page-title-updated', (event) => event.preventDefault());
   window.on('closed', () => {
     mainWindow = null;
   });

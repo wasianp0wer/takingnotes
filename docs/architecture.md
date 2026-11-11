@@ -1458,3 +1458,80 @@ Triage is also always mounted. Its data refresh comes from `useTriageData`: a
 60 s interval plus a refresh on window focus, whether or not the tab is visible,
 rather than a reload on tab entry. (`useNow` separately ticks Triage's clock
 every 60 s for date display; it does not reload data.)
+
+## 10. Desktop app (Electron)
+
+Added on the `electron` branch (spec:
+`docs/superpowers/specs/2026-11-11-electron-desktop-design.md`; spike record:
+`docs/desktop-spike.md`). The same renderer runs in the browser and in an
+Electron shell. Nothing in `src/` forks on the build except through the bridge
+below. Code wins where this disagrees.
+
+### 10.1 Layout and build
+
+- `electron/` is the shell: `main.ts` (wiring only) and `preload.ts`, plus pure,
+  unit-tested modules: `appProtocol.ts`, `security.ts`, `permissions.ts`,
+  `devices.ts`, `ollamaProbe.ts`, `channels.ts` and `types.ts`. Its tests run
+  under `electron/vitest.config.ts` in Node. `npm test` runs both suites.
+- `npm run desktop:build` runs the Vite build into `dist/`, then esbuild
+  (`scripts/build-electron.mjs`) bundles the shell into
+  `dist-electron/{main,preload}.cjs`. `package.json` `main` points at
+  `dist-electron/main.cjs`.
+- `npm run desktop:dist:mac` / `:win` package with electron-builder
+  (`electron-builder.json`, `build/entitlements.mac.plist`) into `release/`.
+  The app ships only `dist/`, `dist-electron/` and `package.json`, with no
+  `node_modules`.
+
+### 10.2 Origin, data and security
+
+- Production loads `app://takingnotes/`. This is a privileged scheme
+  (standard, secure, fetch, CORS, stream) served from `dist/`. Unknown paths
+  without an extension fall back to `index.html`, and missing assets get a 404.
+  Dev loads `TAKINGNOTES_DEV_URL` (Vite).
+- The origin `app://takingnotes` owns the IndexedDB and `localStorage`. The
+  profile is Electron's `userData`, keyed by the app ID `org.takingnotes.app`
+  and the name `TakingNotes`. On macOS that is
+  `~/Library/Application Support/TakingNotes`. **Never change the app ID or the
+  name:** a change orphans every user's data.
+- Every `app://` response carries the CSP from `security.ts`: `'self'`, Ollama
+  on `localhost`/`127.0.0.1`, jsdelivr and Hugging Face for transformers.js,
+  `blob:` in `script-src` (onnxruntime's loader) and the Google Fonts hosts.
+  The dev server gets no CSP.
+- `contextIsolation`, `sandbox`, `nodeIntegration: false`. Every webContents
+  gets the same navigation guard: off-origin http(s) clicks open the system
+  browser, while frames, redirects, new windows and `<webview>` are refused.
+  The app is single-instance, and the window title is fixed to `TakingNotes`.
+
+### 10.3 The bridge
+
+`window.takingnotesDesktop` (from `preload.ts`; read through
+`getDesktopBridge()` in `src/desktop/bridge.ts`, which returns `null` in the web
+build) exposes:
+- `platform`
+- `devices`: the chooser channel. Main forwards `select-bluetooth-device` /
+  `select-hid-device` to `DevicePickerDialog`, which is mounted at the app root
+  for the document's lifetime. The renderer answers with select or cancel.
+  Every request is answered exactly once, and a cancel settles
+  `requestDevice()` the way the browser does.
+- `probeOllama(baseUrl)`: a localhost-only reachability check from the main
+  process. With it, the Ollama setup check can tell "not running" from
+  "refused by `OLLAMA_ORIGINS`".
+
+Ollama itself is fetched directly from the renderer. A default Ollama allows
+`app://*`, so it does not go through main (the plan's Task 8 was skipped).
+
+### 10.4 Permissions
+
+`permissions.ts` grants only a fixed list, and only to the app origin (or the
+dev URL): `media` for audio only, `bluetooth`, `hid`, `clipboard-sanitized-write` and `fullscreen`, plus HID and Bluetooth device permission. On macOS a mic
+request also goes through `systemPreferences.askForMediaAccess`. Info.plist
+carries `NSMicrophoneUsageDescription` and `NSBluetoothAlwaysUsageDescription`.
+The ad-hoc signature carries the audio-input, Bluetooth and allow-jit
+entitlements.
+
+### 10.5 Backup and the active-database pointer
+
+These apply to both builds. `.tnbackup` export and import live in `src/backup/`
+(format in `format.ts`). Import writes into a fresh staging database and then
+switches `localStorage` `takingnotes.activeDb` (`src/storage/activeDb.ts`) to
+it. `openNotesDb` opens whatever database that pointer names.
