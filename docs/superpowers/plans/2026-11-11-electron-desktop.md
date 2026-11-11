@@ -256,7 +256,7 @@ Copy (exact):
 **Interfaces:**
 - Produces:
   - `APP_SCHEME = 'app'` and `APP_ORIGIN = 'app://takingnotes'`.
-  - `resolveAppRequest(url: string, root: string): string | null` maps `app://takingnotes/<path>` to an absolute file under `root`. `/` maps to `index.html`. It returns `null` for another host, a path that escapes `root` (`..`, encoded `%2e%2e`), or a missing extension-less SPA path that should fall back to `index.html` (decide fallback: unknown paths → `index.html`).
+  - `resolveAppRequest(url: string, root: string): string | null` maps `app://takingnotes/<path>` to an absolute file under `root`. `/` maps to `index.html`, and so does any path with no file extension (SPA fallback). It returns `null` for another host or a path that escapes `root` (`..`, encoded `%2e%2e`). It doesn't check that the file exists; the handler returns 404.
   - `contentSecurityPolicy(): string` follows Global Constraints. `script-src 'self' 'wasm-unsafe-eval'`, `worker-src 'self' blob:`, `style-src 'self' 'unsafe-inline'`, `img-src 'self' data: blob:`, `font-src 'self' data:`, `media-src 'self' blob:`.
   - `isAllowedNavigation(url: string, devUrl: string | null): boolean` allows only the app origin, plus `devUrl`'s origin in dev.
   - `isExternalHttpUrl(url: string): boolean` is true for http(s) URLs not on those origins. These open via `shell.openExternal`.
