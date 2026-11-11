@@ -2,6 +2,7 @@ import { StrictMode, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import { AppShell } from '@/app/AppShell'
+import { cleanupRetiredDatabases } from '@/backup/retiredDb'
 import { registerTabPresence } from '@/backup/tabPresence'
 import { CaptureProvider } from '@/capture/CaptureContext'
 import { createCaptureEngine } from '@/capture/engine'
@@ -43,6 +44,10 @@ try {
 } catch {
   // Presence is advisory; never block startup on it.
 }
+
+// Deletes the database a backup import replaced, once the active-db pointer
+// has survived a restart and verifies. Best-effort and not awaited.
+void cleanupRetiredDatabases().catch(() => {})
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

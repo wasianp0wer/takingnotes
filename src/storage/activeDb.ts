@@ -2,6 +2,12 @@ import { DB_NAME } from '@/storage/db';
 
 /** localStorage key naming the IndexedDB database the app should open. */
 export const ACTIVE_DB_KEY = 'takingnotes.activeDb';
+/**
+ * localStorage key listing databases an import replaced (JSON array of
+ * names). Import never deletes the previous database; a later start does,
+ * once the pointer has verifiably survived (`src/backup/retiredDb.ts`).
+ */
+export const RETIRED_DB_KEY = 'takingnotes.retiredDb';
 const PROBE_KEY = `${ACTIVE_DB_KEY}.probe`;
 
 function defaultStorage(): Storage | null {
@@ -12,7 +18,8 @@ function defaultStorage(): Storage | null {
   }
 }
 
-function isValidName(name: string | null): name is string {
+/** True for `takingnotes` or `takingnotes-<suffix>`: a name this app's databases use. */
+export function isValidDbName(name: string | null): name is string {
   return (
     name === DB_NAME ||
     (name !== null && name.startsWith(`${DB_NAME}-`) && name.length > DB_NAME.length + 1)
@@ -25,7 +32,7 @@ export function getActiveDbName(
 ): string {
   try {
     const value = storage?.getItem(ACTIVE_DB_KEY) ?? null;
-    return isValidName(value) ? value : DB_NAME;
+    return isValidDbName(value) ? value : DB_NAME;
   } catch {
     return DB_NAME;
   }

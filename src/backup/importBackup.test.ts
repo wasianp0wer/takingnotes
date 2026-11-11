@@ -2,7 +2,7 @@ import type { IDBPDatabase } from 'idb';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { exportBackup } from '@/backup/exportBackup';
-import { BackupFormatError, buildBackupBlob, type BackupEntry } from '@/backup/format';
+import { BackupFormatError, buildBackupBlob, readBackupHeader, type BackupEntry } from '@/backup/format';
 import { ImportBlockedError } from '@/backup/guards';
 import {
   BackupTooNewError,
@@ -10,8 +10,9 @@ import {
   importBackup,
   inspectBackup,
 } from '@/backup/importBackup';
+import { cleanupRetiredDatabases } from '@/backup/retiredDb';
 import { BACKUP_STORES, OUT_OF_LINE_STORES } from '@/backup/stores';
-import { ACTIVE_DB_KEY, getActiveDbName } from '@/storage/activeDb';
+import { ACTIVE_DB_KEY, RETIRED_DB_KEY, getActiveDbName } from '@/storage/activeDb';
 import { DB_NAME, DB_VERSION, closeNotesDb, openNamedDb, openNotesDb, type NotesDb } from '@/storage/db';
 
 function memoryStorage(initial: Record<string, string> = {}): Storage {
@@ -199,8 +200,9 @@ describe('importBackup', () => {
     const pointer = getActiveDbName(storage);
     expect(pointer).not.toBe(DB_NAME);
     expect(pointer.startsWith(`${DB_NAME}-`)).toBe(true);
-    // The old database is gone; only the imported one remains.
-    expect(await dbNames()).toEqual([pointer]);
+    // The old database is kept (and recorded as retired) until a verified restart.
+    expect(await dbNames()).toEqual([DB_NAME, pointer].sort());
+    expect(JSON.parse(storage.getItem(RETIRED_DB_KEY)!)).toEqual([DB_NAME]);
 
     const restored = await activeSnapshot();
     expect((await openNotesDb()).name).toBe(pointer);
@@ -217,6 +219,53 @@ describe('importBackup', () => {
     expect(storage.getItem('takingnotes_downloaded_memory')).toBe('{"x":1}');
     expect(storage.getItem('takingnotes.sessionsUi')).toBeNull();
     expect(storage.getItem('unrelated.key')).toBe('keep');
+  });
+
+  it('import keeps the previous database until a verified restart', async () => {
+    await seedAll('old');
+    const storage = memoryStorage();
+    vi.stubGlobal('localStorage', storage);
+    const oldData = await activeSnapshot();
+    const blob = manifestBlob({ stores: { notes: [{ key: null, value: { id: 'imported' } }] } });
+
+    await importBackup(blob, { storage, countTabs: oneTab });
+
+    const pointer = getActiveDbName(storage);
+    expect(pointer).not.toBe(DB_NAME);
+    // Nothing is deleted by the import itself: the old data is intact.
+    expect(await dbNames()).toEqual([DB_NAME, pointer].sort());
+    const old = await openNamedDb(DB_NAME);
+    expect(await snapshot(old)).toEqual(oldData);
+    old.close();
+    expect(JSON.parse(storage.getItem(RETIRED_DB_KEY)!)).toEqual([DB_NAME]);
+
+    // The "restart": the app opens the pointed-to db, then the cleanup runs.
+    await closeNotesDb();
+    expect((await openNotesDb()).name).toBe(pointer);
+    await cleanupRetiredDatabases(storage);
+    expect(await dbNames()).toEqual([pointer]);
+    expect(storage.getItem(RETIRED_DB_KEY)).toBeNull();
+    expect(await (await openNotesDb()).count('notes')).toBe(1);
+  });
+
+  it('retiredDb key is never exported or imported', async () => {
+    await seedAll('a');
+    const storage = memoryStorage({
+      [RETIRED_DB_KEY]: JSON.stringify(['takingnotes-leftover']),
+      'takingnotes.activeTheme': 'dark',
+    });
+    const exported = await exportBackup({ appVersion: '1.0.0', storage });
+    const { manifest } = await readBackupHeader(exported);
+    expect(manifest.localStorage).toEqual({ 'takingnotes.activeTheme': 'dark' });
+
+    const target = memoryStorage();
+    vi.stubGlobal('localStorage', target);
+    const blob = manifestBlob({
+      localStorage: { [RETIRED_DB_KEY]: JSON.stringify(['takingnotes-evil']), 'takingnotes.activeTheme': 'dark' },
+    });
+    await importBackup(blob, { storage: target, countTabs: oneTab });
+    expect(JSON.parse(target.getItem(RETIRED_DB_KEY)!)).toEqual([DB_NAME]);
+    expect(target.getItem('takingnotes.activeTheme')).toBe('dark');
   });
 
   for (const mode of ['sync', 'async'] as const) {
@@ -283,7 +332,6 @@ describe('importBackup', () => {
     expect(ReExportedBlockedError).toBe(ImportBlockedError);
   });
 
-
   it('a pointer write that does not stick restores localStorage and drops staging', async () => {
     await seedAll('original');
     const before = await activeSnapshot();
@@ -306,6 +354,8 @@ describe('importBackup', () => {
     expect(inner.getItem('takingnotes.activeTheme')).toBe('light');
     expect(inner.getItem('takingnotes.sessionsUi')).toBe('mine');
     expect(inner.getItem(ACTIVE_DB_KEY)).toBeNull();
+    // The retired record is rolled back too: nothing marks the live db for deletion.
+    expect(inner.getItem(RETIRED_DB_KEY)).toBeNull();
     expect(await dbNames()).toEqual([DB_NAME]);
     expect(await activeSnapshot()).toEqual(before);
   });

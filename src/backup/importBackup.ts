@@ -17,7 +17,8 @@ import {
   isBackupLocalStorageKey,
   type BackupStoreName,
 } from '@/backup/stores';
-import { ACTIVE_DB_KEY, getActiveDbName, setActiveDbName } from '@/storage/activeDb';
+import { retireDatabase } from '@/backup/retiredDb';
+import { ACTIVE_DB_KEY, RETIRED_DB_KEY, getActiveDbName, setActiveDbName } from '@/storage/activeDb';
 import { DB_NAME, DB_VERSION, closeNotesDb, openNamedDb, type NotesDb } from '@/storage/db';
 
 export type BackupSummary = {
@@ -239,19 +240,32 @@ async function verifyCounts(db: IDBPDatabase<NotesDb>, manifest: BackupManifest)
   await tx.done;
 }
 
-/** Replaces the app's localStorage keys and the pointer; restores both if anything throws. */
-function swapIn(storage: Storage, manifest: BackupManifest, staging: string): void {
+function restoreItem(storage: Storage, key: string, value: string | null): void {
+  if (value === null) storage.removeItem(key);
+  else storage.setItem(key, value);
+}
+
+/**
+ * Replaces the app's localStorage keys, records `oldName` as retired, then
+ * switches the pointer; restores all three if anything throws. The retired
+ * record is written before the pointer, so a pointer that sticks always has
+ * it, and the old database is deleted only by a later, verified start
+ * (`cleanupRetiredDatabases`).
+ */
+function swapIn(storage: Storage, manifest: BackupManifest, staging: string, oldName: string): void {
   const previous = new Map<string, string>();
   for (let i = 0; i < storage.length; i += 1) {
     const key = storage.key(i);
     if (key !== null && isBackupLocalStorageKey(key)) previous.set(key, storage.getItem(key) ?? '');
   }
   const previousPointer = storage.getItem(ACTIVE_DB_KEY);
+  const previousRetired = storage.getItem(RETIRED_DB_KEY);
   try {
     for (const key of previous.keys()) storage.removeItem(key);
     for (const [key, value] of Object.entries(manifest.localStorage)) {
       if (isBackupLocalStorageKey(key)) storage.setItem(key, value);
     }
+    if (oldName !== staging) retireDatabase(oldName, storage);
     setActiveDbName(staging, storage);
   } catch (err) {
     try {
@@ -260,8 +274,8 @@ function swapIn(storage: Storage, manifest: BackupManifest, staging: string): vo
         if (key !== null && isBackupLocalStorageKey(key)) storage.removeItem(key);
       }
       for (const [key, value] of previous) storage.setItem(key, value);
-      if (previousPointer === null) storage.removeItem(ACTIVE_DB_KEY);
-      else storage.setItem(ACTIVE_DB_KEY, previousPointer);
+      restoreItem(storage, ACTIVE_DB_KEY, previousPointer);
+      restoreItem(storage, RETIRED_DB_KEY, previousRetired);
     } catch {
       // Storage refused the rollback too; the pointer write above failed, so
       // the old database is still the one that opens.
@@ -275,7 +289,9 @@ function swapIn(storage: Storage, manifest: BackupManifest, staging: string): vo
  * backup's contents, all or nothing. The data is written to a fresh staging
  * database and only becomes live when the active-db pointer is switched to
  * it, so any failure before that leaves the current data exactly as it was.
- * The caller reloads the page afterwards.
+ * The previous database is never deleted here: it is recorded as retired and
+ * removed on a later start once the pointer verifies (`./retiredDb`). The
+ * caller flushes storage (desktop) and reloads the page afterwards.
  *
  * `countTabs` and `openStaging` exist for tests.
  */
@@ -306,6 +322,12 @@ export async function importBackup(
 
   let db: IDBPDatabase<NotesDb> | null = null;
   try {
+    // ⚑ MIGRATION DEBT (I2): staging opens at the current DB_VERSION, so an
+    // older backup's records skip every `if (oldVersion < N)` block in
+    // `upgradeNotesDb`. Harmless while versions 1-5 are schema-only. Any
+    // future version bump that migrates DATA must first change this to open
+    // staging at `manifest.dbVersion`, write the records, close, and reopen
+    // at DB_VERSION so the upgrade runs over them.
     db = await openStaging(staging);
     opts.onProgress?.(0, total);
     for (const store of BACKUP_STORES) {
@@ -323,12 +345,10 @@ export async function importBackup(
     // swap, so check again right before it.
     await checkBlockers();
     await closeNotesDb();
-    swapIn(storage, manifest, staging);
+    swapIn(storage, manifest, staging, oldName);
   } catch (err) {
     db?.close();
     await deleteDatabaseBestEffort(staging);
     throw err;
   }
-
-  if (oldName !== staging) await deleteDatabaseBestEffort(oldName);
 }

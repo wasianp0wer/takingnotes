@@ -1,4 +1,4 @@
-import { ACTIVE_DB_KEY } from '@/storage/activeDb';
+import { ACTIVE_DB_KEY, RETIRED_DB_KEY } from '@/storage/activeDb';
 
 /**
  * Every store worth backing up, in `db.ts` creation order. `pcmCache` is
@@ -25,10 +25,10 @@ export const OUT_OF_LINE_STORES: readonly BackupStoreName[] = ['pageRenders', 'r
 
 /**
  * The app's own localStorage keys (`takingnotes.*` and the legacy
- * `takingnotes_*`), minus the active-database pointer, which names a
- * per-install database and must not travel with a backup.
+ * `takingnotes_*`), minus the active-database pointer and the retired-database
+ * list, which name per-install databases and must not travel with a backup.
  */
 export function isBackupLocalStorageKey(key: string): boolean {
-  if (key === ACTIVE_DB_KEY) return false;
+  if (key === ACTIVE_DB_KEY || key === RETIRED_DB_KEY) return false;
   return key.startsWith('takingnotes.') || key.startsWith('takingnotes_');
 }
