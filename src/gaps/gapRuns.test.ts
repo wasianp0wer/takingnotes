@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { isGapRunActive, resetGapRuns, runGapAnalysis, subscribeGapRuns } from '@/gaps/gapRuns';
+import {
+  gapRunProgress,
+  isGapRunActive,
+  resetGapRuns,
+  runGapAnalysis,
+  subscribeGapRuns,
+} from '@/gaps/gapRuns';
 
 beforeEach(resetGapRuns);
 
@@ -51,5 +57,28 @@ describe('gapRuns', () => {
       }),
     ).rejects.toThrow('boom');
     expect(isGapRunActive('n1')).toBe(false);
+  });
+
+  it('hands the run a progress report that advances the note and notifies subscribers', async () => {
+    const listener = vi.fn();
+    const off = subscribeGapRuns(listener);
+    const task = deferred();
+    let report!: () => void;
+
+    const done = runGapAnalysis('n1', (progress) => {
+      report = progress;
+      return task.promise;
+    });
+    const before = gapRunProgress('n1');
+    listener.mockClear();
+
+    report();
+    expect(gapRunProgress('n1')).toBe(before + 1);
+    expect(gapRunProgress('n2')).toBe(0);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    task.resolve();
+    await done;
+    off();
   });
 });

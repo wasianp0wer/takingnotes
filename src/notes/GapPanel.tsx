@@ -4,7 +4,7 @@ import type { GapAnalyzer } from '@/gaps/analyzer';
 import { noteHasRecording, recordingForPage } from '@/gaps/analyzer';
 import { GAP_LEAD_MS, GAP_TRAIL_MS } from '@/gaps/constants';
 import { describeGapSkip, gapEligibility } from '@/gaps/eligibility';
-import { runGapAnalysis, useGapRunActive } from '@/gaps/gapRuns';
+import { runGapAnalysis, useGapRunActive, useGapRunProgress } from '@/gaps/gapRuns';
 import { reconcileDraft } from '@/gaps/reviewDraft';
 import { createConfiguredGapAnalyzer } from '@/gaps/startGaps';
 import { segmentsInWindow, speechTextOf, speechWindowForPage } from '@/gaps/window';
@@ -32,6 +32,8 @@ export interface GapPanelProps {
   noteIsLive?: boolean;
   /** Tests only - a real mount builds one from settings. */
   analyzer?: GapAnalyzer;
+  /** Plays a recording from an offset; makes the review dialog's times clickable. */
+  onSeekRecording?(recordingId: string, startMs: number): void;
 }
 
 /** Local time, so the source note reads like a clock rather than a raw epoch. */
@@ -52,7 +54,13 @@ function formatSourceWindow(win: { fromMs: number; toMs: number }): string {
  * P1 replaces the placeholder body and keeps the name and props. The
  * `aria-label` is the mount point the notes view asserts on, so it stays too.
  */
-export function GapPanel({ noteId, pageId, noteIsLive = false, analyzer }: GapPanelProps) {
+export function GapPanel({
+  noteId,
+  pageId,
+  noteIsLive = false,
+  analyzer,
+  onSeekRecording,
+}: GapPanelProps) {
   const [page, setPage] = useState<PageRecord | null>(null);
   const [gaps, setGaps] = useState<GapSuggestionRecord[]>([]);
   // Every suggestion in the note, for the Review button's count.
@@ -78,6 +86,10 @@ export function GapPanel({ noteId, pageId, noteIsLive = false, analyzer }: GapPa
   // Module-level, not component state: the panel remounts per page, and a run
   // started on another page must still read as in flight here.
   const running = useGapRunActive(noteId);
+  // Moves each time the note's run writes a page status, so this page's line
+  // follows the run (pending, running, done) instead of holding whatever it
+  // read when the run began until the whole note is finished.
+  const runProgress = useGapRunProgress(noteId);
   const [runError, setRunError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
 
@@ -127,8 +139,9 @@ export function GapPanel({ noteId, pageId, noteIsLive = false, analyzer }: GapPa
       live = false;
     };
     // `running` too: a run - possibly started from another page's panel -
-    // replaces rows and analysis status, so its end must reload them.
-  }, [pageId, noteId, revision, running]);
+    // replaces rows and analysis status, so its end must reload them, and
+    // `runProgress` so each status it writes along the way shows as it lands.
+  }, [pageId, noteId, revision, running, runProgress]);
 
   async function run() {
     // A press while a run is already in flight is a no-op: the button is
@@ -138,10 +151,10 @@ export function GapPanel({ noteId, pageId, noteIsLive = false, analyzer }: GapPa
     // `await`, and the mark lives at module level, so it holds across mounts.
     setRunError(null);
     try {
-      await runGapAnalysis(noteId, async () => {
+      await runGapAnalysis(noteId, async (report) => {
         try {
           const activeAnalyzer = analyzer ?? (await createConfiguredGapAnalyzer());
-          await activeAnalyzer.analyzeNote(noteId);
+          await activeAnalyzer.analyzeNote(noteId, { onProgress: report });
         } finally {
           // The run replaced the note's proposed rows with new ids - even one
           // that failed part-way may have: move any unsubmitted review choices
@@ -277,6 +290,7 @@ export function GapPanel({ noteId, pageId, noteIsLive = false, analyzer }: GapPa
         noteIsLive={noteIsLive}
         running={running}
         onSubmitted={() => setRevision((n) => n + 1)}
+        onSeek={onSeekRecording}
       />
     </section>
   );

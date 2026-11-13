@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createCaptureEngine, sessionStartedAtOf, type LiveCaptureEngine } from '@/capture/engine';
 import type { CaptureState } from '@/capture/types';
+import { subscribePagesChanged } from '@/notes/pageChanges';
+import { clearTypedDraft, setTypedDraft } from '@/notes/typedDrafts';
 import { createNote, getNote, listNotes } from '@/storage/notes';
-import { createPage, createTypedPage, getPage, listPages } from '@/storage/pages';
+import { createPage, createTypedPage, getPage, listPages, setPageText } from '@/storage/pages';
 import { createSession, getSession, listSessions } from '@/storage/sessions';
 import { createFakeDeviceController, type FakeDeviceController } from '@/test/fakeDeviceController';
 import { resetDatabase } from '@/test/resetDb';
@@ -809,6 +811,9 @@ describe('capture engine', () => {
     it('finalizes the outgoing live page, emits pageFinalized for it, and creates a typed page', async () => {
       const noteId = await engine.startNote();
       const first = engine.getState().activePageId!;
+      // Written on, so it is kept (a blank one would be replaced in place).
+      stroke(fake, [[0.1, 0.1]]);
+      await engine.flush();
       const finalized: string[] = [];
       engine.subscribePageFinalized((id) => finalized.push(id));
 
@@ -835,6 +840,7 @@ describe('capture engine', () => {
     it('finalizes an outgoing typed page without emitting pageFinalized for it', async () => {
       await engine.startNote();
       const first = (await engine.newTypedPage())!;
+      await setPageText(first, 'typed text');
       const finalized: string[] = [];
       engine.subscribePageFinalized((id) => finalized.push(id));
 
@@ -857,9 +863,21 @@ describe('capture engine', () => {
   });
 
   describe('typed pages and pen input (K34)', () => {
+    /**
+     * A written live page followed by a typed page with text: neither is
+     * blank, so pen input opens a third page rather than replacing one.
+     */
+    async function writtenThenTyped(): Promise<string> {
+      stroke(fake, [[0.05, 0.05]]);
+      await engine.flush();
+      const typedId = (await engine.newTypedPage())!;
+      await setPageText(typedId, 'typed text');
+      return typedId;
+    }
+
     it('opens a new, unsplit live page when the pen writes while the active page is typed', async () => {
       const noteId = await engine.startNote();
-      const typedId = (await engine.newTypedPage())!;
+      const typedId = await writtenThenTyped();
 
       stroke(fake, [
         [0.1, 0.1],
@@ -884,7 +902,7 @@ describe('capture engine', () => {
     it('finalizes the typed page it leaves behind, without emitting pageFinalized for it', async () => {
       const noteId = await engine.startNote();
       const liveFirst = engine.getState().activePageId!;
-      const typedId = (await engine.newTypedPage())!;
+      const typedId = await writtenThenTyped();
       const finalized: string[] = [];
       engine.subscribePageFinalized((id) => finalized.push(id));
 
@@ -911,7 +929,7 @@ describe('capture engine', () => {
 
     it('does not re-trigger on later points of the same stroke', async () => {
       await engine.startNote();
-      await engine.newTypedPage();
+      await writtenThenTyped();
 
       fake.emitPen({ x: 0.1, y: 0.1 });
       fake.emitPen({ x: 0.2, y: 0.2 });
@@ -931,6 +949,9 @@ describe('capture engine', () => {
       // A stroke completing in that window must not be silently dropped.
       const noteId = await engine.startNote();
       const liveFirst = engine.getState().activePageId!;
+      // Written on, so `newTypedPage` creates a page rather than reusing it.
+      stroke(fake, [[0.05, 0.05]]);
+      await engine.flush();
 
       let release!: () => void;
       hooks.deferredTypedPage = new Promise<void>((resolve) => {
@@ -952,22 +973,206 @@ describe('capture engine', () => {
 
       expect(typedId).toBeTruthy();
       const pages = await listPages(noteId);
-      expect(pages.map((p) => p.source)).toEqual(['live', 'typed', 'live']);
       expect(pages[0].id).toBe(liveFirst);
 
-      const typedPage = pages[1];
-      expect(typedPage.id).toBe(typedId);
-      // Created and immediately finalized - the same harmless artifact as
-      // pressing "Type page" and then immediately writing.
-      expect(typedPage.strokes).toEqual([]);
-      expect(typedPage.finalizedAt).toBeTypeOf('number');
-
-      const liveAfterTyped = pages[2];
-      expect(liveAfterTyped.source).toBe('live');
+      // The typed page was still blank when the stroke claimed it, so it was
+      // switched to handwriting in place rather than left behind empty - and
+      // the stroke landed on it rather than being dropped.
+      expect(pages.map((p) => p.source)).toEqual(['live', 'live']);
+      const liveAfterTyped = pages[1];
+      expect(liveAfterTyped.id).toBe(typedId);
       expect(liveAfterTyped.strokes).toHaveLength(1);
       expect(liveAfterTyped.strokes[0].points).toHaveLength(2);
-      expect(engine.getState()).toMatchObject({ activePageId: liveAfterTyped.id, pageIndex: 2 });
+      expect(engine.getState()).toMatchObject({ activePageId: liveAfterTyped.id, pageIndex: 1 });
     });
+  });
+});
+
+describe('switching page type on a blank page (replace in place)', () => {
+  it('turns a blank live page into the typed page instead of adding one', async () => {
+    const noteId = await engine.startNote();
+    const first = engine.getState().activePageId!;
+    const finalized: string[] = [];
+    const changed: string[] = [];
+    engine.subscribePageFinalized((id) => finalized.push(id));
+    const unsubscribe = subscribePagesChanged((id) => changed.push(id));
+
+    const typedId = await engine.newTypedPage();
+    unsubscribe();
+
+    expect(typedId).toBe(first);
+    const pages = await listPages(noteId);
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toMatchObject({
+      id: first,
+      pageIndex: 0,
+      source: 'typed',
+      text: '',
+      strokes: [],
+      finalizedAt: null,
+    });
+    expect(engine.getState()).toMatchObject({ activeNoteId: noteId, activePageId: first, pageIndex: 0 });
+    // Nothing was finalized, so nothing is queued for transcription...
+    expect(finalized).toEqual([]);
+    // ...but the notes view is told the page changed under the same id.
+    expect(changed).toEqual([noteId]);
+  });
+
+  it('replaces the blank live page that follows a written one, keeping the numbering', async () => {
+    const noteId = await engine.startNote();
+    stroke(fake, [[0.1, 0.1]]);
+    await engine.newPage('manual');
+    const blank = engine.getState().activePageId!;
+
+    const typedId = await engine.newTypedPage();
+
+    expect(typedId).toBe(blank);
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => [p.pageIndex, p.source])).toEqual([
+      [0, 'live'],
+      [1, 'typed'],
+    ]);
+    expect(engine.getState()).toMatchObject({ activePageId: blank, pageIndex: 1 });
+  });
+
+  it('turns a blank typed page into a live page holding the stroke that started it', async () => {
+    const noteId = await engine.startNote();
+    const typedId = (await engine.newTypedPage())!;
+    const finalized: string[] = [];
+    engine.subscribePageFinalized((id) => finalized.push(id));
+
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+    await engine.flush();
+
+    const pages = await listPages(noteId);
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toMatchObject({ id: typedId, pageIndex: 0, source: 'live', finalizedAt: null });
+    expect(pages[0]).not.toHaveProperty('text');
+    expect(pages[0].strokes).toHaveLength(1);
+    expect(pages[0].strokes[0].points).toHaveLength(2);
+    expect(engine.getState()).toMatchObject({ activePageId: typedId, pageIndex: 0 });
+    expect(finalized).toEqual([]);
+
+    // The page is an ordinary live page again: a later stroke lands on it too,
+    // and a further switch to typed now needs a new page.
+    stroke(fake, [[0.3, 0.3]]);
+    await engine.flush();
+    expect((await getPage(typedId))!.strokes).toHaveLength(2);
+    const next = await engine.newTypedPage();
+    expect(next).not.toBe(typedId);
+    expect(finalized).toEqual([typedId]);
+  });
+
+  it('treats a whitespace-only typed page as blank', async () => {
+    const noteId = await engine.startNote();
+    const typedId = (await engine.newTypedPage())!;
+    await setPageText(typedId, '  \n ');
+
+    stroke(fake, [[0.1, 0.1]]);
+    await engine.flush();
+
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => [p.id, p.source])).toEqual([[typedId, 'live']]);
+  });
+
+  it('keeps a typed page with saved text and opens a new live page after it', async () => {
+    const noteId = await engine.startNote();
+    const typedId = (await engine.newTypedPage())!;
+    await setPageText(typedId, 'notes');
+
+    stroke(fake, [[0.1, 0.1]]);
+    await engine.flush();
+
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => p.source)).toEqual(['typed', 'live']);
+    expect(pages[0]).toMatchObject({ id: typedId, text: 'notes' });
+    expect(pages[0].finalizedAt).toBeTypeOf('number');
+  });
+
+  it('keeps a typed page whose text is typed but not saved yet', async () => {
+    const noteId = await engine.startNote();
+    const typedId = (await engine.newTypedPage())!;
+    setTypedDraft(typedId, 'still in the debounce');
+
+    try {
+      stroke(fake, [[0.1, 0.1]]);
+      await engine.flush();
+    } finally {
+      clearTypedDraft(typedId);
+    }
+
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => [p.id === typedId, p.source])).toEqual([
+      [true, 'typed'],
+      [false, 'live'],
+    ]);
+  });
+
+  it('pressing Type page on a blank typed page keeps that page', async () => {
+    const noteId = await engine.startNote();
+    const typedId = (await engine.newTypedPage())!;
+
+    expect(await engine.newTypedPage()).toBe(typedId);
+
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => [p.id, p.source, p.finalizedAt])).toEqual([[typedId, 'typed', null]]);
+    expect(engine.getState()).toMatchObject({ activePageId: typedId, pageIndex: 0 });
+
+    // Still the active typed page: pen input replaces it in place.
+    stroke(fake, [[0.1, 0.1]]);
+    await engine.flush();
+    expect((await listPages(noteId)).map((p) => [p.id, p.source])).toEqual([[typedId, 'live']]);
+  });
+
+  it('a manual New page on a blank typed page turns it into the live page', async () => {
+    const noteId = await engine.startNote();
+    const typedId = (await engine.newTypedPage())!;
+
+    expect(await engine.newPage('manual')).toBe(typedId);
+
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => [p.id, p.source, p.devicePageNum])).toEqual([[typedId, 'live', null]]);
+    expect(engine.getState()).toMatchObject({ activePageId: typedId, pageIndex: 0 });
+
+    stroke(fake, [[0.1, 0.1]]);
+    await engine.flush();
+    expect((await getPage(typedId))!.strokes).toHaveLength(1);
+  });
+
+  it('a device turn on a blank typed page turns it into the live page for the turned-to sheet', async () => {
+    const noteId = await engine.startNote();
+    const typedId = (await engine.newTypedPage())!;
+    fake.setDeviceState({ isConnected: true, storedPageCount: 4 });
+
+    expect(await engine.newPage('device-turn')).toBe(typedId);
+
+    const pages = await listPages(noteId);
+    expect(pages.map((p) => [p.id, p.source, p.devicePageNum])).toEqual([[typedId, 'live', 5]]);
+  });
+
+  it('a New page on a blank live page still adds a page (not a type switch)', async () => {
+    const noteId = await engine.startNote();
+
+    const next = await engine.newPage('manual');
+
+    expect((await listPages(noteId)).map((p) => p.id)).toEqual([expect.any(String), next]);
+    expect(engine.getState().pageIndex).toBe(1);
+  });
+
+  it('ending a note on a replaced typed page finalizes it without queuing it for transcription', async () => {
+    const noteId = await engine.startNote();
+    const typedId = (await engine.newTypedPage())!;
+    const finalized: string[] = [];
+    engine.subscribePageFinalized((id) => finalized.push(id));
+
+    await engine.endNote();
+
+    expect((await getPage(typedId))!.finalizedAt).toBeTypeOf('number');
+    expect(finalized).toEqual([]);
+    expect((await getNote(noteId))!.status).toBe('complete');
   });
 });
 

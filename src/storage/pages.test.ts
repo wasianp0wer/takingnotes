@@ -9,10 +9,12 @@ import {
   finalizePage,
   getPage,
   getPageRender,
+  isBlankPage,
   isTypedPage,
   listAllPageText,
   listPages,
   pageEndedAt,
+  replaceBlankPage,
   setPageRender,
   setPageGapAnalysis,
   setPageStrokes,
@@ -542,5 +544,152 @@ describe('listAllPageText (fix round 2, Fix 3b)', () => {
 
   it('returns an empty array when there are no pages', async () => {
     expect(await listAllPageText()).toEqual([]);
+  });
+});
+
+describe('blank pages (switching page type in place)', () => {
+  async function liveBlank(capturedAt = 1_000) {
+    const note = await createNote({ title: 'N', deviceId: 'huion:abc', pageBaseline: 0 });
+    return createPage({
+      noteId: note.id,
+      pageIndex: 2,
+      devicePageNum: 7,
+      source: 'live',
+      strokes: [],
+      capturedAt,
+    });
+  }
+
+  async function typedBlank(text = '') {
+    const note = await createNote({ title: 'N', deviceId: 'huion:abc', pageBaseline: 0 });
+    return createTypedPage({ noteId: note.id, pageIndex: 1, text, capturedAt: 1_000 });
+  }
+
+  describe('isBlankPage', () => {
+    it('is true for an open live page with no strokes', async () => {
+      expect(isBlankPage(await liveBlank())).toBe(true);
+    });
+
+    it('is false once the live page has any stroke', async () => {
+      const page = await liveBlank();
+      expect(isBlankPage(await setPageStrokes(page.id, STROKES))).toBe(false);
+    });
+
+    it('is true for an open typed page whose text is empty or whitespace only', async () => {
+      expect(isBlankPage(await typedBlank())).toBe(true);
+      expect(isBlankPage(await typedBlank('  \n\t '))).toBe(true);
+    });
+
+    it('is false for a typed page with text', async () => {
+      expect(isBlankPage(await typedBlank('hello'))).toBe(false);
+    });
+
+    it('is false for a finalized page, even an empty one', async () => {
+      const page = await liveBlank();
+      expect(isBlankPage(await finalizePage(page.id, 2_000))).toBe(false);
+    });
+
+    it('is false for a page with a transcript, a render or a gap analysis', async () => {
+      const page = await liveBlank();
+      const transcript = {
+        markdown: 'x',
+        model: 'm',
+        promptVersion: 'p',
+        status: 'done' as const,
+        error: null,
+        updatedAt: 1,
+      };
+      expect(isBlankPage({ ...page, transcript })).toBe(false);
+      expect(isBlankPage({ ...page, render: { type: 'image/png', width: 1, height: 1 } })).toBe(false);
+      expect(
+        isBlankPage({
+          ...page,
+          gapAnalysis: {
+            status: 'done',
+            at: 1,
+            model: 'm',
+            promptVersion: 'p',
+            error: null,
+            summarized: false,
+          },
+        }),
+      ).toBe(false);
+    });
+  });
+
+  describe('replaceBlankPage', () => {
+    it('turns a blank live page into a typed one, keeping its id, note and position', async () => {
+      const page = await liveBlank();
+
+      const replaced = await replaceBlankPage(page.id, {
+        source: 'typed',
+        devicePageNum: null,
+        strokes: [],
+        capturedAt: 5_000,
+      });
+
+      expect(replaced).toEqual({
+        id: page.id,
+        noteId: page.noteId,
+        pageIndex: 2,
+        devicePageNum: null,
+        source: 'typed',
+        strokes: [],
+        pointCount: 0,
+        capturedAt: 5_000,
+        render: null,
+        transcript: null,
+        finalizedAt: null,
+        text: '',
+      });
+      expect(await getPage(page.id)).toEqual(replaced);
+      expect(await listPages(page.noteId)).toHaveLength(1);
+    });
+
+    it('turns a blank typed page into a live one holding the given strokes', async () => {
+      const page = await typedBlank('   ');
+
+      const replaced = await replaceBlankPage(page.id, {
+        source: 'live',
+        devicePageNum: 3,
+        strokes: STROKES,
+        capturedAt: 6_000,
+      });
+
+      expect(replaced).toEqual({
+        id: page.id,
+        noteId: page.noteId,
+        pageIndex: 1,
+        devicePageNum: 3,
+        source: 'live',
+        strokes: STROKES,
+        pointCount: 3,
+        capturedAt: 6_000,
+        render: null,
+        transcript: null,
+        finalizedAt: null,
+      });
+      expect((await getPage(page.id))!).not.toHaveProperty('text');
+    });
+
+    it('leaves a page with content alone and returns null', async () => {
+      const typed = await typedBlank('keep me');
+      const live = await setPageStrokes((await liveBlank()).id, STROKES);
+
+      expect(
+        await replaceBlankPage(typed.id, { source: 'live', devicePageNum: null, strokes: [], capturedAt: 9 }),
+      ).toBeNull();
+      expect(
+        await replaceBlankPage(live.id, { source: 'typed', devicePageNum: null, strokes: [], capturedAt: 9 }),
+      ).toBeNull();
+      expect(await getPage(typed.id)).toEqual(typed);
+      expect(await getPage(live.id)).toEqual(live);
+    });
+
+    it('returns null for a page that does not exist', async () => {
+      expect(
+        await replaceBlankPage('nope', { source: 'typed', devicePageNum: null, strokes: [], capturedAt: 9 }),
+      ).toBeNull();
+    });
   });
 });

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { clearTypedDraft, setTypedDraft } from '@/notes/typedDrafts';
 import { setPageText } from '@/storage/pages';
 
 export interface TypedPageEditorProps {
@@ -52,6 +53,9 @@ export function TypedPageEditor({ pageId, initialText, debounceMs = 500 }: Typed
         .then(
           () => {
             persistedRef.current = value;
+            // Saved text speaks for itself in the database; a draft only
+            // matters while it is ahead of it (see `typedDrafts`).
+            if (pendingTextRef.current === value) clearTypedDraft(pageId);
             showError(null);
           },
           (err: unknown) => {
@@ -87,6 +91,7 @@ export function TypedPageEditor({ pageId, initialText, debounceMs = 500 }: Typed
   const setText = useCallback(
     (next: string) => {
       pendingTextRef.current = next;
+      setTypedDraft(pageId, next);
       setTextState(next);
       if (timerRef.current !== null) clearTimeout(timerRef.current);
       timerRef.current = setTimeout(() => {
@@ -94,7 +99,7 @@ export function TypedPageEditor({ pageId, initialText, debounceMs = 500 }: Typed
         writeNow(next);
       }, debounceMs);
     },
-    [debounceMs, writeNow],
+    [debounceMs, pageId, writeNow],
   );
 
   return (

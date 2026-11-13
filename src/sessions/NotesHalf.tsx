@@ -26,6 +26,8 @@ export interface NotesHalfProps {
   transcriptionQueue: TranscriptionQueue;
   /** K15, computed by the caller (`sessionStartedAtOf(state) !== null`). */
   sessionLocked: boolean;
+  /** Plays a recording from an offset, for a gap suggestion's time. */
+  onSeekRecording?(recordingId: string, startMs: number): void;
 }
 
 /** The notes half: Handwriting / Transcription switch, toolbar, and the viewed page. */
@@ -38,6 +40,7 @@ export function NotesHalf({
   onModeChange,
   transcriptionQueue,
   sessionLocked,
+  onSeekRecording,
 }: NotesHalfProps) {
   const engine = useCaptureEngine();
   const state = useCaptureState();
@@ -158,6 +161,7 @@ export function NotesHalf({
                 noteId={viewedPage.noteId}
                 pageId={viewedPage.id}
                 noteIsLive={state.activeNoteId === viewedPage.noteId}
+                onSeekRecording={onSeekRecording}
               />
             </div>
           )}

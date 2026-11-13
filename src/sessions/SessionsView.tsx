@@ -159,6 +159,7 @@ export function SessionsView(props?: SessionsViewProps) {
               onModeChange={store.setNotesMode}
               transcriptionQueue={queue}
               sessionLocked={sessionLocked}
+              onSeekRecording={store.seekRecording}
             />
           </section>
           <section
