@@ -300,15 +300,33 @@ describe('TaskList', () => {
     m.unmount();
   });
 
-  it('shows a source hint for calendar-sourced tasks but not manual ones', () => {
-    const calendarTask = task({ id: 'e', title: 'From cal', source: 'calendar' });
+  it('labels a syllabus deadline task, a scratchpad task, and nothing else', () => {
+    const syllabusTask = task({ id: 'e', title: 'Midterm', source: 'calendar', eventId: 'ev-syl' });
+    const typedDated = task({
+      id: 'h',
+      title: 'Essay',
+      source: 'calendar',
+      eventId: 'ev-manual',
+      dueAt: NOW + HOUR,
+    });
+    const scratch = task({ id: 'i', title: 'Idea', source: 'scratchpad' });
     const m = mount(
-      <TaskList tasks={[calendarTask, URGENT]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />,
+      <TaskList
+        tasks={[syllabusTask, typedDated, scratch, URGENT]}
+        now={NOW}
+        onAdd={noop}
+        onPatch={noop}
+        syllabusEventIds={new Set(['ev-syl'])}
+        onComplete={noop}
+        onDismiss={noop}
+      />,
     );
-    const calRow = m.container.querySelector('[data-task-id="e"]')!;
-    const manualRow = m.container.querySelector('[data-task-id="a"]')!;
-    expect(calRow.textContent).toContain('calendar');
-    expect(manualRow.textContent).not.toContain('calendar');
+    const row = (id: string) => m.container.querySelector(`[data-task-id="${id}"]`)!.textContent;
+    expect(row('e')).toContain('From syllabus');
+    expect(row('h')).not.toContain('From');
+    expect(row('i')).toContain('From scratchpad');
+    expect(row('a')).not.toContain('From');
+    expect(m.container.textContent).not.toContain('From calendar');
     m.unmount();
   });
 

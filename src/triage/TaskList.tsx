@@ -43,10 +43,19 @@ export interface TaskListProps {
   onDismiss(id: string): Promise<void> | void;
 }
 
-const SOURCE_HINT: Partial<Record<TaskRecord['source'], string>> = {
-  calendar: 'From calendar',
-  scratchpad: 'From scratchpad',
-};
+/**
+ * Where a task came from, when that is worth saying. Read from the linked
+ * event, not `source`: every dated typed task is calendar-linked to its own
+ * manual deadline, and calling that "From calendar" would be wrong.
+ */
+function sourceHintFor(
+  task: Pick<TaskRecord, 'source' | 'eventId'>,
+  syllabusEventIds: ReadonlySet<string> | undefined,
+): string | null {
+  if (task.source === 'scratchpad') return 'From scratchpad';
+  if (task.eventId !== null && syllabusEventIds?.has(task.eventId)) return 'From syllabus';
+  return null;
+}
 
 export function TaskList({
   tasks,
@@ -239,7 +248,7 @@ function TaskRow({
   // From the data, not from `dueLabel`'s copy: styling must not break the day
   // someone rewords the label.
   const overdue = task.dueAt !== null && task.dueAt < now;
-  const sourceHint = SOURCE_HINT[task.source];
+  const sourceHint = sourceHintFor(task, syllabusEventIds);
 
   return (
     <li data-task-id={task.id} className="flex flex-wrap items-center gap-2 bg-muted p-2">
