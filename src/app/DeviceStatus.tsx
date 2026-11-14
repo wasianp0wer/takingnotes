@@ -1,3 +1,4 @@
+import { Battery } from 'lucide-react';
 import { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -42,6 +43,8 @@ export function DeviceStatus({
       await controller.startStreaming();
     });
 
+  // Also how a reconnect chase is cancelled: disconnect() stops the reconnect
+  // policy and capture together, and releases whatever is left of the link.
   const disconnect = () => run(() => controller.disconnect());
 
   const dot = state.isReconnecting
@@ -64,21 +67,38 @@ export function DeviceStatus({
               ? state.deviceName || 'Connected'
               : 'Not connected'}
         </div>
-        <div className="truncate text-[11px] text-muted-foreground">
+        <div data-device-detail className="truncate text-[11px] text-muted-foreground">
           {error ?? state.status}
           {state.isConnected && ` · ${state.storedPageCount} pages on device`}
-          {/* K26/K27: hidden entirely when unknown - before the first reply, or while disconnected. */}
-          {state.batteryPercent !== null && ` · ${state.batteryPercent}% battery`}
         </div>
       </div>
-      <Button
-        size="sm"
-        variant={state.isConnected ? 'outline' : 'default'}
-        disabled={busy}
-        onClick={state.isConnected ? disconnect : connect}
-      >
-        {state.isConnected ? 'Disconnect' : busy ? 'Connecting...' : 'Connect'}
-      </Button>
+      {/* Outside the truncating text above, so a long status never pushes the
+          battery out of view. K26/K27: hidden entirely when unknown - before
+          the first reply, or while disconnected. */}
+      {state.batteryPercent !== null && (
+        <span
+          data-device-battery
+          className="flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-xs font-medium tabular-nums"
+        >
+          <Battery aria-hidden className="size-3.5" />
+          <span className="sr-only">Battery </span>
+          {state.batteryPercent}%
+        </span>
+      )}
+      {state.isReconnecting ? (
+        <Button size="sm" variant="outline" disabled={busy} onClick={disconnect}>
+          Cancel
+        </Button>
+      ) : (
+        <Button
+          size="sm"
+          variant={state.isConnected ? 'outline' : 'default'}
+          disabled={busy}
+          onClick={state.isConnected ? disconnect : connect}
+        >
+          {state.isConnected ? 'Disconnect' : busy ? 'Connecting...' : 'Connect'}
+        </Button>
+      )}
     </div>
   );
 }

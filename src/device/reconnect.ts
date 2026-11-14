@@ -4,6 +4,12 @@ export interface ReconnectDeps {
   onAttempt?: (attempt: number, delayMs: number) => void;
   onSuccess?: () => void;
   onGiveUp?: () => void;
+  /**
+   * A `reconnect()` that was already in flight when `stop()` was called
+   * succeeded anyway. The link is back but nobody wants it: the owner should
+   * release it.
+   */
+  onAbandoned?: () => void;
 }
 
 export interface ReconnectOptions {
@@ -57,7 +63,14 @@ export function createReconnectPolicy(
       if (myGen !== generation) break;
       try {
         await deps.reconnect();
-        if (myGen !== generation) break;
+        if (myGen !== generation) {
+          try {
+            deps.onAbandoned?.();
+          } catch {
+            // Suppress callback errors
+          }
+          return;
+        }
         running = false;
         try {
           deps.onSuccess?.();

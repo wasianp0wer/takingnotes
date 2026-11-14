@@ -242,6 +242,15 @@ export function createDeviceController(
         startBatteryPoll();
       },
       onGiveUp: () => setState({ isReconnecting: false }),
+      // The user cancelled the chase (disconnect()) while an attempt was in
+      // flight, and that attempt got the link back anyway. Release it, or the
+      // pad stays connected while the app has given up on it.
+      onAbandoned: () => {
+        if (capturing) return;
+        void device.disconnect().catch((err: unknown) => {
+          logEmitter.emit(`Releasing an abandoned reconnect failed: ${String(err)}`);
+        });
+      },
     },
     opts.reconnect,
   );

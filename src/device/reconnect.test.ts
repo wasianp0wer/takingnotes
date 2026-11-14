@@ -164,4 +164,45 @@ describe('createReconnectPolicy', () => {
     expect(onSuccess).toHaveBeenCalledTimes(0);
     expect(policy.isReconnecting).toBe(false);
   });
+
+  it('calls onAbandoned when a reconnect stopped mid-flight succeeds anyway', async () => {
+    let releaseHang: () => void = () => {};
+    const hung = new Promise<void>((resolve) => {
+      releaseHang = resolve;
+    });
+    const onSuccess = vi.fn();
+    const onAbandoned = vi.fn();
+    const policy = createReconnectPolicy(
+      { reconnect: () => hung, onSuccess, onAbandoned },
+      { delaysMs: [5] },
+    );
+
+    policy.start();
+    await tick(20);
+    policy.stop();
+    releaseHang();
+    await tick(20);
+
+    // The link came back after the user cancelled: the owner has to release
+    // it, or the pad stays connected while the UI says it is not.
+    expect(onAbandoned).toHaveBeenCalledTimes(1);
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it('does not call onAbandoned when a stopped reconnect fails', async () => {
+    let rejectHang: (e: Error) => void = () => {};
+    const hung = new Promise<void>((_resolve, reject) => {
+      rejectHang = reject;
+    });
+    const onAbandoned = vi.fn();
+    const policy = createReconnectPolicy({ reconnect: () => hung, onAbandoned }, { delaysMs: [5] });
+
+    policy.start();
+    await tick(20);
+    policy.stop();
+    rejectHang(new Error('down'));
+    await tick(20);
+
+    expect(onAbandoned).not.toHaveBeenCalled();
+  });
 });

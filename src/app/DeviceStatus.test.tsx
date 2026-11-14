@@ -125,11 +125,43 @@ describe('DeviceStatus', () => {
     const fake = createFakeDeviceController({ isConnected: true, deviceName: 'Huion Note' });
     renderStatus(fake);
     act(() => fake.setDeviceState({ batteryPercent: 55 }));
-    expect(container.textContent).toContain('55% battery');
+    expect(container.textContent).toContain('Battery 55%');
 
     act(() => fake.setDeviceState({ batteryPercent: null, isConnected: false, status: 'Disconnected' }));
 
     expect(container.textContent).not.toContain('battery');
+  });
+
+  it('keeps the battery outside the truncating status text, so a long status never hides it', () => {
+    const fake = createFakeDeviceController({
+      isConnected: true,
+      deviceName: 'Huion Note',
+      status: 'A very long status line that would push anything after it out of view',
+      batteryPercent: 64,
+    });
+    renderStatus(fake);
+
+    const battery = container.querySelector('[data-device-battery]');
+    const detail = container.querySelector('[data-device-detail]');
+    expect(battery?.textContent).toBe('Battery 64%');
+    expect(detail).not.toBeNull();
+    expect(detail?.contains(battery)).toBe(false);
+    expect(detail?.textContent).not.toContain('64%');
+  });
+
+  it('offers Cancel during a reconnect, which ends the chase', async () => {
+    const fake = createFakeDeviceController();
+    renderStatus(fake);
+    act(() => fake.setDeviceState({ isReconnecting: true, status: 'Reconnect attempt 1' }));
+
+    expect(button().textContent).toBe('Cancel');
+    await click(button());
+
+    // disconnect() is the controller's one path that stops the reconnect
+    // policy and capture together (endCapture), and releases the link.
+    expect(fake.calls).toEqual(['disconnect']);
+    expect(container.textContent).toContain('Not connected');
+    expect(button().textContent).toBe('Connect');
   });
 
   it('surfaces a failed connect instead of doing nothing', async () => {

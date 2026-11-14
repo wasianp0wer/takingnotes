@@ -263,6 +263,36 @@ describe('capture lifecycle', () => {
     expect(logs.filter((l) => l.includes('Reconnect attempt'))).toEqual([]);
   });
 
+  it('releases a link that a cancelled reconnect brought back after all', async () => {
+    const transport = pageCountFake(() => 0);
+    // Hold the reconnect's reopen until after the user has cancelled, so the
+    // in-flight attempt lands on a chase that no longer exists.
+    const realReopen = transport.reopen.bind(transport);
+    let releaseReopen: () => void = () => {};
+    transport.reopen = () =>
+      new Promise<void>((resolve) => {
+        releaseReopen = resolve;
+      }).then(realReopen);
+    const controller = createDeviceController(
+      () => new HuionNoteBLE(transport),
+      { reconnect: { delaysMs: [10] } },
+    );
+
+    await controller.connect();
+    await controller.startCapture();
+    transport.dropConnection();
+    await tick(30);
+    expect(controller.getState().isReconnecting).toBe(true);
+
+    await controller.disconnect();
+    releaseReopen();
+    // Handshake (~100ms, one real sleep) plus margin.
+    await tick(300);
+
+    expect(controller.getState().isReconnecting).toBe(false);
+    expect(controller.getState().isConnected).toBe(false);
+  });
+
   it('restores streaming end-to-end after a transport-level drop and reconnect', async () => {
     // Task 8: the reconnect machinery restoring the link is not enough - a
     // session that was streaming before the drop must be streaming again
