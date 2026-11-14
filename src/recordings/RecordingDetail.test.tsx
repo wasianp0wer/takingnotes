@@ -96,6 +96,24 @@ function render(recording: RecordingRecord, extra: Extra = {}) {
 }
 
 describe('RecordingDetail seek request', () => {
+  it('shows the custom player, not the native controls', async () => {
+    const recording = await seed();
+    render(recording);
+    await flushAll();
+    expect(container.querySelector('[role="slider"][aria-label="Seek"]')).toBeTruthy();
+    expect(container.querySelector('audio[controls]')).toBeNull();
+  });
+
+  it('applies a seek given before the audio URL resolves once the player mounts', async () => {
+    const recording = await seed();
+    // Rendered with the request already present, while the audio is still loading.
+    render(recording, { seek: { token: 7, startMs: 30_000 } });
+    expect(container.querySelector('audio')).toBeNull();
+    await flushAll();
+    const audio = container.querySelector('audio') as HTMLAudioElement;
+    expect(audio.currentTime).toBe(30);
+  });
+
   it('a seek request sets currentTime once per token', async () => {
     const recording = await seed();
     const onSeekApplied = vi.fn();
@@ -481,7 +499,7 @@ describe('RecordingDetail (ported from RecordingsView)', () => {
       .mockImplementation(function (this: HTMLAnchorElement) {
         clicked.push(this.download);
       });
-    const button = buttonByText('Download audio');
+    const button = container.querySelector<HTMLButtonElement>('[aria-label="Download audio"]');
     expect(button).toBeTruthy();
     await click(button!);
     await flushAll();
