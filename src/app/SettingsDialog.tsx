@@ -27,7 +27,9 @@ export function SettingsDialog() {
           <Settings />
         </Button>
       </DialogTrigger>
-      <DialogContent>
+      {/* Capped to the viewport; the header stays put and the sections scroll
+          beneath it, so the dialog never runs off screen. */}
+      <DialogContent className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)]">
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>
@@ -35,7 +37,7 @@ export function SettingsDialog() {
             Whisper runs in the browser.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
+        <div data-settings-body className="-mx-6 min-h-0 space-y-4 overflow-y-auto px-6">
           <ThemeSettings />
           <Separator />
           <TranscriptionSettings />
