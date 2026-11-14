@@ -211,6 +211,18 @@ describe('SessionPanel record prompt', () => {
     expect(recorder.links).toHaveLength(0);
   });
 
+  it('removes the prompt when audio starts elsewhere (the header Record) while it is open', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+    expect(panel().textContent).toContain('Record audio for this session?');
+
+    act(() => recorder.setState({ status: 'recording', startedAt: 0 }));
+
+    expect(panel().textContent).not.toContain('Record audio for this session?');
+    expect(recorder.links).toHaveLength(0);
+  });
+
   it('does not start the recorder when a Record click races the end of the session', async () => {
     // The panel gets an engine whose subscribe never fires, so React cannot
     // re-render the prompt away when the session ends underneath it: the Record

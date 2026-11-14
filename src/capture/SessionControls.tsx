@@ -139,8 +139,12 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
 
   // The prompt belongs to one session: once that session is no longer the
   // engine's active one there is nothing left to ask about, so it is derived
-  // away rather than cleared by an effect.
-  const promptOpen = recordPrompt !== null && capture.activeSessionId === recordPrompt.sessionId;
+  // away rather than cleared by an effect. Likewise once the recorder is busy
+  // (the header's Record started audio meanwhile): the question is answered.
+  const promptOpen =
+    recordPrompt !== null &&
+    capture.activeSessionId === recordPrompt.sessionId &&
+    audio.status === 'idle';
 
   const start = useCallback(async () => {
     setPhase('starting');
