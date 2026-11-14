@@ -239,7 +239,7 @@ describe('AppShell', () => {
     expect(tab('Sessions').getAttribute('data-state')).toBe('active');
     expect(byLabel('Notes')).toBeTruthy();
     // F4's page-turn controls stay mounted through the notes half.
-    expect(buttonByText('New page')).toBeTruthy();
+    expect(container.querySelectorAll('button[aria-label="New page"]')).toHaveLength(1);
   });
 
   it('switching to Triage and back keeps the selected session and page', async () => {

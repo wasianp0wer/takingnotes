@@ -35,10 +35,6 @@ afterEach(() => {
 });
 
 const base: NoteToolbarProps = {
-  sessionLocked: false,
-  hasActiveNote: true,
-  onNewNote: vi.fn(),
-  onEndNote: vi.fn(),
   pageCount: 2,
   viewedIndex: 0,
   onGoToPage: vi.fn(),
@@ -54,28 +50,7 @@ async function render(props: Partial<NoteToolbarProps> = {}): Promise<void> {
   });
 }
 
-function buttons(): HTMLButtonElement[] {
-  return Array.from(container.querySelectorAll('button'));
-}
-
-function buttonByText(text: string): HTMLButtonElement {
-  const found = buttons().find((b) => b.textContent?.trim() === text);
-  if (!found) {
-    throw new Error(
-      `no button with text ${JSON.stringify(text)}; have ${JSON.stringify(
-        buttons().map((b) => b.textContent?.trim()),
-      )}`,
-    );
-  }
-  return found;
-}
-
 describe('NoteToolbar', () => {
-  it('renders the actions slot', async () => {
-    await render({ actions: <span data-testid="actions-slot" /> });
-    expect(container.querySelector('[data-testid="actions-slot"]')).not.toBeNull();
-  });
-
   it('centres the page navigation and renders no title block (the session header owns it)', async () => {
     await render();
     const prev = container.querySelector('button[aria-label="Previous page"]');
@@ -83,18 +58,11 @@ describe('NoteToolbar', () => {
     expect(container.textContent).not.toContain('No note selected');
   });
 
-  it('disables New note while a session is locked', async () => {
-    await render({ sessionLocked: true });
-    expect(buttonByText('New note').disabled).toBe(true);
-  });
-
-  it('leaves New note enabled when no session is running', async () => {
-    await render({ sessionLocked: false });
-    expect(buttonByText('New note').disabled).toBe(false);
-  });
-
-  it('keeps End note enabled while locked, so ending is always reachable', async () => {
-    await render({ sessionLocked: true, hasActiveNote: true });
-    expect(buttonByText('End note').disabled).toBe(false);
+  it('has no New note or End note button and no page-turn controls (NotesHalf mounts those)', async () => {
+    await render();
+    const labels = Array.from(container.querySelectorAll('button')).map((b) => b.textContent?.trim());
+    expect(labels).not.toContain('New note');
+    expect(labels).not.toContain('End note');
+    expect(container.querySelector('button[aria-label="New page"]')).toBeNull();
   });
 });

@@ -333,6 +333,13 @@ async function startSession(withEngine: LiveCaptureEngine = engine): Promise<str
   return id;
 }
 
+async function startNote(): Promise<void> {
+  await act(async () => {
+    await engine.startNote();
+  });
+  await settle();
+}
+
 describe('SessionsView', () => {
   it('with no stored selection, selects the active note, else the newest session', async () => {
     const older = await seedNote({ title: 'Older session', startedAt: 1_000 });
@@ -388,9 +395,9 @@ describe('SessionsView', () => {
 
     expect(container.textContent).toContain('No sessions yet');
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    // New note and the page-turn controls stay reachable from the empty state.
-    expect(findButtonByText('New note')).toBeDefined();
-    expect(findButtonByText('New page')).toBeDefined();
+    // The page-turn controls stay reachable from the empty state.
+    expect(findButtonByText('New note')).toBeUndefined();
+    expect(buttonByLabel('New page')).toBeDefined();
   });
 
   it('notes and audio for one session render side by side', async () => {
@@ -450,7 +457,7 @@ describe('SessionsView', () => {
     expect(container.querySelector('[data-half="audio"]')).not.toBeNull();
     expect(container.querySelector('[data-half="audio"] audio')).toBeNull();
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(findButtonByText('New page')).toBeDefined();
+    expect(buttonByLabel('New page')).toBeDefined();
     expect(errors).not.toHaveBeenCalled();
     errors.mockRestore();
   });
@@ -560,36 +567,19 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
 
   it("mounts F4's page-turn controls", async () => {
     await render();
-    expect(findButtonByText('New page')).toBeDefined();
+    expect(buttonByLabel('New page')).toBeDefined();
   });
 
-  it('New note starts a note, selects it and marks it Live in the sidebar', async () => {
+  it('a started note is selected and marks it Live in the sidebar', async () => {
     await render();
     expect(engine.getState().activeNoteId).toBeNull();
 
-    await click(buttonByText('New note'));
+    await startNote();
 
     const activeId = engine.getState().activeNoteId;
     expect(activeId).not.toBeNull();
     expect(selectedEntryKey()).toBe(`note:${activeId}`);
     expect(entryButton(activeId!).querySelector('[data-live]')?.textContent).toBe('Live');
-  });
-
-  it("holds the shared resume lock around New note's startNote(), disabling the header's Resume meanwhile", async () => {
-    await seedNote({ title: 'Last week', startedAt: 1_000 });
-    let release: (() => void) | null = null;
-    const held = new Promise<string>((resolve) => {
-      release = () => resolve('note-id');
-    });
-    const wrapped = { ...engine, startNote: () => held } as unknown as LiveCaptureEngine;
-    await render({ withEngine: wrapped });
-    expect(headerResume()?.disabled).toBe(false);
-
-    await click(buttonByText('New note'));
-
-    expect(headerResume()?.disabled).toBe(true);
-    (release as (() => void) | null)?.();
-    await settle();
   });
 
   it('shows a done transcript, navigates pages and retries a failed one', async () => {
@@ -660,15 +650,6 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
     expect(canvas?.height).toBe(1024);
   });
 
-  it('disables New note once a session is open (K15)', async () => {
-    await render();
-    expect(buttonByText('New note').disabled).toBe(false);
-
-    await startSession();
-
-    expect(buttonByText('New note').disabled).toBe(true);
-  });
-
   it("tagging a note in the header adds the tag to the advanced filter's choices", async () => {
     await seedNote({ title: 'Needs a tag' });
     await render();
@@ -687,10 +668,10 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
 
   it('turns the blank first page into a typed page via Type page and saves what is typed into it', async () => {
     await render();
-    await click(buttonByText('New note'));
+    await startNote();
     const blank = engine.getState().activePageId!;
 
-    await click(buttonByText('Type page'));
+    await click(buttonByLabel('Type page'));
 
     // Replaced in place: same page, same position, no empty page left behind.
     expect(engine.getState()).toMatchObject({ activePageId: blank, pageIndex: 0 });
@@ -717,8 +698,8 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
 
   it('switches a blank typed page back to handwriting in place when the pen writes', async () => {
     await render();
-    await click(buttonByText('New note'));
-    await click(buttonByText('Type page'));
+    await startNote();
+    await click(buttonByLabel('Type page'));
     const pageId = engine.getState().activePageId!;
     expect(container.querySelector('textarea')).not.toBeNull();
 
@@ -738,8 +719,8 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
 
   it('keeps typing that has not autosaved yet when the pen writes, opening a new page', async () => {
     await render();
-    await click(buttonByText('New note'));
-    await click(buttonByText('Type page'));
+    await startNote();
+    await click(buttonByLabel('Type page'));
     const typedId = engine.getState().activePageId!;
 
     const ta = container.querySelector('textarea')!;
@@ -766,7 +747,7 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
 
   it('shows the transcribing message for the active, unfinalized live page', async () => {
     await render();
-    await click(buttonByText('New note'));
+    await startNote();
     // Starting a note switches to Handwriting (live follow); switch back.
     await act(async () => store.setNotesMode('transcription'));
     await settle();
@@ -776,11 +757,11 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
 
   it('does not show the transcribing message for the active typed page', async () => {
     await render();
-    await click(buttonByText('New note'));
+    await startNote();
     // Starting a note switches to Handwriting (live follow); switch back.
     await act(async () => store.setNotesMode('transcription'));
     await settle();
-    await click(buttonByText('Type page'));
+    await click(buttonByLabel('Type page'));
 
     expect(container.textContent).not.toContain(PAGE_TRANSCRIBING_MESSAGE);
   });
@@ -821,7 +802,7 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
 
   it('does not offer Resume on the active note itself', async () => {
     await render();
-    await click(buttonByText('New note'));
+    await startNote();
 
     expect(headerResume()).toBeUndefined();
   });

@@ -128,7 +128,6 @@ async function renderWith(
           mode="handwriting"
           onModeChange={() => {}}
           transcriptionQueue={fakeQueue()}
-          sessionLocked={false}
           {...props}
         />
       </CaptureProvider>,
@@ -137,12 +136,17 @@ async function renderWith(
   await settle();
 }
 
-function buttonByText(text: string): HTMLButtonElement {
-  const found = Array.from(container.querySelectorAll('button')).find(
-    (b) => b.textContent?.trim() === text,
-  );
-  if (!found) throw new Error(`no button ${JSON.stringify(text)}`);
+function buttonByLabel(label: string): HTMLButtonElement {
+  const found = container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+  if (!found) throw new Error(`no button labelled ${label}`);
   return found;
+}
+
+async function startNote(): Promise<void> {
+  await act(async () => {
+    await engine.startNote();
+  });
+  await settle();
 }
 
 async function click(el: HTMLElement): Promise<void> {
@@ -233,7 +237,7 @@ describe('NotesHalf', () => {
 
   it('the live page shows live ink', async () => {
     await renderWith({});
-    await click(buttonByText('New note'));
+    await startNote();
     const state = engine.getState();
     const pages = await listPages(state.activeNoteId!);
     const n = (await getNote(state.activeNoteId!))!;
@@ -299,25 +303,48 @@ describe('NotesHalf', () => {
 
   it('disables Type page with no active note', async () => {
     await renderWith({});
-    expect(buttonByText('Type page').disabled).toBe(true);
+    expect(buttonByLabel('Type page').disabled).toBe(true);
   });
 
   it('Type page on a note whose page is still blank turns that page into the typed page', async () => {
     await renderWith({});
-    await click(buttonByText('New note'));
+    await startNote();
     const blank = engine.getState().activePageId;
-    expect(buttonByText('Type page').disabled).toBe(false);
-    await click(buttonByText('Type page'));
+    expect(buttonByLabel('Type page').disabled).toBe(false);
+    await click(buttonByLabel('Type page'));
     expect(engine.getState()).toMatchObject({ activePageId: blank, pageIndex: 0 });
     expect((await getPage(blank!))?.source).toBe('typed');
   });
 
-  it('disables New note while the session is locked', async () => {
-    await renderWith({ sessionLocked: true });
-    expect(buttonByText('New note').disabled).toBe(true);
+  it('has no New note or End note button', async () => {
+    await renderWith({});
+    const names = Array.from(container.querySelectorAll('button')).map(
+      (b) => b.textContent?.trim() || b.getAttribute('aria-label'),
+    );
+    expect(names).not.toContain('New note');
+    expect(names).not.toContain('End note');
   });
 
-  it('disables New note and Type page while a resume is pending', async () => {
+  it('puts New page and Type page as icon buttons in the row with the Notes view switch', async () => {
+    await renderWith({});
+    const row = container.querySelector('[role="switch"]')!.closest('[data-notes-controls]')!;
+    expect(row).not.toBeNull();
+    for (const name of ['New page', 'Type page']) {
+      const btn = buttonByLabel(name);
+      expect(row.contains(btn)).toBe(true);
+      expect(btn.querySelector('svg')).not.toBeNull();
+      expect(btn.textContent?.trim()).toBe('');
+    }
+  });
+
+  it('disables New page with no active note', async () => {
+    await renderWith({});
+    expect(buttonByLabel('New page').disabled).toBe(true);
+    await startNote();
+    expect(buttonByLabel('New page').disabled).toBe(false);
+  });
+
+  it('disables Type page while a resume is pending', async () => {
     const { note } = await seedNoteEntry();
     let release: (() => void) | null = null;
     const held = new Promise<never>((_resolve, reject) => {
@@ -325,8 +352,8 @@ describe('NotesHalf', () => {
     });
     const wrapped = { ...engine, resumeNote: () => held } as unknown as LiveCaptureEngine;
     await renderWith({}, wrapped);
-    await click(buttonByText('New note'));
-    expect(buttonByText('Type page').disabled).toBe(false);
+    await startNote();
+    expect(buttonByLabel('Type page').disabled).toBe(false);
 
     const { getResumeLock } = await import('@/notes/resumeLock');
     await act(async () => {
@@ -335,13 +362,11 @@ describe('NotesHalf', () => {
         .catch(() => {});
     });
     await settle();
-    expect(buttonByText('New note').disabled).toBe(true);
-    expect(buttonByText('Type page').disabled).toBe(true);
+    expect(buttonByLabel('Type page').disabled).toBe(true);
 
     (release as (() => void) | null)?.();
     await settle();
-    expect(buttonByText('New note').disabled).toBe(false);
-    expect(buttonByText('Type page').disabled).toBe(false);
+    expect(buttonByLabel('Type page').disabled).toBe(false);
   });
 
   it('page arrows call onGoToPage', async () => {

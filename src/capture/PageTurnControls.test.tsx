@@ -189,3 +189,24 @@ describe('PageTurnControls - Page N indicator', () => {
     expect(indicator()).toBe('');
   });
 });
+
+describe('PageTurnControls - icon variant', () => {
+  it('renders an icon-only New page button with no Page N status text', async () => {
+    act(() => {
+      root.render(
+        <CaptureProvider engine={engine}>
+          <PageTurnControls variant="icon" />
+        </CaptureProvider>,
+      );
+    });
+    const btn = container.querySelector<HTMLButtonElement>('button[aria-label="New page"]')!;
+    expect(btn.querySelector('svg')).not.toBeNull();
+    expect(btn.textContent).toBe('');
+    expect(btn.disabled).toBe(true);
+    expect(btn.title).toBe('Start writing to begin a note');
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    await startNote();
+    expect(btn.disabled).toBe(false);
+    expect(btn.title).toBe('Finish this page and start a new one');
+  });
+});

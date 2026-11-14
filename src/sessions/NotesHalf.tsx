@@ -1,5 +1,8 @@
 import { useRef, useState, useSyncExternalStore } from 'react';
 
+import { Keyboard } from 'lucide-react';
+
+import { PageTurnControls } from '@/capture/PageTurnControls';
 import { useCaptureEngine, useCaptureState } from '@/capture/CaptureContext';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -24,8 +27,6 @@ export interface NotesHalfProps {
   mode: NotesMode;
   onModeChange(mode: NotesMode): void;
   transcriptionQueue: TranscriptionQueue;
-  /** K15, computed by the caller (`sessionStartedAtOf(state) !== null`). */
-  sessionLocked: boolean;
   /** Plays a recording from an offset, for a gap suggestion's time. */
   onSeekRecording?(recordingId: string, startMs: number): void;
 }
@@ -39,7 +40,6 @@ export function NotesHalf({
   mode,
   onModeChange,
   transcriptionQueue,
-  sessionLocked,
   onSeekRecording,
 }: NotesHalfProps) {
   const engine = useCaptureEngine();
@@ -75,7 +75,10 @@ export function NotesHalf({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex justify-center px-4 py-2">
+      <div
+        data-notes-controls
+        className="flex items-center justify-center gap-2 px-4 py-2"
+      >
         <Switch
           aria-label="Notes view"
           checked={mode === 'transcription'}
@@ -83,29 +86,24 @@ export function NotesHalf({
           offLabel="Handwriting"
           onLabel="Transcription"
         />
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Type page"
+          disabled={state.activeNoteId === null || creatingTypedPage || resumePending}
+          title={
+            state.activeNoteId === null
+              ? 'Start a note to begin typing'
+              : 'Finish this page and start a new, typed one'
+          }
+          onClick={() => void handleTypePage()}
+        >
+          <Keyboard aria-hidden="true" />
+        </Button>
+        {/* F4's only mount point (docs/architecture.md §4) - must stay mounted. */}
+        <PageTurnControls variant="icon" />
       </div>
       <NoteToolbar
-        // Fix round 1, Important 1 (carried over): §8.3's hazard applies to
-        // New note too, so a pending resume locks it like a running session.
-        sessionLocked={sessionLocked || resumePending}
-        hasActiveNote={state.activeNoteId !== null}
-        onNewNote={() => void resumeLock.run(() => engine.startNote())}
-        onEndNote={() => void engine.endNote()}
-        actions={
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={state.activeNoteId === null || creatingTypedPage || resumePending}
-            title={
-              state.activeNoteId === null
-                ? 'Start a note to begin typing'
-                : 'Finish this page and start a new, typed one'
-            }
-            onClick={() => void handleTypePage()}
-          >
-            Type page
-          </Button>
-        }
         pageCount={pageList.length}
         viewedIndex={viewedIndex}
         onGoToPage={onGoToPage}
