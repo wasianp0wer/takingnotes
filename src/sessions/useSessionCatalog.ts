@@ -5,6 +5,7 @@ import { listNotes } from '@/storage/notes';
 import { listFinishedRecordings } from '@/storage/recordings';
 import type { NoteRecord, RecordingRecord } from '@/storage/types';
 
+import { subscribeSessionsAssigned } from './assignSessions';
 import { buildSessionCatalog } from './catalog';
 import type { SessionCatalog } from './catalog';
 
@@ -19,8 +20,9 @@ async function loadFromStorage(): Promise<{
 }
 
 /**
- * Loads and groups the library, reloading on capture-state changes and on any
- * of the three queue signals. A sequence counter (ported from the removed
+ * Loads and groups the library, reloading on capture-state changes, on any of
+ * the three queue signals, and after the start-up sweep puts orphan notes in
+ * sessions. A sequence counter (ported from the removed
  * `RecordingsView`) makes an older load that resolves after a newer one
  * discard its result.
  *
@@ -72,6 +74,7 @@ export function useSessionCatalog(
       transcriptionQueue.subscribe(reload),
       audioQueue.subscribeChanges(reload),
       namingQueue.subscribe(reload),
+      subscribeSessionsAssigned(reload),
     ];
     return () => {
       // Invalidates any load still in flight so it cannot apply after unmount.

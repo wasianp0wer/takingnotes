@@ -173,6 +173,7 @@ describe('capture engine', () => {
       activeNoteId: noteId,
       activePageId: pages[0].id,
       pageIndex: 0,
+      sessionStartedAt: note.startedAt,
     });
     expect(seen).toHaveBeenCalledWith(engine.getState());
   });
@@ -656,15 +657,37 @@ describe('capture engine', () => {
     expect(await getSession(sessionId)).toMatchObject({ status: 'ended' });
   });
 
-  it('publishes no session start time for a bare note', async () => {
+  it('startNote opens a full session, start time and all', async () => {
     await engine.start();
 
     const noteId = await engine.startNote({ title: 'Bare' });
 
-    // A bare note still gets its own session record (Phase 1's shape, A10),
-    // but it is not a manual session, so the header shows none.
-    expect(sessionStartedAtOf(engine.getState())).toBeNull();
-    expect((await getNote(noteId))?.sessionId).toBeTruthy();
+    // Every note is a session now (small-improvements goal 7): the header
+    // shows its clock and End session, the same as for startSession.
+    const note = await getNote(noteId);
+    expect(note?.sessionId).toBeTruthy();
+    expect(sessionStartedAtOf(engine.getState())).toBe(note!.startedAt);
+  });
+
+  it('titles a pen-started note as a session and publishes its start time', async () => {
+    await engine.start();
+
+    stroke(fake, [
+      [0.1, 0.1],
+      [0.2, 0.2],
+    ]);
+
+    await vi.waitFor(() => expect(engine.getState().activeNoteId).not.toBeNull());
+    await engine.flush();
+
+    const [note] = await listNotes();
+    expect(note.title).toMatch(/^Session /);
+    expect((await getSession(note.sessionId!))?.title).toBe(note.title);
+    expect(sessionStartedAtOf(engine.getState())).toBe(note.startedAt);
+    // The anti-goal: the ink written before the note existed is on page 0.
+    const pages = await listPages(note.id);
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).toMatchObject({ pageIndex: 0, pointCount: 2 });
   });
 
   it('leaves nothing open when the session write fails', async () => {
@@ -784,15 +807,17 @@ describe('capture engine', () => {
     expect(sessionStartedAtOf(engine.getState())).toBe(startedAt);
   });
 
-  it('clears the session start time when a bare note replaces the session', async () => {
+  it('ends the open session when startNote opens the next one', async () => {
     await engine.start();
     const { sessionId, noteId } = await engine.startSession({ title: 'Seminar' });
 
-    const bare = await engine.startNote({ title: 'Bare' });
+    const next = await engine.startNote({ title: 'Next' });
 
-    // The session is gone, so the header must not still show one.
-    expect(engine.getState().activeNoteId).toBe(bare);
-    expect(sessionStartedAtOf(engine.getState())).toBeNull();
+    // The header's clock now measures the new session, not the ended one.
+    const nextNote = await getNote(next);
+    expect(engine.getState().activeNoteId).toBe(next);
+    expect(nextNote?.sessionId).not.toBe(sessionId);
+    expect(sessionStartedAtOf(engine.getState())).toBe(nextNote!.startedAt);
     expect(await getNote(noteId)).toMatchObject({ status: 'complete' });
     expect(await getSession(sessionId)).toMatchObject({ status: 'ended' });
   });

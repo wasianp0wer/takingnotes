@@ -761,25 +761,17 @@ describe('SessionPanel', () => {
     expect(button('Start session')).toBeTruthy();
   });
 
-  it('starting over a pen-started bare note completes it', async () => {
+  it('shows a pen-started note as a running session', async () => {
     render();
-    // The student writes before pressing Start: the pen auto-starts a bare note.
+    // The student writes before pressing Start: the pen opens a session.
     fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
     fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
     await settle();
-    const bare = engine.getState().activeNoteId;
-    expect(bare).not.toBeNull();
-    // A bare note is not a session, so the control still offers Start.
-    expect(button('Start session')).toBeTruthy();
+    expect(engine.getState().activeNoteId).not.toBeNull();
 
-    clock += 5000;
-    await click(button('Start session'));
-    await settle();
-
-    const notes = await listNotes();
-    expect(notes.find((n) => n.id === bare)).toMatchObject({ status: 'complete' });
-    expect(engine.getState().activeNoteId).not.toBe(bare);
-    // The clock runs from the session, not from the bare note.
+    // Every note is a session (small improvements, goal 7): clock and End
+    // session, and no Start session to open a second one over it.
+    expect(button('End session')).toBeTruthy();
     expect(panel().textContent).toContain('0:00');
   });
 

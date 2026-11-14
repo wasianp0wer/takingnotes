@@ -823,7 +823,7 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
     expect(container.textContent).not.toContain('Writing still goes to');
   });
 
-  it('does not show the banner for a bare, pen-started note (an active note with no locked session)', async () => {
+  it('shows the banner for a pen-started note, which is a session too', async () => {
     const lastWeek = await seedNote({ title: 'Last week', startedAt: 1_000 });
     const fake = createFakeDeviceController();
     const bareEngine = createCaptureEngine({ controller: fake });
@@ -836,7 +836,7 @@ describe('SessionsView (ported from NotesView and RecordingsView)', () => {
 
     await click(entryButton(lastWeek.id));
 
-    expect(container.textContent).not.toContain('Writing still goes to');
+    expect(container.textContent).toContain('Writing still goes to');
     bareEngine.dispose();
   });
 

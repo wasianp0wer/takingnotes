@@ -5,8 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine } from '@/capture/engine';
 import type { LiveCaptureEngine } from '@/capture/engine';
+import { assignSessionsToOrphanNotes } from '@/sessions/assignSessions';
 import { useSessionCatalog } from '@/sessions/useSessionCatalog';
-import { createNote } from '@/storage/notes';
+import { createNote, listNotes } from '@/storage/notes';
 import { createFakeDeviceController } from '@/test/fakeDeviceController';
 import { resetDatabase } from '@/test/resetDb';
 import type { CaptureEngine, CaptureState } from '@/capture/types';
@@ -143,6 +144,29 @@ describe('useSessionCatalog', () => {
     await act(async () => signal.fire());
     await settle();
     expect(keys()).toBe(`note:${n.id}`);
+  });
+
+  it('reloads when the start-up sweep puts orphan notes in sessions', async () => {
+    const legacy = await createNote({
+      title: 'legacy',
+      deviceId: 'd',
+      pageBaseline: 0,
+      sessionId: null,
+    });
+    const sessioned: string[] = [];
+    await render(async () => {
+      const notes = await listNotes();
+      sessioned.push(notes.filter((n) => typeof n.sessionId === 'string').map((n) => n.id).join());
+      return { notes, finished: [] };
+    });
+    expect(sessioned.at(-1)).toBe('');
+
+    await act(async () => {
+      await assignSessionsToOrphanNotes();
+    });
+    await settle();
+
+    expect(sessioned.at(-1)).toBe(legacy.id);
   });
 
   describe('capture state', () => {
