@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createEvent, deleteEvent, listEvents, updateEvent } from '@/storage/events';
 import { setSettingValue } from '@/storage/settingKeys';
-import { listTasks, updateTask } from '@/storage/tasks';
+import { createTask, listTasks, updateTask } from '@/storage/tasks';
 import { resetDatabase } from '@/test/resetDb';
 import { syncTasksFromCalendar } from '@/triage/generateTasks';
 
@@ -43,6 +43,21 @@ describe('syncTasksFromCalendar', () => {
     const second = await syncTasksFromCalendar();
     expect(second).toEqual({ create: [], update: [], dismiss: [] });
     expect(await listTasks()).toHaveLength(1);
+  });
+
+  it('links a pre-existing dated manual task to a new deadline in one sync', async () => {
+    const dueAt = Date.now() + 24 * HOUR;
+    const task = await createTask({ title: 'Old dated task', dueAt });
+
+    const plan = await syncTasksFromCalendar();
+
+    expect(plan).toEqual({ create: [], update: [], dismiss: [] });
+    const events = await listEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ title: 'Old dated task', kind: 'deadline', startsAt: dueAt });
+    expect(await listTasks()).toEqual([
+      expect.objectContaining({ id: task.id, source: 'calendar', eventId: events[0]!.id, dueAt }),
+    ]);
   });
 
   it('honors the stored lookahead setting', async () => {

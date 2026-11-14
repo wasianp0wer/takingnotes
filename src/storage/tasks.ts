@@ -17,9 +17,13 @@ export interface CreateTaskInput {
   completedAt?: number | null;
 }
 
-export async function createTask(input: CreateTaskInput): Promise<TaskRecord> {
-  const now = Date.now();
-  const task: TaskRecord = {
+/**
+ * The one place a task record's shape and defaults are decided. Pure, so a
+ * caller writing inside its own transaction (taskDeadlines.ts) builds exactly
+ * what `createTask` would.
+ */
+export function buildTaskRecord(input: CreateTaskInput, now: number = Date.now()): TaskRecord {
+  return {
     id: newId(),
     title: input.title,
     required: input.required ?? true,
@@ -32,7 +36,10 @@ export async function createTask(input: CreateTaskInput): Promise<TaskRecord> {
     updatedAt: input.updatedAt ?? input.createdAt ?? now,
     completedAt: input.completedAt ?? null,
   };
+}
 
+export async function createTask(input: CreateTaskInput): Promise<TaskRecord> {
+  const task = buildTaskRecord(input);
   const db = await openNotesDb();
   await db.put('tasks', task);
   return task;

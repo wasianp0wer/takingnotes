@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { createEvent, deleteEvent, listEvents, updateEvent } from '@/storage/events';
-import { createTask, listTasks, updateTask } from '@/storage/tasks';
+import { listTasks, updateTask } from '@/storage/tasks';
 import type { CreateTaskInput } from '@/storage/tasks';
 import type { CalendarEventRecord, TaskRecord } from '@/storage/types';
 import type { EventFormValue } from '@/triage/eventForm';
 import { syncTasksFromCalendar } from '@/triage/generateTasks';
 import { completeTask as completeTaskAction, dismissTask as dismissTaskAction } from '@/triage/taskActions';
+import { addTaskWithDeadline, updateTaskSchedule } from '@/triage/taskDeadlines';
 
 export type TaskPatch = Partial<Pick<TaskRecord, 'title' | 'required' | 'estimatedMinutes' | 'dueAt'>>;
 
@@ -126,12 +127,23 @@ export function useTriageData(opts?: { syncIntervalMs?: number }): TriageData {
 
   const addTask = useCallback(
     (input: CreateTaskInput, opts?: { rethrow?: boolean }): Promise<void> =>
-      runMutation(() => createTask(input), opts),
+      runMutation(() => addTaskWithDeadline(input), opts),
     [runMutation],
   );
 
+  /**
+   * Title and date go through `updateTaskSchedule`, which writes them through
+   * to the task's deadline event; the other fields are the task's alone.
+   */
   const patchTask = useCallback(
-    (id: string, patch: TaskPatch): Promise<void> => runMutation(() => updateTask(id, patch)),
+    (id: string, patch: TaskPatch): Promise<void> =>
+      runMutation(async () => {
+        const { title, dueAt, ...rest } = patch;
+        if (title !== undefined || dueAt !== undefined) {
+          await updateTaskSchedule(id, { title, dueAt });
+        }
+        if (Object.keys(rest).length > 0) await updateTask(id, rest);
+      }),
     [runMutation],
   );
 

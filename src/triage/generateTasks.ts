@@ -4,6 +4,7 @@ import { createTask, listTasks, updateTask } from '@/storage/tasks';
 import type { CalendarEventRecord, TaskRecord } from '@/storage/types';
 import { addLocalDays, endOfLocalDay, startOfLocalDay } from '@/triage/dates';
 import { dismissTask } from '@/triage/taskActions';
+import { linkDatedManualTasks } from '@/triage/taskDeadlines';
 
 export interface NewTask {
   title: string;
@@ -131,6 +132,9 @@ export function syncTasksFromCalendar(now?: number): Promise<TaskSyncPlan> {
 }
 
 async function runSync(now: number): Promise<TaskSyncPlan> {
+  // Every dated task is a deadline: link any manual one (from before that
+  // rule) first, so the plan below already sees it as calendar-sourced.
+  await linkDatedManualTasks();
   const [events, tasks, lookahead] = await Promise.all([
     listEvents(),
     listTasks(),
