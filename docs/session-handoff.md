@@ -1,5 +1,87 @@
 # Session handoff
 
+## 2026-11-14 session: small improvements (branch `nov-14-small-improvements`)
+
+Cut from `main` at `e01e3da`. **Not merged, not pushed.** The first three
+commits are the owner's previously uncommitted work (transcript find bar,
+device battery and cancellable reconnect, settings height cap), committed
+as-is. Design `docs/superpowers/specs/2026-11-14-small-improvements-design.md`,
+plan `docs/superpowers/plans/2026-11-14-small-improvements.md` (9 tasks).
+
+Verified at the branch head: **2226 tests in 171 files**, `npx tsc -b` clean,
+`npm run lint` 0 errors (6 pre-existing warnings), `npm run build` succeeds.
+
+### What changed
+
+- **Recording player** (`src/recordings/RecordingPlayer.tsx`): custom
+  play/pause, scrub bar, ±15 s, speed (1×→1.25×→1.5×→2×→0.75×), download. The
+  length comes from `recording.durationMs` when the WebM reports `Infinity`.
+- **Pinned player and find bar:** in the audio half only the transcript
+  scrolls (`[data-audio-scroll]`); the player and the Cmd/Ctrl+F bar stay on
+  top. The model name now sits under the scroller.
+- **Triage:**
+  - New events default to 21:00.
+  - Clicking a day opens a dialog listing that day's events, with Add event.
+  - **A dated task is a deadline:** adding one creates a linked calendar
+    deadline in the same transaction (`src/triage/taskDeadlines.ts`). Every
+    sync first links old dated manual tasks. A date without a time stays an
+    all-day, end-of-day deadline, so no existing due time moved.
+  - **Inline editing:** click a task's title or due date to edit it, and the
+    deadline follows. Clearing the date deletes a hand-made deadline. A
+    syllabus deadline can't be cleared.
+  - **Deleting or re-kinding a hand-made deadline** keeps its task, which
+    becomes plain and undated; syllabus deadlines still dismiss their task.
+    Only syllabus tasks are labelled with a source ("From syllabus"), plus
+    scratchpad tasks.
+- **Settings:** left-hand tabs (Theme, Transcription, Audio, Backup).
+- **Sessions:**
+  - There is no New note and no notes-half End note.
+  - A pen-started note is a full session (`Session <stamp>`, clock,
+    End session), but it never starts audio.
+  - **Start session asks** "Record audio for this session?" (Record or
+    Not now) after the pad step. There is no prompt if audio is already
+    running.
+  - A start-up sweep (`src/sessions/assignSessions.ts`, after the legacy
+    migration, and even if the migration fails) gives every session-less
+    note its own ended session. Uncategorized now holds only recordings that
+    belong to no session.
+- **Notes half:** New page and Type page are icon buttons beside the
+  Handwriting/Transcription switch.
+
+### Rulings taken on the owner's behalf
+
+- **Type page has no "Handwrite page" state.** The page-type swap happens in
+  the engine (`edd9820`). *Cost if wrong:* you ask for a toggle.
+- **Deleting or re-kinding a hand-made deadline unlinks its task** rather than
+  dismissing it. *Cost if wrong:* an undated task to dismiss by hand.
+- **Hand-made deadlines show no source label** ("From calendar" is gone).
+- **The day panel is a Dialog, not a Popover,** because adding a Popover
+  would mean a new dependency.
+
+### Owner checks (tests can't reach these)
+
+- [ ] Scrub and skip in a **real MediaRecorder WebM recording** (Chrome and
+  Electron). happy-dom can't play media.
+- [ ] The Start session prompt with a real pad chooser. The prompt appears
+  only once the pad step settles (connected or cancelled).
+- [ ] The first start on your real data. Old Uncategorized notes should move
+  under Sessions, and old dated tasks should appear on the calendar as
+  all-day deadlines.
+
+### Deferred minors
+
+Each was triaged OK-to-defer by the final review:
+- An overlapping sweep call drops the second caller's options.
+- One failing note stops that start's session sweep.
+- `AppShell.test` is order-dependent.
+- The record prompt reappears if header-started audio stops again.
+- Re-kinding a deadline back to `deadline` makes a second, linked task.
+- The settled ref blocks a title retry while another save is in flight.
+- Playback speed resets on remount.
+- The Slider thumb is round, against the square-corners style.
+
+---
+
 ## 2026-11-11 session: TakingNotes as a desktop app (branch `electron`)
 
 Paste or reference this at the start of the next session. It is the summary of
