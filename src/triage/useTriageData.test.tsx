@@ -128,8 +128,13 @@ describe('useTriageData', () => {
     await flush();
   });
 
-  it('removeEvent deletes the event and dismisses its task', async () => {
-    const event = await createEvent({ title: 'Lab', kind: 'deadline', startsAt: Date.now() + 24 * HOUR });
+  it('removeEvent deletes a syllabus event and dismisses its task', async () => {
+    const event = await createEvent({
+      title: 'Lab',
+      kind: 'deadline',
+      startsAt: Date.now() + 24 * HOUR,
+      source: 'syllabus',
+    });
 
     const m = mount(<Probe />);
     await waitFor(() => {
@@ -143,6 +148,31 @@ describe('useTriageData', () => {
     expect(latest.events.some((e) => e.id === event.id)).toBe(false);
     const task = latest.tasks.find((t) => t.eventId === event.id);
     expect(task?.status).toBe('dismissed');
+
+    m.unmount();
+    await flush();
+  });
+
+  it('removeEvent deletes a manual deadline and keeps its task as a plain undated one', async () => {
+    const event = await createEvent({ title: 'Lab', kind: 'deadline', startsAt: Date.now() + 24 * HOUR });
+
+    const m = mount(<Probe />);
+    await waitFor(() => {
+      expect(latest.tasks.some((t) => t.eventId === event.id && t.status === 'open')).toBe(true);
+    });
+    const id = latest.tasks.find((t) => t.eventId === event.id)!.id;
+
+    await act(async () => {
+      await latest.removeEvent(event.id);
+    });
+
+    expect(latest.events.some((e) => e.id === event.id)).toBe(false);
+    expect(latest.tasks.find((t) => t.id === id)).toMatchObject({
+      status: 'open',
+      source: 'manual',
+      eventId: null,
+      dueAt: null,
+    });
 
     m.unmount();
     await flush();

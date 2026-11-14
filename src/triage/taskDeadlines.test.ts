@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { createEvent, getEvent, listEvents } from '@/storage/events';
-import { createTask, getTask, listTasks } from '@/storage/tasks';
+import { createEvent, getEvent, listEvents, updateEvent } from '@/storage/events';
+import { createTask, getTask, listTasks, updateTask } from '@/storage/tasks';
 import { resetDatabase } from '@/test/resetDb';
 import { addLocalDays, endOfLocalDay, startOfLocalDay } from '@/triage/dates';
 import { dueAtForEvent, syncTasksFromCalendar } from '@/triage/generateTasks';
 import {
   addTaskWithDeadline,
+  deleteEventAndUnlinkTasks,
   eventScheduleForDueAt,
   linkDatedManualTasks,
   updateTaskSchedule,
@@ -84,7 +85,7 @@ describe('addTaskWithDeadline', () => {
     const task = await addTaskWithDeadline({ title: 'Essay', dueAt: threeWeeksOut() });
 
     const plan = await syncTasksFromCalendar();
-    expect(plan).toEqual({ create: [], update: [], dismiss: [] });
+    expect(plan).toEqual({ create: [], update: [], dismiss: [], unlink: [] });
     const tasks = await listTasks();
     expect(tasks).toHaveLength(1);
     expect(tasks[0]).toMatchObject({ id: task.id, status: 'open' });
@@ -214,5 +215,97 @@ describe('linkDatedManualTasks', () => {
     expect(await linkDatedManualTasks()).toBe(0);
     expect(await listEvents()).toEqual([]);
     for (const t of [done, dismissed, undated]) expect(await getTask(t.id)).toEqual(t);
+  });
+});
+
+describe('deleteEventAndUnlinkTasks', () => {
+  it('deletes a manual deadline and leaves its task open, undated and plain', async () => {
+    const task = await addTaskWithDeadline({ title: 'Essay', dueAt: threeWeeksOut() });
+
+    await deleteEventAndUnlinkTasks(task.eventId!);
+    await syncTasksFromCalendar();
+
+    expect(await listEvents()).toEqual([]);
+    expect(await getTask(task.id)).toMatchObject({
+      status: 'open',
+      source: 'manual',
+      eventId: null,
+      dueAt: null,
+    });
+  });
+
+  it('leaves a finished task of a deleted manual deadline alone', async () => {
+    const task = await addTaskWithDeadline({ title: 'Essay', dueAt: threeWeeksOut() });
+    await updateTask(task.id, { status: 'done', completedAt: Date.now() });
+
+    await deleteEventAndUnlinkTasks(task.eventId!);
+
+    expect(await getTask(task.id)).toMatchObject({ status: 'done', eventId: task.eventId });
+  });
+
+  it('still dismisses the task of a deleted syllabus deadline', async () => {
+    const event = await createEvent({
+      title: 'Midterm',
+      kind: 'deadline',
+      startsAt: Date.now() + 3_600_000,
+      source: 'syllabus',
+    });
+    await syncTasksFromCalendar();
+
+    await deleteEventAndUnlinkTasks(event.id);
+    await syncTasksFromCalendar();
+
+    expect(await listEvents()).toEqual([]);
+    const tasks = await listTasks();
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({ status: 'dismissed', source: 'calendar', eventId: event.id });
+  });
+
+  it('deletes an event that has no tasks', async () => {
+    const event = await createEvent({ title: 'Lecture', kind: 'event', startsAt: Date.now() });
+
+    await deleteEventAndUnlinkTasks(event.id);
+
+    expect(await listEvents()).toEqual([]);
+    expect(await listTasks()).toEqual([]);
+  });
+});
+
+describe('re-kinding a deadline', () => {
+  it('unlinks the task of a manual deadline switched to an event on the next sync', async () => {
+    const task = await addTaskWithDeadline({ title: 'Essay', dueAt: threeWeeksOut() });
+
+    await updateEvent(task.eventId!, { kind: 'event' });
+    const plan = await syncTasksFromCalendar();
+
+    expect(plan.unlink).toEqual([task.id]);
+    expect(await getTask(task.id)).toMatchObject({
+      status: 'open',
+      source: 'manual',
+      eventId: null,
+      dueAt: null,
+    });
+    // Unlinked and undated, so later syncs leave it alone.
+    expect(await syncTasksFromCalendar()).toEqual({
+      create: [],
+      update: [],
+      dismiss: [],
+      unlink: [],
+    });
+  });
+
+  it('still dismisses the task of a syllabus deadline switched to an event', async () => {
+    const event = await createEvent({
+      title: 'Midterm',
+      kind: 'deadline',
+      startsAt: Date.now() + 3_600_000,
+      source: 'syllabus',
+    });
+    await syncTasksFromCalendar();
+
+    await updateEvent(event.id, { kind: 'event' });
+    await syncTasksFromCalendar();
+
+    expect((await listTasks())[0]).toMatchObject({ status: 'dismissed', eventId: event.id });
   });
 });

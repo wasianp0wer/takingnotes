@@ -12,7 +12,7 @@ import {
 const NOW = new Date(2026, 8, 28, 15).getTime();
 const TODAY = new Date(2026, 8, 28).getTime();
 const HOUR = 3_600_000;
-const EMPTY: TaskSyncPlan = { create: [], update: [], dismiss: [] };
+const EMPTY: TaskSyncPlan = { create: [], update: [], dismiss: [], unlink: [] };
 
 function event(overrides: Partial<CalendarEventRecord> & { id: string }): CalendarEventRecord {
   return {
@@ -56,6 +56,11 @@ function apply(tasks: TaskRecord[], plan: TaskSyncPlan): TaskRecord[] {
     return u ? { ...t, ...u.patch } : t;
   });
   next = next.map((t) => (plan.dismiss.includes(t.id) ? { ...t, status: 'dismissed' as const } : t));
+  next = next.map((t) =>
+    plan.unlink.includes(t.id)
+      ? { ...t, source: 'manual' as const, eventId: null, dueAt: null }
+      : t,
+  );
   plan.create.forEach((c, i) => next.push({ ...c, id: `new-${i}`, completedAt: null }));
   return next;
 }
@@ -258,15 +263,33 @@ describe('planTaskSync', () => {
     expect(plan.update).toEqual([]);
   });
 
-  it('dismisses the open task of an event switched to the event kind', () => {
+  it('dismisses the open task of a syllabus event switched to the event kind', () => {
     const plan = planTaskSync(
-      [event({ id: 'e1', kind: 'event', title: 'Lecture' })],
+      [event({ id: 'e1', kind: 'event', title: 'Lecture', source: 'syllabus' })],
       [task({ id: 't1', eventId: 'e1', title: 'Old', dueAt: NOW })],
       NOW,
       7,
     );
 
     expect(plan.dismiss).toEqual(['t1']);
+    expect(plan.unlink).toEqual([]);
+    expect(plan.update).toEqual([]);
+    expect(plan.create).toEqual([]);
+  });
+
+  it('unlinks, not dismisses, the open task of a manual deadline switched to the event kind', () => {
+    const plan = planTaskSync(
+      [event({ id: 'e1', kind: 'event', title: 'Lecture', source: 'manual' })],
+      [
+        task({ id: 't1', eventId: 'e1', title: 'Old', dueAt: NOW }),
+        task({ id: 't-done', eventId: 'e1', status: 'done', completedAt: NOW }),
+      ],
+      NOW,
+      7,
+    );
+
+    expect(plan.unlink).toEqual(['t1']);
+    expect(plan.dismiss).toEqual([]);
     expect(plan.update).toEqual([]);
     expect(plan.create).toEqual([]);
   });
@@ -333,7 +356,8 @@ describe('planTaskSync', () => {
     const once = planTaskSync(events, tasks, NOW, 7);
     expect(once.create).toHaveLength(1);
     expect(once.update).toHaveLength(1);
-    expect(once.dismiss).toEqual(['t-event-kind', 't-orphan']);
+    expect(once.dismiss).toEqual(['t-orphan']);
+    expect(once.unlink).toEqual(['t-event-kind']);
 
     const after = apply(tasks, once);
     expect(planTaskSync(events, after, NOW, 7)).toEqual(EMPTY);

@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { createEvent, deleteEvent, listEvents, updateEvent } from '@/storage/events';
+import { createEvent, listEvents, updateEvent } from '@/storage/events';
 import { listTasks, updateTask } from '@/storage/tasks';
 import type { CreateTaskInput } from '@/storage/tasks';
 import type { CalendarEventRecord, TaskRecord } from '@/storage/types';
 import type { EventFormValue } from '@/triage/eventForm';
 import { syncTasksFromCalendar } from '@/triage/generateTasks';
 import { completeTask as completeTaskAction, dismissTask as dismissTaskAction } from '@/triage/taskActions';
-import { addTaskWithDeadline, updateTaskSchedule } from '@/triage/taskDeadlines';
+import {
+  addTaskWithDeadline,
+  deleteEventAndUnlinkTasks,
+  updateTaskSchedule,
+} from '@/triage/taskDeadlines';
 
 export type TaskPatch = Partial<Pick<TaskRecord, 'title' | 'required' | 'estimatedMinutes' | 'dueAt'>>;
 
@@ -122,7 +126,7 @@ export function useTriageData(opts?: { syncIntervalMs?: number }): TriageData {
   );
 
   const removeEvent = useCallback(
-    (id: string): Promise<void> => runMutation(() => deleteEvent(id)),
+    (id: string): Promise<void> => runMutation(() => deleteEventAndUnlinkTasks(id)),
     [runMutation],
   );
 

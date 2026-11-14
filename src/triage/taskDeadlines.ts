@@ -113,6 +113,41 @@ export async function updateTaskSchedule(
 }
 
 /**
+ * A plain undated task: what a typed task becomes when its manual deadline
+ * stops being one, so the task outlives the calendar entry instead of
+ * vanishing with it.
+ */
+export function unlinkedTask(task: TaskRecord, now: number): TaskRecord {
+  return { ...task, source: 'manual', eventId: null, dueAt: null, updatedAt: now };
+}
+
+/**
+ * Deletes an event (the calendar's Delete). A manual deadline is the one a
+ * typed task owns, so its open tasks are unlinked into plain undated tasks in
+ * the same transaction; the sync could not tell afterwards, since the deleted
+ * event's source goes with it. A syllabus event's tasks are left linked, and
+ * the next sync dismisses them as before.
+ */
+export async function deleteEventAndUnlinkTasks(id: string): Promise<void> {
+  const now = Date.now();
+  const db = await openNotesDb();
+  const tx = db.transaction(['events', 'tasks'], 'readwrite');
+  const tasks = tx.objectStore('tasks');
+  const events = tx.objectStore('events');
+
+  const event = await events.get(id);
+  const writes: Promise<unknown>[] = [events.delete(id)];
+  if (event?.source === 'manual') {
+    const linked = await tasks.index('by-event').getAll(IDBKeyRange.only(id));
+    for (const task of linked) {
+      if (task.status === 'open') writes.push(tasks.put(unlinkedTask(task, now)));
+    }
+  }
+  await Promise.all(writes);
+  await tx.done;
+}
+
+/**
  * The upgrade sweep: every open manual task with a date gets its deadline and
  * is linked. Idempotent, since a linked task is no longer `source: 'manual'`.
  * Returns how many tasks it linked.

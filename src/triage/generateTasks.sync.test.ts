@@ -41,7 +41,7 @@ describe('syncTasksFromCalendar', () => {
     });
 
     const second = await syncTasksFromCalendar();
-    expect(second).toEqual({ create: [], update: [], dismiss: [] });
+    expect(second).toEqual({ create: [], update: [], dismiss: [], unlink: [] });
     expect(await listTasks()).toHaveLength(1);
   });
 
@@ -51,7 +51,7 @@ describe('syncTasksFromCalendar', () => {
 
     const plan = await syncTasksFromCalendar();
 
-    expect(plan).toEqual({ create: [], update: [], dismiss: [] });
+    expect(plan).toEqual({ create: [], update: [], dismiss: [], unlink: [] });
     const events = await listEvents();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ title: 'Old dated task', kind: 'deadline', startsAt: dueAt });

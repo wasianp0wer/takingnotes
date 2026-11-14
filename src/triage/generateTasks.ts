@@ -28,6 +28,12 @@ export interface TaskSyncPlan {
   create: NewTask[];
   update: TaskSyncUpdate[];
   dismiss: string[];
+  /**
+   * Open tasks of a manual deadline that stopped being a deadline: they become
+   * plain undated tasks rather than being dismissed, since a typed task owns
+   * its manual deadline and must not vanish with it.
+   */
+  unlink: string[];
 }
 
 /** Architecture §3.4: all-day items are due at the end of their local day. */
@@ -56,7 +62,7 @@ export function planTaskSync(
   now: number,
   lookaheadDays: number,
 ): TaskSyncPlan {
-  const plan: TaskSyncPlan = { create: [], update: [], dismiss: [] };
+  const plan: TaskSyncPlan = { create: [], update: [], dismiss: [], unlink: [] };
   const windowStart = startOfLocalDay(now);
   const windowEnd = addLocalDays(windowStart, normalizeLookaheadDays(lookaheadDays));
 
@@ -75,7 +81,7 @@ export function planTaskSync(
     const open = own.filter((t) => t.status === 'open').sort(byAge);
 
     if (event.kind !== 'deadline') {
-      plan.dismiss.push(...open.map((t) => t.id));
+      (event.source === 'manual' ? plan.unlink : plan.dismiss).push(...open.map((t) => t.id));
       continue;
     }
 
@@ -146,5 +152,8 @@ async function runSync(now: number): Promise<TaskSyncPlan> {
   // Through `dismissTask`, so "dismissed" means one thing everywhere: the
   // status *and* a cleared `completedAt`.
   for (const id of plan.dismiss) await dismissTask(id);
+  for (const id of plan.unlink) {
+    await updateTask(id, { source: 'manual', eventId: null, dueAt: null });
+  }
   return plan;
 }
