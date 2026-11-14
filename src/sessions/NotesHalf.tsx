@@ -93,7 +93,7 @@ export function NotesHalf({
           disabled={state.activeNoteId === null || creatingTypedPage || resumePending}
           title={
             state.activeNoteId === null
-              ? 'Start a note to begin typing'
+              ? 'Start a session or write on the pad to begin'
               : 'Finish this page and start a new, typed one'
           }
           onClick={() => void handleTypePage()}

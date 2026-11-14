@@ -57,7 +57,9 @@ export function PageTurnControls({ variant = 'button' }: { variant?: 'button' | 
   }
 
   const title =
-    activeNoteId === null ? 'Start writing to begin a note' : 'Finish this page and start a new one';
+    activeNoteId === null
+      ? 'Start a session or write on the pad to begin'
+      : 'Finish this page and start a new one';
 
   if (variant === 'icon') {
     return (

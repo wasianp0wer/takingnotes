@@ -203,7 +203,7 @@ describe('PageTurnControls - icon variant', () => {
     expect(btn.querySelector('svg')).not.toBeNull();
     expect(btn.textContent).toBe('');
     expect(btn.disabled).toBe(true);
-    expect(btn.title).toBe('Start writing to begin a note');
+    expect(btn.title).toBe('Start a session or write on the pad to begin');
     expect(container.querySelector('[role="status"]')).toBeNull();
     await startNote();
     expect(btn.disabled).toBe(false);

@@ -60,7 +60,7 @@ export function createResumeLock(): ResumeLock {
  * Module-level singleton, the same shape `src/transcription/startTranscription.ts`
  * uses for the transcription queue. Its users (`SessionControls` in the
  * AppShell header, `ResumeButton` in the Sessions header, and
- * `NotesHalf`'s New note) sit in separate subtrees, and a plain prop or a React
+ * `NotesHalf`'s Type page button) sit in separate subtrees, and a plain prop or a React
  * context would need a provider threaded through `AppShell` for a value this
  * small.
  */

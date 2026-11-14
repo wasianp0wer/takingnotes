@@ -304,6 +304,7 @@ describe('NotesHalf', () => {
   it('disables Type page with no active note', async () => {
     await renderWith({});
     expect(buttonByLabel('Type page').disabled).toBe(true);
+    expect(buttonByLabel('Type page').title).toBe('Start a session or write on the pad to begin');
   });
 
   it('Type page on a note whose page is still blank turns that page into the typed page', async () => {

@@ -59,7 +59,7 @@ export interface CaptureEngine {
   /**
    * Finalizes the active page and makes a new *typed* page the active page
    * (K32, K35). No active note -> no-op, resolves null, mirroring `newPage`'s
-   * own A7 rule: starting a note at all (pen input, or "New note") is a
+   * own A7 rule: starting a note at all (pen input, or starting a session) is a
    * precondition. Pen input while the active page is typed opens a new
    * *live* page instead of writing ink into it (K34) - that is this
    * interface's implementation's business (`src/capture/engine.ts`), not

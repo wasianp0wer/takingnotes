@@ -1124,10 +1124,11 @@ navigation and before F4's `<PageTurnControls />` (which must stay mounted -
 it is F4's only mount point, §4); `banner` renders as a full-width row below
 the whole toolbar row.
 
-`NoteToolbarProps.sessionLocked` already exists for S1: when `true`, "New
-note" is disabled (K15 - a session locks you into its note) while "End note"
-deliberately stays enabled, since ending must never be reachable only by
-reload.
+`NoteToolbar` no longer has "New note" or "End note" buttons (small
+improvements, 2026-11-14): a note starts with a session (the header's Start
+session) or with pen input on the pad. The session lock (K15 - a session
+locks you into its note) now lives in `sessionLocked` on
+`SessionHeader`/`ResumeButton`, which disables Resume while a session runs.
 
 One line for S5: `NoteList`'s "No notes yet - write on the pad to start one"
 empty state is not S5's to change. A tag filter that matches nothing still
