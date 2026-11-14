@@ -143,6 +143,10 @@ function TaskRow({
   const [dueTime, setDueTime] = useState('');
   const [editError, setEditError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // Set once the title editor has been settled (saved or cancelled), so the
+  // blur that follows - or that a browser fires as Escape unmounts the focused
+  // input - cannot save stale text or submit twice.
+  const titleSettledRef = useRef(false);
 
   const closeEditors = () => {
     setEditingTitle(false);
@@ -158,6 +162,7 @@ function TaskRow({
       await onPatch(task.id, patch);
     } catch (err) {
       console.error('[triage] edit task failed', err);
+      titleSettledRef.current = false;
       setEditError("Couldn't save that change — your text is still here.");
       return;
     } finally {
@@ -167,12 +172,15 @@ function TaskRow({
   };
 
   const startTitleEdit = () => {
+    titleSettledRef.current = false;
     setTitleText(task.title);
     setEditError(null);
     setEditingTitle(true);
   };
 
   const commitTitle = () => {
+    if (titleSettledRef.current) return;
+    titleSettledRef.current = true;
     const trimmed = titleText.trim();
     if (trimmed === '' || trimmed === task.title) {
       closeEditors();
@@ -187,6 +195,7 @@ function TaskRow({
       commitTitle();
     } else if (e.key === 'Escape') {
       e.preventDefault();
+      titleSettledRef.current = true;
       closeEditors();
     }
   };

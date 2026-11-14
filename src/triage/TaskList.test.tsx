@@ -516,6 +516,34 @@ describe('TaskList', () => {
       m.unmount();
     });
 
+    it('Escape then blur does not save what was cancelled', async () => {
+      const onPatch = vi.fn();
+      const m = view(URGENT, { onPatch });
+      const input = await openTitle(m);
+      typeInto(input, 'New');
+      // One act, so the blur lands while the input is still mounted, as a
+      // browser's blur-on-unmount would.
+      await act(async () => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      });
+      expect(onPatch).not.toHaveBeenCalled();
+      m.unmount();
+    });
+
+    it('Enter then blur saves exactly once', async () => {
+      const onPatch = vi.fn();
+      const m = view(URGENT, { onPatch });
+      const input = await openTitle(m);
+      typeInto(input, 'New');
+      await act(async () => {
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      });
+      expect(onPatch).toHaveBeenCalledTimes(1);
+      m.unmount();
+    });
+
     it('blur saves the title', async () => {
       const onPatch = vi.fn();
       const m = view(URGENT, { onPatch });
