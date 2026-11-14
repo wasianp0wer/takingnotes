@@ -143,6 +143,102 @@ async function settle() {
   });
 }
 
+describe('SessionPanel record prompt', () => {
+  it('asks before recording and does not start the recorder on its own', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+
+    expect(recorder.links).toHaveLength(0);
+    expect(panel().textContent).toContain('Record audio for this session?');
+    expect(button('Record')).toBeTruthy();
+    expect(button('Not now')).toBeTruthy();
+  });
+
+  it('starts the recorder with the session ids when Record is pressed', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+    await click(button('Record'));
+    await settle();
+
+    const sessions = await listSessions();
+    const notes = await listNotes();
+    expect(recorder.links).toEqual([{ sessionId: sessions[0].id, noteId: notes[0].id }]);
+    expect(panel().textContent).not.toContain('Record audio for this session?');
+    expect(panel().textContent).toContain('Recording');
+  });
+
+  it('hides the prompt on Not now and never starts the recorder', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+    await click(button('Not now'));
+    await settle();
+
+    expect(panel().textContent).not.toContain('Record audio for this session?');
+    expect(recorder.links).toHaveLength(0);
+    expect(button('End session')).toBeTruthy();
+  });
+
+  it('shows no prompt when audio is already recording or starting', async () => {
+    recorder.setState({
+      status: 'starting',
+      startedAt: null,
+      elapsedMs: 0,
+      link: null,
+      error: null,
+    });
+    render();
+    await click(button('Start session'));
+    await settle();
+
+    expect(panel().textContent).not.toContain('Record audio for this session?');
+    expect(panel().textContent).toContain('Audio was already recording');
+    expect(recorder.links).toHaveLength(0);
+  });
+
+  it('removes the prompt when the session ends while it is open', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+    expect(panel().textContent).toContain('Record audio for this session?');
+
+    await click(button('End session'));
+    await settle();
+
+    expect(panel().textContent).not.toContain('Record audio for this session?');
+    expect(recorder.links).toHaveLength(0);
+  });
+
+  it('does not start the recorder when a Record click races the end of the session', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+    const record = button('Record');
+
+    // End through the engine only: the panel has not re-rendered the prompt away
+    // yet from the click's point of view, so this is the race itself.
+    await act(async () => {
+      await engine.endSession();
+    });
+    await click(record);
+    await settle();
+
+    expect(recorder.links).toHaveLength(0);
+  });
+
+  it('shows no prompt for a session the pen started', async () => {
+    render();
+    fake.emitPen({ x: 0.1, y: 0.1, status: 1, pressure: 0.5 });
+    fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
+    await settle();
+
+    expect(panel().textContent).not.toContain('Record audio for this session?');
+    expect(recorder.links).toHaveLength(0);
+  });
+});
+
 describe('SessionPanel', () => {
   it('offers Start session while idle', async () => {
     render();
@@ -157,6 +253,8 @@ describe('SessionPanel', () => {
     render();
 
     await click(button('Start session'));
+    await settle();
+    await click(button('Record'));
     await settle();
 
     const sessions = await listSessions();
@@ -198,6 +296,8 @@ describe('SessionPanel', () => {
 
     await click(button('Start session'));
     await settle();
+    await click(button('Record'));
+    await settle();
 
     expect(panel().textContent).toContain('User cancelled');
     // The session is running and audio started anyway: a session with no pad
@@ -217,6 +317,8 @@ describe('SessionPanel', () => {
     render();
 
     await click(button('Start session'));
+    await settle();
+    await click(button('Record'));
     await settle();
 
     expect(panel().textContent).toContain('Microphone access was denied');
@@ -251,6 +353,8 @@ describe('SessionPanel', () => {
     render();
 
     await click(button('Start session'));
+    await settle();
+    await click(button('Record'));
     await settle();
 
     expect(panel().textContent).toContain('Recording is not supported');
@@ -434,6 +538,8 @@ describe('SessionPanel', () => {
     // executor, run via a closure it never sees called from this scope.
     (release as (() => void) | null)?.();
     await settle();
+    await click(button('Record'));
+    await settle();
 
     expect(await listSessions()).toHaveLength(1);
     expect(recorder.links).toHaveLength(1);
@@ -515,7 +621,7 @@ describe('SessionPanel', () => {
     expect(engine.getState().activeNoteId).not.toBeNull();
   });
 
-  it('unmounting mid-start does not derail the session or the recording', async () => {
+  it('unmounting mid-start does not derail the session or start the recorder', async () => {
     // React 19 no longer warns on a `setState` after unmount, so a spy that
     // only checks for a logged "Warning" can never fail here regardless of
     // whether the `mounted` ref guard in SessionControls.tsx exists - it
@@ -547,7 +653,8 @@ describe('SessionPanel', () => {
     await settle();
 
     expect(engine.getState().activeNoteId).not.toBeNull();
-    expect(recorder.links).toHaveLength(1);
+    // The prompt went with the unmounted panel, so nothing started the recorder.
+    expect(recorder.links).toHaveLength(0);
     expect(logged.mock.calls.filter(([m]) => String(m).includes('[session]'))).toEqual([]);
     logged.mockRestore();
     // A fresh root, so afterEach's unmount has something to unmount.
