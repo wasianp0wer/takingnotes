@@ -212,20 +212,61 @@ describe('SessionPanel record prompt', () => {
   });
 
   it('does not start the recorder when a Record click races the end of the session', async () => {
-    render();
+    // The panel gets an engine whose subscribe never fires, so React cannot
+    // re-render the prompt away when the session ends underneath it: the Record
+    // button stays attached and its click reaches record() with stale ids.
+    const deaf = { ...engine, subscribe: () => () => {} } as unknown as LiveCaptureEngine;
+    render({ engine: deaf });
     await click(button('Start session'));
     await settle();
     const record = button('Record');
 
-    // End through the engine only: the panel has not re-rendered the prompt away
-    // yet from the click's point of view, so this is the race itself.
     await act(async () => {
       await engine.endSession();
     });
+    expect(engine.getState().activeSessionId).toBeNull();
+    expect(record.isConnected).toBe(true);
     await click(record);
     await settle();
 
     expect(recorder.links).toHaveLength(0);
+  });
+
+  it('reports a recording that someone else started after the prompt appeared', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+    // The header's Record was pressed while the prompt was open: start() is now a
+    // silent no-op and the recording keeps the foreign link.
+    recorder.setState({
+      status: 'recording',
+      startedAt: 0,
+      elapsedMs: 0,
+      link: { sessionId: null, noteId: null },
+      error: null,
+    });
+    recorder.startImpl = async () => {};
+    await click(button('Record'));
+    await settle();
+
+    expect(panel().textContent).toContain(
+      'Audio was already recording when this session started, so this session has no recording of its own.',
+    );
+    expect(panel().textContent).not.toContain('Recording did not start');
+    expect(button('End session')).toBeTruthy();
+  });
+
+  it('reports a recording that is still starting for someone else', async () => {
+    render();
+    await click(button('Start session'));
+    await settle();
+    recorder.setState({ status: 'starting', startedAt: null, elapsedMs: 0, link: null, error: null });
+    recorder.startImpl = async () => {};
+    await click(button('Record'));
+    await settle();
+
+    expect(panel().textContent).toContain('Audio was already recording');
+    expect(panel().textContent).not.toContain('Recording did not start');
   });
 
   it('shows no prompt for a session the pen started', async () => {
@@ -234,6 +275,7 @@ describe('SessionPanel record prompt', () => {
     fake.emitPen({ x: 0, y: 0, status: 0, pressure: 0 });
     await settle();
 
+    expect(engine.getState().activeSessionId).not.toBeNull();
     expect(panel().textContent).not.toContain('Record audio for this session?');
     expect(recorder.links).toHaveLength(0);
   });
@@ -249,7 +291,7 @@ describe('SessionPanel', () => {
     expect(container.querySelector('[data-testid="session-elapsed"]')).toBeNull();
   });
 
-  it('starts the session, the pad and the recording from one click', async () => {
+  it('starts the session and the pad, then the recording once Record is pressed', async () => {
     render();
 
     await click(button('Start session'));
@@ -627,8 +669,9 @@ describe('SessionPanel', () => {
     // whether the `mounted` ref guard in SessionControls.tsx exists - it
     // proves nothing about that guard. What *is* genuinely testable from
     // outside is that unmounting mid-start does not derail the start itself:
-    // the session the click opened is still open, the recorder still got
-    // going, and the component's own error-reporting path logged nothing.
+    // the session the click opened is still open, the recorder was never
+    // started (the prompt went with the panel), and the
+    // component's own error-reporting path logged nothing.
     // Whether the guard's specific job - suppressing a `setState` call on the
     // unmounted panel - actually ran is not observable from here either way;
     // that part of the guard's effect stays unverified by this test.
