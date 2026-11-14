@@ -137,11 +137,10 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
     };
   }, [capture.activeNoteId]);
 
-  // The prompt belongs to one session: when that session is no longer the
-  // engine's active one, there is nothing left to ask about.
-  useEffect(() => {
-    if (recordPrompt && capture.activeSessionId !== recordPrompt.sessionId) setRecordPrompt(null);
-  }, [capture.activeSessionId, recordPrompt]);
+  // The prompt belongs to one session: once that session is no longer the
+  // engine's active one there is nothing left to ask about, so it is derived
+  // away rather than cleared by an effect.
+  const promptOpen = recordPrompt !== null && capture.activeSessionId === recordPrompt.sessionId;
 
   const start = useCallback(async () => {
     setPhase('starting');
@@ -327,7 +326,7 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
         </>
       )}
 
-      {recordPrompt && (
+      {promptOpen && recordPrompt && (
         <span role="status" className="flex items-center gap-2 text-sm">
           Record audio for this session?
           <Button size="sm" onClick={() => void record(recordPrompt)}>
