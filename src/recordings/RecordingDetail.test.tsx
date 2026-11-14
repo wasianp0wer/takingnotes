@@ -549,6 +549,70 @@ describe('RecordingDetail (ported from RecordingsView)', () => {
     root = createRoot(container);
   });
 
+  describe('pinned player and find bar', () => {
+    function scroller(): HTMLElement {
+      const el = container.querySelector('[data-audio-scroll]') as HTMLElement | null;
+      expect(el).not.toBeNull();
+      return el!;
+    }
+
+    it('keeps the player out of the scrolling transcript region', async () => {
+      const recording = await seedWith('Talk', {
+        text: 'hello',
+        segments: [{ startMs: 0, endMs: 1000, text: 'hello' }],
+      });
+      await show(recording, liveQueue());
+      const scroll = scroller();
+      expect(scroll.className.split(/\s+/)).toEqual(
+        expect.arrayContaining(['min-h-0', 'flex-1', 'overflow-auto']),
+      );
+      const seek = container.querySelector('[role="slider"][aria-label="Seek"]')!;
+      expect(seek).not.toBeNull();
+      expect(scroll.contains(seek)).toBe(false);
+      expect(scroll.contains(container.querySelector('ul'))).toBe(true);
+    });
+
+    it('keeps transcription status lines above the scroller', async () => {
+      const recording = await seedWith('In progress', {
+        text: 'partial',
+        segments: [{ startMs: 0, endMs: 1000, text: 'partial' }],
+        status: 'running',
+      });
+      await show(recording, liveQueue());
+      const status = [...container.querySelectorAll('p')].find(
+        (el) => el.textContent === 'Transcribing…',
+      )!;
+      expect(status).toBeTruthy();
+      const scroll = scroller();
+      expect(scroll.contains(status)).toBe(false);
+      expect(scroll.contains(container.querySelector('ul'))).toBe(true);
+      expect(
+        status.compareDocumentPosition(scroll) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
+
+    it('opens the find bar above the scroller, not inside it', async () => {
+      const recording = await seedWith('Talk', {
+        text: 'hello',
+        segments: [{ startMs: 0, endMs: 1000, text: 'hello' }],
+      });
+      await show(recording, liveQueue());
+      const wrapper = container.querySelector('[data-transcript-find]') as HTMLElement;
+      act(() => {
+        wrapper.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true }),
+        );
+      });
+      const bar = container.querySelector('[role="search"]')!;
+      expect(bar).not.toBeNull();
+      const scroll = scroller();
+      expect(scroll.contains(bar)).toBe(false);
+      expect(bar.compareDocumentPosition(scroll) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      // The shortcut wrapper holds both, so focus anywhere in the transcript applies.
+      expect(wrapper.contains(scroll)).toBe(true);
+    });
+  });
+
   it('keeps the recording and reports the error when the delete fails', async () => {
     const recording = await seedWith('KeepMe', null);
     vi.mocked(deleteRecording).mockRejectedValueOnce(new Error('Database is closed'));

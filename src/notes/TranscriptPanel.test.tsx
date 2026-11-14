@@ -143,6 +143,20 @@ describe('TranscriptPanel', () => {
     expect(panel).toEqual(expect.arrayContaining(['flex', 'flex-col', 'flex-1', 'min-h-0']));
   });
 
+  it('opens the find bar above the bordered transcript box, never inside it', () => {
+    render(page({ markdown: 'Newton: F=ma' }));
+    const wrapper = container.querySelector('[data-transcript-find]') as HTMLElement;
+    act(() => {
+      wrapper.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true }));
+    });
+    const bar = container.querySelector('[role="search"]')!;
+    expect(bar).not.toBeNull();
+    const box = container.querySelector('[data-transcript-text]')!;
+    expect(box.contains(bar)).toBe(false);
+    expect(bar.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(bar.className.split(/\s+/)).toContain('shrink-0');
+  });
+
   it('renders the finished transcript as Markdown with maths, inside the frame', async () => {
     render(page({ markdown: '# Causes\n\nwar $\\rightarrow$ amendments' }));
     await rendererLoaded();
