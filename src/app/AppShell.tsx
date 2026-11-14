@@ -30,23 +30,37 @@ import { TriageView } from '@/triage/TriageView';
  */
 let migrationStarted = false;
 
+/**
+ * The legacy migration, then the session sweep. The sweep waits for the
+ * migration to settle, so the notes a first start imports get their sessions
+ * on that same start, but runs whatever its outcome: a migration that fails on
+ * every start must not block it. It runs on every start, so a v1 backup
+ * imported later is covered on the next one. Never rejects; each failure is
+ * logged on its own.
+ */
+export async function runLegacyMigrationAndSweep(
+  activeNoteId: () => string | null,
+): Promise<void> {
+  try {
+    await migrateLegacyNotebooks();
+  } catch (error: unknown) {
+    console.error('[app] legacy migration failed', error);
+  }
+  try {
+    await assignSessionsToOrphanNotes({ activeNoteId });
+  } catch (error: unknown) {
+    console.error('[app] session sweep failed', error);
+  }
+}
+
 function useLegacyMigration(): void {
   const engine = useCaptureEngine();
   useEffect(() => {
     if (migrationStarted) return;
     migrationStarted = true;
     // Fire-and-forget (A18): the notes list is usable while this runs, and a
-    // failed import stays retryable on the next load. The session sweep runs
-    // after it, so the notes a first start imports get their sessions on that
-    // same start; it runs on every start, so a v1 backup imported later is
-    // covered on the next one.
-    void migrateLegacyNotebooks()
-      .then(() =>
-        assignSessionsToOrphanNotes({ activeNoteId: () => engine.getState().activeNoteId }),
-      )
-      .catch((error: unknown) => {
-        console.error('[app] legacy migration or session sweep failed', error);
-      });
+    // failed import stays retryable on the next load.
+    void runLegacyMigrationAndSweep(() => engine.getState().activeNoteId);
   }, [engine]);
 }
 

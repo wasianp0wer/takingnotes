@@ -2,7 +2,7 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { AppShell } from '@/app/AppShell';
+import { AppShell, runLegacyMigrationAndSweep } from '@/app/AppShell';
 import { resetAudioRuntimeForTests } from '@/audio/audioRuntime';
 import { CaptureProvider } from '@/capture/CaptureContext';
 import { createCaptureEngine } from '@/capture/engine';
@@ -433,5 +433,21 @@ describe('AppShell', () => {
     // The session sweep follows it, once, so this start's imported notes are
     // covered on this same start.
     await vi.waitFor(() => expect(sweep.migrationFinishedFirst).toEqual([true]));
+  });
+
+  it('runs the session sweep even when the legacy migration fails, logging both', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    migrate.mockRejectedValueOnce(new Error('legacy store unreadable'));
+    sweep.migrationFinishedFirst.length = 0;
+
+    await runLegacyMigrationAndSweep(() => null);
+
+    // A migration that fails on every start must not block the sweep forever.
+    expect(sweep.migrationFinishedFirst).toHaveLength(1);
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining('legacy migration failed'),
+      expect.objectContaining({ message: 'legacy store unreadable' }),
+    );
+    error.mockRestore();
   });
 });
