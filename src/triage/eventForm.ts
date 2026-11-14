@@ -26,7 +26,7 @@ export function emptyEventForm(dayMs: number): EventFormState {
     title: '',
     kind: 'deadline',
     date: toDateInputValue(dayMs),
-    time: '09:00',
+    time: '21:00',
     allDay: false,
     required: true,
     estimatedMinutes: String(DEFAULT_ESTIMATE_MINUTES),

@@ -9,6 +9,7 @@ import type { CalendarEventRecord } from '@/storage/types';
 import { cn } from '@/lib/utils';
 import { addLocalDays, isSameLocalDay, monthGrid, startOfLocalDay, toDateInputValue } from '@/triage/dates';
 import { emptyEventForm, eventFormFromRecord, type EventFormState, type EventFormValue } from '@/triage/eventForm';
+import { DayEventsDialog } from '@/triage/DayEventsDialog';
 import { EventDialog } from '@/triage/EventDialog';
 import { WEEKDAYS, formatDayLabel, formatMonthTitle, formatTime } from '@/triage/format';
 
@@ -78,7 +79,11 @@ export function candidateDaysForAgenda(
 /** A cell shows at most this many dots, so a busy day never overflows. */
 const MAX_DOTS = 3;
 
-type DialogState = { mode: 'create'; day: number } | { mode: 'edit'; event: CalendarEventRecord } | null;
+type DialogState =
+  | { mode: 'day'; day: number }
+  | { mode: 'create'; day: number }
+  | { mode: 'edit'; event: CalendarEventRecord }
+  | null;
 
 export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: CalendarPanelProps) {
   const [visible, setVisible] = useState(() => {
@@ -162,6 +167,8 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
     setVisible({ year: d.getFullYear(), month: d.getMonth() });
   };
 
+  const openDay = (day: number) => setDialogState({ mode: 'day', day });
+
   const openCreate = (day: number) => {
     setDialogState({ mode: 'create', day });
     setDialogKey((k) => k + 1);
@@ -241,7 +248,7 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
                 data-outside={outside ? 'true' : undefined}
                 aria-current={isToday ? 'date' : undefined}
                 aria-label={`${formatDayLabel(day, now)} (${dateStr})`}
-                onClick={() => openCreate(day)}
+                onClick={() => openDay(day)}
                 className={cn(
                   'flex min-w-0 flex-col items-start gap-0.5 p-1 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-focus-ring sm:aspect-square sm:text-sm',
                   HOVER_AFFORDANCE,
@@ -332,6 +339,15 @@ export function CalendarPanel({ events, now, onSaveEvent, onDeleteEvent }: Calen
       </div>
 
       <Agenda events={events} now={now} agendaDays={agendaDays} onOpen={openEdit} />
+
+      <DayEventsDialog
+        day={dialogState?.mode === 'day' ? dialogState.day : null}
+        events={events}
+        now={now}
+        onClose={closeDialog}
+        onEdit={openEdit}
+        onAdd={openCreate}
+      />
 
       {dialogState && dialogInitial ? (
         <EventDialog

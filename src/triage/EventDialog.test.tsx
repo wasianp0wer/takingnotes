@@ -73,7 +73,7 @@ describe('EventDialog', () => {
     expect(onSave).toHaveBeenCalledWith({
       title: 'Turn in essay',
       kind: 'deadline',
-      startsAt: at(2026, 8, 30, 9),
+      startsAt: at(2026, 8, 30, 21),
       allDay: false,
       required: true,
       estimatedMinutes: 60,
