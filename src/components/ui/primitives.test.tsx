@@ -37,13 +37,13 @@ describe("Button visual language", () => {
 })
 
 describe("TabsTrigger", () => {
-  function mountTabs() {
+  function mountTabs(orientation: "horizontal" | "vertical" = "horizontal") {
     const host = document.createElement("div")
     document.body.appendChild(host)
     const root = createRoot(host)
     act(() =>
       root.render(
-        <Tabs defaultValue="a">
+        <Tabs defaultValue="a" orientation={orientation}>
           <TabsList>
             <TabsTrigger value="a">A</TabsTrigger>
             <TabsTrigger value="b">B</TabsTrigger>
@@ -57,8 +57,25 @@ describe("TabsTrigger", () => {
     const { host, done } = mountTabs()
     const el = host.querySelector('[data-slot="tabs-trigger"]')!
     expect(el.getAttribute("data-state")).toBe("active")
-    expect(el.className).toContain("data-[state=active]:shadow-[inset_0_-3px_0_hsl(var(--primary))]")
+    expect(el.getAttribute("data-orientation")).toBe("horizontal")
+    expect(el.className).toContain(
+      "data-[orientation=horizontal]:data-[state=active]:shadow-[inset_0_-3px_0_hsl(var(--primary))]"
+    )
     expect(el.className).not.toContain("rounded-md")
+    done()
+  })
+  it("marks the active vertical tab with a left edge, not an underline, and left-aligns it", () => {
+    const { host, done } = mountTabs("vertical")
+    const el = host.querySelector('[data-slot="tabs-trigger"]')!
+    expect(el.getAttribute("data-orientation")).toBe("vertical")
+    const tokens = el.className.split(/\s+/)
+    expect(tokens).toContain(
+      "data-[orientation=vertical]:data-[state=active]:shadow-[inset_3px_0_0_hsl(var(--primary))]"
+    )
+    expect(tokens).toContain("data-[orientation=vertical]:justify-start")
+    expect(tokens).toContain("data-[orientation=vertical]:text-left")
+    // The underline must not also apply to a vertical tab.
+    expect(tokens).not.toContain("data-[state=active]:shadow-[inset_0_-3px_0_hsl(var(--primary))]")
     done()
   })
   it("an inactive trigger has no unconditional underline", () => {
