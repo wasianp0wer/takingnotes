@@ -20,16 +20,32 @@ import { fakeDesktopBridge } from '@/test/fakeDesktopBridge';
 import { resetDatabase } from '@/test/resetDb';
 import { resetTranscriptionQueueForTests } from '@/transcription/startTranscription';
 
+const migration = vi.hoisted(() => ({ finished: false }));
 const migrate = vi.hoisted(() =>
-  vi.fn(async () => ({
-    imported: 0,
-    pages: 0,
-    failed: 0,
-    skipped: true,
-  })),
+  vi.fn(async () => {
+    // A tick before finishing, so a sweep started alongside rather than after
+    // the migration sees `finished` still false.
+    await Promise.resolve();
+    migration.finished = true;
+    return { imported: 0, pages: 0, failed: 0, skipped: true };
+  }),
 );
+const sweep = vi.hoisted(() => ({ migrationFinishedFirst: [] as boolean[] }));
 
 vi.mock('@/storage/migrate', () => ({ migrateLegacyNotebooks: migrate }));
+vi.mock('@/sessions/assignSessions', async () => {
+  type AssignSessionsOptions = import('@/sessions/assignSessions').AssignSessionsOptions;
+  const actual = await vi.importActual<typeof import('@/sessions/assignSessions')>(
+    '@/sessions/assignSessions',
+  );
+  return {
+    ...actual,
+    assignSessionsToOrphanNotes: (opts?: AssignSessionsOptions) => {
+      sweep.migrationFinishedFirst.push(migration.finished);
+      return actual.assignSessionsToOrphanNotes(opts);
+    },
+  };
+});
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
@@ -414,5 +430,8 @@ describe('AppShell', () => {
     // two overlapping runs would both find the "migrated" setting unset and
     // import the library twice.
     expect(migrate).toHaveBeenCalledTimes(1);
+    // The session sweep follows it, once, so this start's imported notes are
+    // covered on this same start.
+    await vi.waitFor(() => expect(sweep.migrationFinishedFirst).toEqual([true]));
   });
 });

@@ -3,6 +3,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import { DeviceStatus } from '@/app/DeviceStatus';
 import { SettingsDialog } from '@/app/SettingsDialog';
 import { RecorderControl } from '@/audio/RecorderControl';
+import { useCaptureEngine } from '@/capture/CaptureContext';
 import { SessionControls } from '@/capture/SessionControls';
 import { usePageTurnCapture } from '@/capture/usePageTurnCapture';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -12,6 +13,7 @@ import { AdvancedSearch } from '@/search/AdvancedSearch';
 import { HeaderSearch } from '@/search/HeaderSearch';
 import { SearchProvider } from '@/search/SearchContext';
 import { createSearchStore } from '@/search/searchStore';
+import { assignSessionsToOrphanNotes } from '@/sessions/assignSessions';
 import { SessionsUiProvider } from '@/sessions/SessionsUiContext';
 import { SessionsView } from '@/sessions/SessionsView';
 import { createSessionsUiStore } from '@/sessions/sessionsUiStore';
@@ -29,15 +31,23 @@ import { TriageView } from '@/triage/TriageView';
 let migrationStarted = false;
 
 function useLegacyMigration(): void {
+  const engine = useCaptureEngine();
   useEffect(() => {
     if (migrationStarted) return;
     migrationStarted = true;
     // Fire-and-forget (A18): the notes list is usable while this runs, and a
-    // failed import stays retryable on the next load.
-    void migrateLegacyNotebooks().catch((error: unknown) => {
-      console.error('[app] legacy notebook migration failed', error);
-    });
-  }, []);
+    // failed import stays retryable on the next load. The session sweep runs
+    // after it, so the notes a first start imports get their sessions on that
+    // same start; it runs on every start, so a v1 backup imported later is
+    // covered on the next one.
+    void migrateLegacyNotebooks()
+      .then(() =>
+        assignSessionsToOrphanNotes({ activeNoteId: () => engine.getState().activeNoteId }),
+      )
+      .catch((error: unknown) => {
+        console.error('[app] legacy migration or session sweep failed', error);
+      });
+  }, [engine]);
 }
 
 /** `localStorage`, or null where touching it throws (blocked site data, some private modes). */

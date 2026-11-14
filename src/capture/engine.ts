@@ -35,19 +35,22 @@ export interface CaptureEngineDeps {
 
 /**
  * What the live engine actually publishes. `CaptureState` (foundations-owned,
- * `src/capture/types.ts`) has no field for "a manually started session is open"
- * or for when it began, and P3 does not own that file, so the engine adds one
- * optional field to the same object (spec P3-A1). It is *absent* - not null -
- * while idle and for bare notes, so nothing that reads `CaptureState` changes
- * shape.
+ * `src/capture/types.ts`) has no field for "a session is open" or for when it
+ * began, and P3 does not own that file, so the engine adds one optional field
+ * to the same object (spec P3-A1). It is *absent* - not null - while idle, so
+ * nothing that reads `CaptureState` changes shape.
  */
 export interface LiveCaptureState extends CaptureState {
-  /** Present only while a session started by `startSession()` is open. */
+  /**
+   * Present whenever a note is open. Every note is a session (small
+   * improvements, goal 7), whether `startSession()`, `startNote()` or the pen
+   * opened it.
+   */
   sessionStartedAt?: number;
 }
 
 /**
- * When the open manual session began, or null when none is. The reader exists
+ * When the open session began, or null when none is. The reader exists
  * so `SessionControls` can ask a plain `CaptureState` (what the context hands
  * it) without a cast.
  */
@@ -520,8 +523,10 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
 
   /**
    * Opens Session + Note + page 0 and makes them active, ending any open note
-   * first. Both entry points funnel through here: `startNote` for bare notes and
-   * pen-input auto-start, `startSession` for a manual session (P3).
+   * first. Both entry points funnel through here and get the same session:
+   * `startNote` (pen-input auto-start) and `startSession` (the header, P3)
+   * differ only in what they return. Neither touches the recorder - audio
+   * starts only when the user asks for it.
    *
    * `map` runs inside the op, so a caller gets the ids of the records *this*
    * call created. Reading them off published state after the await would hand
@@ -531,7 +536,7 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
    * rejection.
    */
   function openNote<T>(
-    opts: { title?: string; manual: boolean },
+    opts: { title?: string },
     map: (ids: { sessionId: string; noteId: string }) => T,
   ): Promise<T> {
     void start();
@@ -548,7 +553,7 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
       try {
         const startedAt = now();
         const stamp = new Date(startedAt).toLocaleString();
-        const title = opts.title ?? `${opts.manual ? 'Session' : 'Note'} ${stamp}`;
+        const title = opts.title ?? `Session ${stamp}`;
         const device = controller.getState();
 
         const session = await createSession({ title, startedAt });
@@ -578,15 +583,13 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
 
         b.pageId = page.id;
         if (b.strokes.length === buffered.length) b.dirty = false;
-        const next: LiveCaptureState = {
+        setState({
           activeSessionId: session.id,
           activeNoteId: note.id,
           activePageId: page.id,
           pageIndex: 0,
-        };
-        // Only a manual session is a session as far as the header is concerned.
-        if (opts.manual) next.sessionStartedAt = startedAt;
-        setState(next);
+          sessionStartedAt: startedAt,
+        });
         // Anything written since that snapshot (the stroke in progress, or a
         // stroke that closed mid-creation).
         void flushBuffer(b);
@@ -619,13 +622,13 @@ export function createCaptureEngine(deps: CaptureEngineDeps): LiveCaptureEngine 
   }
 
   function startNote(opts: { title?: string } = {}): Promise<string> {
-    return openNote({ title: opts.title, manual: false }, (ids) => ids.noteId);
+    return openNote({ title: opts.title }, (ids) => ids.noteId);
   }
 
   function startSession(
     opts: { title?: string } = {},
   ): Promise<{ sessionId: string; noteId: string }> {
-    return openNote({ title: opts.title, manual: true }, (ids) => ids);
+    return openNote({ title: opts.title }, (ids) => ids);
   }
 
   function newPage(reason: NewPageReason): Promise<string | null> {

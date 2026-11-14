@@ -27,7 +27,8 @@ export type NewPageReason = 'device-turn' | 'manual';
  * session's audio is started by the UI, not the engine: the engine must not
  * depend on the recorder, so `SessionControls` calls `startSession()` and then
  * the recorder, and reports an audio failure without unwinding the session.
- * `startNote()` keeps working for bare notes and for pen-input auto-start.
+ * `startNote()` stays for pen-input auto-start and opens the same session
+ * `startSession()` does (every note is a session); it never starts audio.
  */
 export interface CaptureEngine {
   getState(): CaptureState;

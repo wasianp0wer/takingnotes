@@ -660,8 +660,10 @@ behaviour:
   endSession(): Promise<void>;
 ```
 
-`startNote()` keeps working for bare notes (and for pen-input auto-start).
-A session's audio is started by the UI, not the engine: the engine must not
+`startNote()` stays for pen-input auto-start. It opens the same session
+`startSession()` does - title `Session <stamp>`, `sessionStartedAt` published -
+so every note is a session; it never starts audio. A session's audio is
+started by the UI, not the engine: the engine must not
 depend on the recorder, so `SessionControls` calls
 `engine.startSession()` then the recorder, and reports an audio failure
 without unwinding the session.
@@ -1382,6 +1384,14 @@ have a `sessionId`, each with the recordings it owns (`recordingOwnersByNote`).
 `uncategorized` holds notes with no `sessionId` plus recordings that no note
 owns. Entry keys are `note:<id>` and `recording:<id>`. The sidebar renders the
 two groups and `filter.ts` filters them without reshuffling.
+
+A start-up sweep, `assignSessionsToOrphanNotes()` (`src/sessions/assignSessions.ts`),
+runs after the legacy migration on every start: each note with no `sessionId`
+(legacy, or from a v1 backup) gets an ended session with the note's title and
+times, created and linked in one transaction. It skips the engine's open note,
+and overlapping calls share one run. When it links any notes it fires
+`subscribeSessionsAssigned`, which `useSessionCatalog` reloads on. After it,
+`uncategorized` holds only recordings no note owns.
 
 ### 9.3 Themes
 
