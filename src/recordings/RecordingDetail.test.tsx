@@ -292,6 +292,20 @@ describe('RecordingDetail (ported from RecordingsView)', () => {
     expect(audio.currentTime).toBe(65);
   });
 
+  it('makes a recording transcript searchable with Cmd/Ctrl+F', async () => {
+    const segmented = await seedWith('Talk', {
+      text: 'hello',
+      segments: [{ startMs: 0, endMs: 1000, text: 'hello' }],
+    });
+    await show(segmented, liveQueue());
+    expect(container.querySelector('ul')?.closest('[data-transcript-find]')).not.toBeNull();
+
+    const textOnly = await seedWith('Talk', { text: 'joined text only', segments: [] });
+    await show(textOnly, liveQueue());
+    const para = [...container.querySelectorAll('p')].find((el) => el.textContent === 'joined text only');
+    expect(para?.closest('[data-transcript-find]')).not.toBeNull();
+  });
+
   it("sets transcript text in the theme's transcript font", async () => {
     const segmented = await seedWith('Talk', {
       text: 'hello',

@@ -70,8 +70,9 @@ function render(p: PageRecord): void {
   });
 }
 
+/** The innermost div holding exactly `text` (the find wrapper around it holds the same text). */
 function elementWithText(text: string): Element | undefined {
-  return [...container.querySelectorAll('div')].find((el) => el.textContent === text);
+  return [...container.querySelectorAll('div')].filter((el) => el.textContent === text).at(-1);
 }
 
 /** The Markdown renderer is lazy-loaded; wait for it to replace the plain fallback. */
@@ -104,6 +105,12 @@ describe('TranscriptPanel', () => {
     expect(elementWithText('older text')?.classList.contains('font-transcript')).toBe(true);
   });
 
+  it('makes a finished transcript searchable with Cmd/Ctrl+F', () => {
+    render(page({ markdown: 'Newton: F=ma' }));
+    const block = elementWithText('Newton: F=ma')!;
+    expect(block.closest('[data-transcript-find]')).not.toBeNull();
+  });
+
   it('frames the transcribed handwriting in its own bordered block', () => {
     render(page({ markdown: 'Newton: F=ma' }));
     const block = elementWithText('Newton: F=ma')!;
@@ -129,8 +136,10 @@ describe('TranscriptPanel', () => {
     const cls = block.className.split(/\s+/);
     // Fills the space it is given and scrolls inside it.
     expect(cls).toEqual(expect.arrayContaining(['flex-1', 'min-h-0', 'overflow-auto']));
-    // Its panel fills the notes area as a column, so the block has a set height to fill.
-    const panel = block.parentElement!.className.split(/\s+/);
+    // Its panel fills the notes area as a column, so the block has a set height
+    // to fill. That is the find wrapper: the box between them is `contents`.
+    expect(block.parentElement!.className).toBe('contents');
+    const panel = block.closest('[data-transcript-find]')!.className.split(/\s+/);
     expect(panel).toEqual(expect.arrayContaining(['flex', 'flex-col', 'flex-1', 'min-h-0']));
   });
 

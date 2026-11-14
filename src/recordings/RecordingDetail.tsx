@@ -5,6 +5,7 @@ import type { TranscriptionQueue } from '@/audio/transcriptionQueue';
 import { formatClock } from '@/audio/format';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
+import { FindableTranscript } from '@/notes/TranscriptFind';
 import { deleteRecording, getRecordingAudio, updateRecording } from '@/storage/recordings';
 import type { RecordingRecord, TranscriptSegment } from '@/storage/types';
 
@@ -27,7 +28,8 @@ function downloadName(title: string, startedAt: number, type: string): string {
 }
 
 /**
- * A transcript as a list of timestamped lines, each seeking the player.
+ * A transcript as a list of timestamped lines, each seeking the player, and
+ * searchable with Cmd/Ctrl+F while focused.
  *
  * Shared by every state that has segments to show - `done`, `running` and
  * `paused` - so a transcription does not change how it reads depending on
@@ -41,21 +43,23 @@ function TranscriptSegments({
   onSeek: (startMs: number) => void;
 }) {
   return (
-    <ul className="space-y-1">
-      {segments.map((segment, index) => (
-        <li key={index} className="flex items-start gap-2 text-sm">
-          <button
-            type="button"
-            data-start-ms={segment.startMs}
-            onClick={() => onSeek(segment.startMs)}
-            className="shrink-0 tabular-nums text-timestamp underline-offset-4 hover:underline"
-          >
-            {formatClock(segment.startMs)}
-          </button>
-          <span className="font-transcript">{segment.text}</span>
-        </li>
-      ))}
-    </ul>
+    <FindableTranscript>
+      <ul className="space-y-1">
+        {segments.map((segment, index) => (
+          <li key={index} className="flex items-start gap-2 text-sm">
+            <button
+              type="button"
+              data-start-ms={segment.startMs}
+              onClick={() => onSeek(segment.startMs)}
+              className="shrink-0 tabular-nums text-timestamp underline-offset-4 hover:underline"
+            >
+              {formatClock(segment.startMs)}
+            </button>
+            <span className="font-transcript">{segment.text}</span>
+          </li>
+        ))}
+      </ul>
+    </FindableTranscript>
   );
 }
 
@@ -427,7 +431,9 @@ export function RecordingDetail({
           ) : transcript.segments.length > 0 ? (
             <TranscriptSegments segments={transcript.segments} onSeek={seekTo} />
           ) : (
-            <p className="font-transcript text-sm">{transcript.text}</p>
+            <FindableTranscript>
+              <p className="font-transcript text-sm">{transcript.text}</p>
+            </FindableTranscript>
           )}
           <p className="text-xs text-muted-foreground">{transcript.model}</p>
         </div>

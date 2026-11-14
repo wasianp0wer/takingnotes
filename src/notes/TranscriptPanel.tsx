@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { LazyTranscriptMarkdown } from '@/notes/LazyTranscriptMarkdown';
 import { OllamaSetupStatus } from '@/notes/OllamaSetupStatus';
+import { FindableTranscript } from '@/notes/TranscriptFind';
 import { isPageFinalized } from '@/storage/pages';
 import type { PageRecord, TranscriptRecord } from '@/storage/types';
 
@@ -123,13 +124,15 @@ export function TranscriptPanel({ page, isActivePage, onRetry }: TranscriptPanel
       {/* Framed and set in the theme's transcript font, so the transcribed
           handwriting reads as content rather than as part of the interface.
           It fills a set area and scrolls inside it rather than growing with
-          the text (owner, 2026-10-20). */}
-      <div
-        data-transcript-text
-        className="min-h-0 flex-1 overflow-auto border border-border bg-background p-3 font-transcript text-base leading-relaxed"
-      >
-        {transcript.markdown ? <LazyTranscriptMarkdown markdown={transcript.markdown} /> : 'Blank page'}
-      </div>
+          the text (owner, 2026-10-20). Cmd/Ctrl+F searches it while focused. */}
+      <FindableTranscript className="min-h-0 flex-1">
+        <div
+          data-transcript-text
+          className="min-h-0 flex-1 overflow-auto border border-border bg-background p-3 font-transcript text-base leading-relaxed"
+        >
+          {transcript.markdown ? <LazyTranscriptMarkdown markdown={transcript.markdown} /> : 'Blank page'}
+        </div>
+      </FindableTranscript>
       <p className="shrink-0 text-xs text-muted-foreground">
         {transcript.model} · {transcript.promptVersion}
       </p>

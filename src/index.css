@@ -156,3 +156,14 @@ canvas {
   outline: 2px solid hsl(var(--focus-ring));
   outline-offset: 2px;
 }
+
+/* Cmd/Ctrl+F in a transcript (notes/TranscriptFind.tsx): every match, and the
+   one the find bar is on. Painted with the CSS Custom Highlight API, so the
+   transcript's DOM is never rewritten. */
+::highlight(transcript-find) {
+  background-color: hsl(var(--search-highlight));
+}
+::highlight(transcript-find-current) {
+  background-color: hsl(var(--search-highlight));
+  text-decoration: underline 2px hsl(var(--focus-ring));
+}
