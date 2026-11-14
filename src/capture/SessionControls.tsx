@@ -89,6 +89,11 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
   const [, setTick] = useState(0);
   const [interrupted, setInterrupted] = useState<{ note: NoteRecord } | null>(null);
   const [dismissedNoteId, setDismissedNoteId] = useState<string | null>(null);
+  // Set once a session has started and the pad step is done: the panel asks
+  // before the microphone is touched. The ids are the session it was asked for.
+  const [recordPrompt, setRecordPrompt] = useState<{ sessionId: string; noteId: string } | null>(
+    null,
+  );
 
   const startedAt = sessionStartedAtOf(capture);
   const isActive = startedAt !== null;
@@ -131,6 +136,11 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
       alive = false;
     };
   }, [capture.activeNoteId]);
+
+  // The prompt belongs to one session: once that session is no longer the
+  // engine's active one there is nothing left to ask about, so it is derived
+  // away rather than cleared by an effect.
+  const promptOpen = recordPrompt !== null && capture.activeSessionId === recordPrompt.sessionId;
 
   const start = useCallback(async () => {
     setPhase('starting');
@@ -181,45 +191,70 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
       return;
     }
 
-    // Audio last, and never fatal: the session is already capturing.
-    try {
-      await recorder.start(ids);
-      const after = recorder.getState();
-      const owned =
-        after.status === 'recording' &&
-        after.link?.sessionId === ids.sessionId &&
-        after.link?.noteId === ids.noteId;
-      if (!owned) {
-        // The recorder singleton is shared with the header's Record button
-        // (P3-A3). Ownership is the only question that matters here: status
-        // alone can't tell it apart from a start that is still under way for
-        // someone else. `'recording'` with a foreign link means
-        // `recorder.start()` above was a silent no-op (recorder.ts line 204)
-        // and the recording keeps the link it captured earlier. `'starting'`
-        // with a foreign-or-not-yet-set link means Record was pressed just
-        // before this click - `recorder.start(ids)` was equally a no-op
-        // (recorder.ts:204 only proceeds from 'idle'), and a recording *will*
-        // begin seconds from now, just not under this session's link. Both
-        // read the same to the person watching this session: it has no
-        // recording of its own. Anything else is this call's own failure -
-        // the recorder's own error, or the generic fallback.
-        if (after.status === 'recording' || after.status === 'starting') {
-          if (mounted.current) {
-            setAudioError(
-              'Audio was already recording when this session started, so this session has no recording of its own.',
-            );
-          }
-        } else if (mounted.current) {
-          setAudioError(after.error ?? 'Recording did not start');
-        }
+    // Audio is asked about, not started: the person decides in the prompt below.
+    // The recorder singleton is shared with the header's Record button (P3-A3),
+    // so if it is already going there is nothing to ask.
+    const current = recorder.getState();
+    if (current.status === 'recording' || current.status === 'starting') {
+      if (mounted.current) {
+        setAudioError(
+          'Audio was already recording when this session started, so this session has no recording of its own.',
+        );
       }
-    } catch (error) {
-      console.error('[session] recording could not start', error);
-      if (mounted.current) setAudioError(messageOf(error));
+    } else if (mounted.current) {
+      setRecordPrompt(ids);
     }
 
     if (mounted.current) setPhase('idle');
   }, [controller, engine, recorder, resumeLock]);
+
+  const record = useCallback(
+    async (ids: { sessionId: string; noteId: string }) => {
+      setRecordPrompt(null);
+      setAudioError(null);
+      // The session may have ended between the prompt appearing and this click.
+      // Starting the recorder then would leave audio running for an ended
+      // session, with nothing in this panel offering to stop it.
+      if (engine.getState().activeSessionId !== ids.sessionId) return;
+
+      try {
+        await recorder.start(ids);
+        const after = recorder.getState();
+        const owned =
+          after.status === 'recording' &&
+          after.link?.sessionId === ids.sessionId &&
+          after.link?.noteId === ids.noteId;
+        if (!owned) {
+          // The recorder singleton is shared with the header's Record button
+          // (P3-A3). Ownership is the only question that matters here: status
+          // alone can't tell it apart from a start that is still under way for
+          // someone else. `'recording'` with a foreign link means
+          // `recorder.start()` above was a silent no-op (recorder.ts line 204)
+          // and the recording keeps the link it captured earlier. `'starting'`
+          // with a foreign-or-not-yet-set link means Record was pressed just
+          // before this click - `recorder.start(ids)` was equally a no-op
+          // (recorder.ts:204 only proceeds from 'idle'), and a recording *will*
+          // begin seconds from now, just not under this session's link. Both
+          // read the same to the person watching this session: it has no
+          // recording of its own. Anything else is this call's own failure -
+          // the recorder's own error, or the generic fallback.
+          if (after.status === 'recording' || after.status === 'starting') {
+            if (mounted.current) {
+              setAudioError(
+                'Audio was already recording when this session started, so this session has no recording of its own.',
+              );
+            }
+          } else if (mounted.current) {
+            setAudioError(after.error ?? 'Recording did not start');
+          }
+        }
+      } catch (error) {
+        console.error('[session] recording could not start', error);
+        if (mounted.current) setAudioError(messageOf(error));
+      }
+    },
+    [engine, recorder],
+  );
 
   const end = useCallback(async () => {
     setPhase('ending');
@@ -289,6 +324,18 @@ export function SessionPanel({ engine, controller, recorder, now = Date.now }: S
           </span>
           <span className="text-xs text-muted-foreground">{link}</span>
         </>
+      )}
+
+      {promptOpen && recordPrompt && (
+        <span role="status" className="flex items-center gap-2 text-sm">
+          Record audio for this session?
+          <Button size="sm" onClick={() => void record(recordPrompt)}>
+            Record
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setRecordPrompt(null)}>
+            Not now
+          </Button>
+        </span>
       )}
 
       {sessionError && <ErrorBanner message={sessionError} onDismiss={() => setSessionError(null)} />}
