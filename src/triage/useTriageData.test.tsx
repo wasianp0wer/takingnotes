@@ -210,6 +210,48 @@ describe('useTriageData', () => {
     await flush();
   });
 
+  it('addTask with a date also puts its deadline on the calendar', async () => {
+    const m = mount(<Probe />);
+    await waitFor(() => expect(latest.loaded).toBe(true));
+
+    const dueAt = Date.now() + 48 * HOUR;
+    await act(async () => {
+      await latest.addTask({ title: 'Lab write-up', dueAt });
+    });
+
+    const task = latest.tasks.find((t) => t.title === 'Lab write-up')!;
+    const event = latest.events.find((e) => e.id === task.eventId);
+    expect(task.source).toBe('calendar');
+    expect(event).toMatchObject({ title: 'Lab write-up', kind: 'deadline', startsAt: dueAt });
+
+    m.unmount();
+    await flush();
+  });
+
+  it('patchTask with a new date moves a linked task\'s event', async () => {
+    const m = mount(<Probe />);
+    await waitFor(() => expect(latest.loaded).toBe(true));
+
+    await act(async () => {
+      await latest.addTask({ title: 'Reading', dueAt: Date.now() + 48 * HOUR });
+    });
+    const task = latest.tasks.find((t) => t.title === 'Reading')!;
+    const moved = Date.now() + 72 * HOUR;
+
+    await act(async () => {
+      await latest.patchTask(task.id, { dueAt: moved, estimatedMinutes: 20 });
+    });
+
+    expect(latest.tasks.find((t) => t.id === task.id)).toMatchObject({
+      dueAt: moved,
+      estimatedMinutes: 20,
+    });
+    expect(latest.events.find((e) => e.id === task.eventId)?.startsAt).toBe(moved);
+
+    m.unmount();
+    await flush();
+  });
+
   it('re-syncs on an interval and picks up a repository change', async () => {
     const m = mount(<Probe syncIntervalMs={30} />);
     await waitFor(() => expect(latest.loaded).toBe(true));

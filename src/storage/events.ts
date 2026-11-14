@@ -23,9 +23,16 @@ export interface CreateEventInput {
   updatedAt?: number;
 }
 
-export async function createEvent(input: CreateEventInput): Promise<CalendarEventRecord> {
-  const now = Date.now();
-  const event: CalendarEventRecord = {
+/**
+ * The one place an event record's shape and defaults are decided. Pure, so a
+ * caller writing inside its own transaction (taskDeadlines.ts) builds exactly
+ * what `createEvent` would.
+ */
+export function buildEventRecord(
+  input: CreateEventInput,
+  now: number = Date.now(),
+): CalendarEventRecord {
+  return {
     id: newId(),
     title: input.title,
     kind: input.kind,
@@ -40,7 +47,10 @@ export async function createEvent(input: CreateEventInput): Promise<CalendarEven
     createdAt: input.createdAt ?? now,
     updatedAt: input.updatedAt ?? input.createdAt ?? now,
   };
+}
 
+export async function createEvent(input: CreateEventInput): Promise<CalendarEventRecord> {
+  const event = buildEventRecord(input);
   const db = await openNotesDb();
   await db.put('events', event);
   return event;
