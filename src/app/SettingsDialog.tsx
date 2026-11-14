@@ -11,9 +11,16 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
-import { Separator } from '@/components/ui/separator';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { TranscriptionSettings } from '@/notes/TranscriptionSettings';
 import { ThemeSettings } from '@/themes/ThemeSettings';
+
+const TABS = [
+  { value: 'theme', label: 'Theme', Section: ThemeSettings },
+  { value: 'transcription', label: 'Transcription', Section: TranscriptionSettings },
+  { value: 'audio', label: 'Audio', Section: AudioSettings },
+  { value: 'backup', label: 'Backup', Section: BackupSettings },
+];
 
 /**
  * The single settings surface. Each feature owns one section component and
@@ -29,7 +36,7 @@ export function SettingsDialog() {
       </DialogTrigger>
       {/* Capped to the viewport; the header stays put and the sections scroll
           beneath it, so the dialog never runs off screen. */}
-      <DialogContent className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)]">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)] sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>
@@ -37,15 +44,26 @@ export function SettingsDialog() {
             Whisper runs in the browser.
           </DialogDescription>
         </DialogHeader>
-        <div data-settings-body className="-mx-6 min-h-0 space-y-4 overflow-y-auto px-6">
-          <ThemeSettings />
-          <Separator />
-          <TranscriptionSettings />
-          <Separator />
-          <AudioSettings />
-          <Separator />
-          <BackupSettings />
-        </div>
+        <Tabs
+          defaultValue="theme"
+          orientation="vertical"
+          className="min-h-0 flex-row gap-6"
+        >
+          <TabsList className="h-fit w-40 shrink-0 flex-col items-stretch">
+            {TABS.map((tab) => (
+              <TabsTrigger key={tab.value} value={tab.value} className="justify-start">
+                {tab.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          <div data-settings-body className="-mr-6 min-h-0 min-w-0 flex-1 overflow-y-auto pr-6">
+            {TABS.map(({ value, Section }) => (
+              <TabsContent key={value} value={value}>
+                <Section />
+              </TabsContent>
+            ))}
+          </div>
+        </Tabs>
       </DialogContent>
     </Dialog>
   );
