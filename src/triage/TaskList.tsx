@@ -6,7 +6,7 @@ import { Label } from '@/components/ui/label';
 import type { CreateTaskInput } from '@/storage/tasks';
 import type { TaskRecord } from '@/storage/types';
 import { cn } from '@/lib/utils';
-import { endOfLocalDay, localDateTimeFromInputs } from '@/triage/dates';
+import { endOfLocalDay, localDateTimeFromInputs, toDateInputValue, toTimeInputValue } from '@/triage/dates';
 import { parseEstimateMinutes } from '@/triage/estimate';
 import { formatDue } from '@/triage/format';
 import { rankTasks, scoreBand, type ScoreBand } from '@/triage/priority';
@@ -31,7 +31,14 @@ export interface TaskListProps {
    * supplies `useTriageData.addTask(..., { rethrow: true })` for exactly this.
    */
   onAdd(input: CreateTaskInput): Promise<void> | void;
+  /**
+   * Must **reject** if the write failed: the inline title and date editors
+   * stay open on a rejection. `TriageView` passes `patchTask` with
+   * `{ rethrow: true }`.
+   */
   onPatch(id: string, patch: TaskPatch): Promise<void> | void;
+  /** Ids of calendar events imported from a syllabus; their deadlines cannot be cleared. */
+  syllabusEventIds?: ReadonlySet<string>;
   onComplete(id: string): Promise<void> | void;
   onDismiss(id: string): Promise<void> | void;
 }
@@ -41,7 +48,15 @@ const SOURCE_HINT: Partial<Record<TaskRecord['source'], string>> = {
   scratchpad: 'From scratchpad',
 };
 
-export function TaskList({ tasks, now, onAdd, onPatch, onComplete, onDismiss }: TaskListProps) {
+export function TaskList({
+  tasks,
+  now,
+  onAdd,
+  onPatch,
+  syllabusEventIds,
+  onComplete,
+  onDismiss,
+}: TaskListProps) {
   const ranked = rankTasks(tasks, now);
 
   return (
@@ -58,6 +73,7 @@ export function TaskList({ tasks, now, onAdd, onPatch, onComplete, onDismiss }: 
               score={score}
               now={now}
               onPatch={onPatch}
+              syllabusEventIds={syllabusEventIds}
               onComplete={onComplete}
               onDismiss={onDismiss}
             />
@@ -74,6 +90,7 @@ function TaskRow({
   score,
   now,
   onPatch,
+  syllabusEventIds,
   onComplete,
   onDismiss,
 }: {
@@ -81,6 +98,7 @@ function TaskRow({
   score: number;
   now: number;
   onPatch: TaskListProps['onPatch'];
+  syllabusEventIds: TaskListProps['syllabusEventIds'];
   onComplete: TaskListProps['onComplete'];
   onDismiss: TaskListProps['onDismiss'];
 }) {
@@ -102,7 +120,7 @@ function TaskRow({
     if (Number.isFinite(n) && n >= 0) {
       const rounded = Math.round(n);
       if (rounded !== task.estimatedMinutes) {
-        onPatch(task.id, { estimatedMinutes: rounded });
+        fireAndForget(onPatch(task.id, { estimatedMinutes: rounded }));
       } else {
         setEstimateText(String(task.estimatedMinutes));
       }
@@ -117,6 +135,96 @@ function TaskRow({
       commitEstimate();
     }
   };
+
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleText, setTitleText] = useState(task.title);
+  const [editingDue, setEditingDue] = useState(false);
+  const [dueDate, setDueDate] = useState('');
+  const [dueTime, setDueTime] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const closeEditors = () => {
+    setEditingTitle(false);
+    setEditingDue(false);
+    setEditError(null);
+  };
+
+  /** Runs a save; on rejection the editor stays open, holding the only copy of the input. */
+  const save = async (patch: TaskPatch) => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await onPatch(task.id, patch);
+    } catch (err) {
+      console.error('[triage] edit task failed', err);
+      setEditError("Couldn't save that change — your text is still here.");
+      return;
+    } finally {
+      setSaving(false);
+    }
+    closeEditors();
+  };
+
+  const startTitleEdit = () => {
+    setTitleText(task.title);
+    setEditError(null);
+    setEditingTitle(true);
+  };
+
+  const commitTitle = () => {
+    const trimmed = titleText.trim();
+    if (trimmed === '' || trimmed === task.title) {
+      closeEditors();
+      return;
+    }
+    void save({ title: trimmed });
+  };
+
+  const onTitleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitTitle();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeEditors();
+    }
+  };
+
+  const startDueEdit = () => {
+    if (task.dueAt === null) {
+      setDueDate('');
+      setDueTime('');
+    } else {
+      setDueDate(toDateInputValue(task.dueAt));
+      // An end-of-day deadline is how "no time" is stored; show it as blank.
+      setDueTime(task.dueAt === endOfLocalDay(task.dueAt) ? '' : toTimeInputValue(task.dueAt));
+    }
+    setEditError(null);
+    setEditingDue(true);
+  };
+
+  const commitDue = () => {
+    const dueAt = dueAtFromInputs(dueDate, dueTime);
+    if (dueAt === 'invalid' || dueAt === null) {
+      setEditError('Pick a valid date.');
+      return;
+    }
+    void save({ dueAt });
+  };
+
+  const onDueKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitDue();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeEditors();
+    }
+  };
+
+  const canClearDue =
+    task.dueAt !== null && !(task.eventId !== null && syllabusEventIds?.has(task.eventId));
 
   const dueLabel = formatDue(task.dueAt, now);
   // From the data, not from `dueLabel`'s copy: styling must not break the day
@@ -133,16 +241,91 @@ function TaskRow({
       >
         {score}
       </span>
-      <span className="min-w-0 flex-1 truncate text-sm">{task.title}</span>
+      {editingTitle ? (
+        <Input
+          autoFocus
+          aria-label="Task title"
+          value={titleText}
+          onChange={(e) => setTitleText(e.target.value)}
+          onBlur={commitTitle}
+          onKeyDown={onTitleKeyDown}
+          className="min-w-0 flex-1"
+        />
+      ) : (
+        <button
+          type="button"
+          data-testid="task-title"
+          title="Edit title"
+          onClick={startTitleEdit}
+          className="min-w-0 flex-1 truncate text-left text-sm hover:outline hover:outline-1 hover:outline-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {task.title}
+        </button>
+      )}
       {sourceHint ? <span className="text-xs text-muted-foreground">{sourceHint}</span> : null}
-      <span className={cn('text-xs', overdue ? 'text-destructive' : 'text-date')}>{dueLabel}</span>
+      {editingDue ? (
+        <>
+          <Input
+            autoFocus
+            type="date"
+            aria-label="Due date"
+            value={dueDate}
+            onChange={(e) => setDueDate(e.target.value)}
+            onKeyDown={onDueKeyDown}
+            className="w-auto"
+          />
+          <Input
+            type="time"
+            aria-label="Due time"
+            value={dueTime}
+            onChange={(e) => setDueTime(e.target.value)}
+            onKeyDown={onDueKeyDown}
+            className="w-auto"
+          />
+          <Button type="button" size="sm" disabled={saving} aria-label="Save due date" onClick={commitDue}>
+            Save
+          </Button>
+          {canClearDue ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={saving}
+              aria-label="Clear due date"
+              onClick={() => void save({ dueAt: null })}
+            >
+              Clear
+            </Button>
+          ) : null}
+          <Button type="button" size="sm" variant="ghost" aria-label="Cancel due date" onClick={closeEditors}>
+            Cancel
+          </Button>
+        </>
+      ) : task.dueAt === null ? (
+        <Button type="button" size="sm" variant="ghost" aria-label="Add due date" onClick={startDueEdit}>
+          Add due date
+        </Button>
+      ) : (
+        <button
+          type="button"
+          data-testid="task-due"
+          title="Edit due date"
+          onClick={startDueEdit}
+          className={cn(
+            'text-xs hover:outline hover:outline-1 hover:outline-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+            overdue ? 'text-destructive' : 'text-date',
+          )}
+        >
+          {dueLabel}
+        </button>
+      )}
       <Button
         type="button"
         size="sm"
         variant="outline"
         aria-pressed={task.required}
         aria-label="Required"
-        onClick={() => onPatch(task.id, { required: !task.required })}
+        onClick={() => fireAndForget(onPatch(task.id, { required: !task.required }))}
       >
         {task.required ? 'Required' : 'Optional'}
       </Button>
@@ -169,8 +352,30 @@ function TaskRow({
       >
         Dismiss
       </Button>
+      {editError ? (
+        <p role="alert" className="w-full text-xs text-destructive">
+          {editError}
+        </p>
+      ) : null}
     </li>
   );
+}
+
+/** Swallows a rejected patch: for edits that have no error UI of their own (`patchTask` records it). */
+function fireAndForget(result: Promise<void> | void): void {
+  void Promise.resolve(result).catch(() => {});
+}
+
+/**
+ * The due time a date/time input pair means: `null` for no date, the end of
+ * the day when only a date is given, else that moment; `'invalid'` if either
+ * input does not parse.
+ */
+function dueAtFromInputs(date: string, time: string): number | null | 'invalid' {
+  if (date === '') return null;
+  const parsed = localDateTimeFromInputs(date, time);
+  if (parsed === null) return 'invalid';
+  return time === '' ? endOfLocalDay(parsed) : parsed;
 }
 
 function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
@@ -192,23 +397,10 @@ function AddTaskForm({ onAdd }: { onAdd: TaskListProps['onAdd'] }) {
       return;
     }
 
-    let dueAt: number | null = null;
-    if (date !== '') {
-      if (time === '') {
-        const midnight = localDateTimeFromInputs(date, '');
-        if (midnight === null) {
-          setError('Pick a valid date.');
-          return;
-        }
-        dueAt = endOfLocalDay(midnight);
-      } else {
-        const timed = localDateTimeFromInputs(date, time);
-        if (timed === null) {
-          setError('Pick a valid date.');
-          return;
-        }
-        dueAt = timed;
-      }
+    const dueAt = dueAtFromInputs(date, time);
+    if (dueAt === 'invalid') {
+      setError('Pick a valid date.');
+      return;
     }
 
     const estimatedMinutes = parseEstimateMinutes(estimate);

@@ -30,7 +30,8 @@ export interface TriageData {
    * behavior is unchanged.
    */
   addTask(input: CreateTaskInput, opts?: { rethrow?: boolean }): Promise<void>;
-  patchTask(id: string, patch: TaskPatch): Promise<void>;
+  /** `opts.rethrow`: see `addTask`; the inline title and date editors need it. */
+  patchTask(id: string, patch: TaskPatch, opts?: { rethrow?: boolean }): Promise<void>;
   completeTask(id: string): Promise<void>;
   dismissTask(id: string): Promise<void>;
 }
@@ -136,14 +137,14 @@ export function useTriageData(opts?: { syncIntervalMs?: number }): TriageData {
    * to the task's deadline event; the other fields are the task's alone.
    */
   const patchTask = useCallback(
-    (id: string, patch: TaskPatch): Promise<void> =>
+    (id: string, patch: TaskPatch, opts?: { rethrow?: boolean }): Promise<void> =>
       runMutation(async () => {
         const { title, dueAt, ...rest } = patch;
         if (title !== undefined || dueAt !== undefined) {
           await updateTaskSchedule(id, { title, dueAt });
         }
         if (Object.keys(rest).length > 0) await updateTask(id, rest);
-      }),
+      }, opts),
     [runMutation],
   );
 

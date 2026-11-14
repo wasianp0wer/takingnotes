@@ -24,6 +24,11 @@ export function TriageView() {
   const pad = useScratchpad();
   const openTasks = useMemo(() => data.tasks.filter((t) => t.status === 'open'), [data.tasks]);
 
+  const syllabusEventIds = useMemo(
+    () => new Set(data.events.filter((e) => e.source === 'syllabus').map((e) => e.id)),
+    [data.events],
+  );
+
   return (
     <div className="grid min-h-0 gap-4 p-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
       {data.error && (
@@ -39,7 +44,10 @@ export function TriageView() {
           // from a successful one so it never clears the fields - and loses
           // the only copy of what the user typed - on a failed write.
           onAdd={(input) => data.addTask(input, { rethrow: true })}
-          onPatch={data.patchTask}
+          // `rethrow: true`: the inline title and date editors stay open, with
+          // what the user typed, when the write fails.
+          onPatch={(id, patch) => data.patchTask(id, patch, { rethrow: true })}
+          syllabusEventIds={syllabusEventIds}
           onComplete={data.completeTask}
           onDismiss={data.dismissTask}
         />

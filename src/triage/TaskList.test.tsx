@@ -6,6 +6,7 @@ import { endOfLocalDay, localDateTimeFromInputs } from '@/triage/dates';
 import { rankTasks } from '@/triage/priority';
 import { TaskList } from '@/triage/TaskList';
 import { click, mount, typeInto, waitFor } from '@/triage/testing';
+import type { TaskListProps } from '@/triage/TaskList';
 
 const NOW = new Date(2026, 8, 28, 9).getTime(); // Monday 28 Sep 2026, 09:00
 const HOUR = 3_600_000;
@@ -294,7 +295,7 @@ describe('TaskList', () => {
     const m = mount(<TaskList tasks={[overdue]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} />);
     const row = m.container.querySelector('[data-task-id="d"]')!;
     expect(row.textContent).toContain('Overdue');
-    const dueEl = [...row.querySelectorAll('span')].find((el) => el.textContent?.startsWith('Overdue'));
+    const dueEl = row.querySelector('[data-testid="task-due"]');
     expect(dueEl?.className).toContain('text-destructive');
     m.unmount();
   });
@@ -486,5 +487,146 @@ describe('TaskList', () => {
     await waitFor(() => expect(submitButton.disabled).toBe(false));
 
     m.unmount();
+  });
+
+  describe('inline editing', () => {
+    const row = (m: { container: HTMLElement }) => m.container.querySelector('li')!;
+    const byLabel = (root: ParentNode, label: string) =>
+      root.querySelector<HTMLInputElement>(`[aria-label="${label}"]`)!;
+    const key = async (el: Element, k: string) => {
+      await act(async () => {
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+      });
+    };
+    const view = (t: TaskRecord, props: Partial<TaskListProps> = {}) =>
+      mount(<TaskList tasks={[t]} now={NOW} onAdd={noop} onPatch={noop} onComplete={noop} onDismiss={noop} {...props} />);
+    const openTitle = async (m: { container: HTMLElement }) => {
+      await click(row(m).querySelector('[data-testid="task-title"]')!);
+      return byLabel(row(m), 'Task title');
+    };
+
+    it('clicking the title shows an input holding it; Enter saves the new title', async () => {
+      const onPatch = vi.fn();
+      const m = view(URGENT, { onPatch });
+      const input = await openTitle(m);
+      expect(input.value).toBe('Urgent');
+      typeInto(input, 'New');
+      await key(input, 'Enter');
+      expect(onPatch).toHaveBeenCalledWith('a', { title: 'New' });
+      m.unmount();
+    });
+
+    it('blur saves the title', async () => {
+      const onPatch = vi.fn();
+      const m = view(URGENT, { onPatch });
+      const input = await openTitle(m);
+      typeInto(input, 'New');
+      blur(input);
+      expect(onPatch).toHaveBeenCalledWith('a', { title: 'New' });
+      m.unmount();
+    });
+
+    it('Escape restores the old title and calls nothing', async () => {
+      const onPatch = vi.fn();
+      const m = view(URGENT, { onPatch });
+      const input = await openTitle(m);
+      typeInto(input, 'New');
+      await key(input, 'Escape');
+      expect(onPatch).not.toHaveBeenCalled();
+      expect(byLabel(row(m), 'Task title')).toBeNull();
+      expect(row(m).textContent).toContain('Urgent');
+      m.unmount();
+    });
+
+    it('an empty title is not saved and the old one is restored', async () => {
+      const onPatch = vi.fn();
+      const m = view(URGENT, { onPatch });
+      const input = await openTitle(m);
+      typeInto(input, '   ');
+      await key(input, 'Enter');
+      expect(onPatch).not.toHaveBeenCalled();
+      expect(row(m).textContent).toContain('Urgent');
+      m.unmount();
+    });
+
+    it('a rejected title save keeps the editor open with the typed value and an error', async () => {
+      const onPatch = vi.fn().mockRejectedValue(new Error('boom'));
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const m = view(URGENT, { onPatch });
+      const input = await openTitle(m);
+      typeInto(input, 'New');
+      await key(input, 'Enter');
+      expect(byLabel(row(m), 'Task title').value).toBe('New');
+      expect(row(m).querySelector('[role="alert"]')?.textContent).toMatch(/Couldn't save/);
+      spy.mockRestore();
+      m.unmount();
+    });
+
+    it('editing the due date saves the date at the given time', async () => {
+      const onPatch = vi.fn();
+      const m = view(URGENT, { onPatch });
+      await click(row(m).querySelector('[data-testid="task-due"]')!);
+      typeInto(byLabel(row(m), 'Due date'), '2026-10-05');
+      typeInto(byLabel(row(m), 'Due time'), '14:30');
+      await key(byLabel(row(m), 'Due date'), 'Enter');
+      expect(onPatch).toHaveBeenCalledWith('a', { dueAt: localDateTimeFromInputs('2026-10-05', '14:30') });
+      m.unmount();
+    });
+
+    it('with no time the due date is the end of that day', async () => {
+      const onPatch = vi.fn();
+      const m = view(URGENT, { onPatch });
+      await click(row(m).querySelector('[data-testid="task-due"]')!);
+      typeInto(byLabel(row(m), 'Due date'), '2026-10-05');
+      typeInto(byLabel(row(m), 'Due time'), '');
+      await key(byLabel(row(m), 'Due date'), 'Enter');
+      expect(onPatch).toHaveBeenCalledWith('a', {
+        dueAt: endOfLocalDay(localDateTimeFromInputs('2026-10-05', '')!),
+      });
+      m.unmount();
+    });
+
+    it('an undated task offers Add due date, which opens the same editor', async () => {
+      const onPatch = vi.fn();
+      const m = view(LOW, { onPatch });
+      await click(row(m).querySelector('[aria-label="Add due date"]')!);
+      typeInto(byLabel(row(m), 'Due date'), '2026-10-05');
+      await key(byLabel(row(m), 'Due date'), 'Enter');
+      expect(onPatch).toHaveBeenCalledWith('c', {
+        dueAt: endOfLocalDay(localDateTimeFromInputs('2026-10-05', '')!),
+      });
+      m.unmount();
+    });
+
+    it('Clear due date patches dueAt to null', async () => {
+      const onPatch = vi.fn();
+      const m = view(URGENT, { onPatch });
+      await click(row(m).querySelector('[data-testid="task-due"]')!);
+      await click(row(m).querySelector('[aria-label="Clear due date"]')!);
+      expect(onPatch).toHaveBeenCalledWith('a', { dueAt: null });
+      m.unmount();
+    });
+
+    it('Clear due date is absent for a syllabus-linked task', async () => {
+      const linked = task({ id: 's', title: 'Syl', dueAt: NOW + HOUR, source: 'calendar', eventId: 'ev1' });
+      const m = view(linked, { syllabusEventIds: new Set(['ev1']) });
+      await click(row(m).querySelector('[data-testid="task-due"]')!);
+      expect(byLabel(row(m), 'Due date')).not.toBeNull();
+      expect(row(m).querySelector('[aria-label="Clear due date"]')).toBeNull();
+      m.unmount();
+    });
+
+    it('a rejected due save keeps the editor open with the typed value and an error', async () => {
+      const onPatch = vi.fn().mockRejectedValue(new Error('boom'));
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const m = view(URGENT, { onPatch });
+      await click(row(m).querySelector('[data-testid="task-due"]')!);
+      typeInto(byLabel(row(m), 'Due date'), '2026-10-05');
+      await key(byLabel(row(m), 'Due date'), 'Enter');
+      expect(byLabel(row(m), 'Due date').value).toBe('2026-10-05');
+      expect(row(m).querySelector('[role="alert"]')?.textContent).toMatch(/Couldn't save/);
+      spy.mockRestore();
+      m.unmount();
+    });
   });
 });
