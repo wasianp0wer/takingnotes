@@ -1,3 +1,4 @@
+import { FilePlus } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import { useCaptureEngine, useCaptureState } from '@/capture/CaptureContext';
@@ -10,7 +11,7 @@ import { Button } from '@/components/ui/button';
  * turns (A9: pressing it and turning the paper page makes two pages) - and a
  * transient "Page N" indicator shown after any page turn in the active note.
  */
-export function PageTurnControls() {
+export function PageTurnControls({ variant = 'button' }: { variant?: 'button' | 'icon' } = {}) {
   const engine = useCaptureEngine();
   const { activeNoteId } = useCaptureState();
   const [pending, setPending] = useState(false);
@@ -55,6 +56,24 @@ export function PageTurnControls() {
     }
   }
 
+  const title =
+    activeNoteId === null ? 'Start writing to begin a note' : 'Finish this page and start a new one';
+
+  if (variant === 'icon') {
+    return (
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-label="New page"
+        disabled={activeNoteId === null || pending}
+        title={title}
+        onClick={() => void newPage()}
+      >
+        <FilePlus aria-hidden="true" />
+      </Button>
+    );
+  }
+
   return (
     <div className="flex items-center gap-2">
       <span
@@ -68,7 +87,7 @@ export function PageTurnControls() {
         variant="outline"
         size="sm"
         disabled={activeNoteId === null || pending}
-        title={activeNoteId === null ? 'Start writing to begin a note' : 'Finish this page and start a new one'}
+        title={title}
         onClick={() => void newPage()}
       >
         New page

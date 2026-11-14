@@ -396,8 +396,8 @@ feature replaces its own placeholders' bodies and keeps their export names.
 `NotesView` must keep rendering `<PageTurnControls />` in its page toolbar.
 
 > **Superseded by §9.** `NotesView.tsx` and `RecordingsView.tsx` no longer
-> exist. `<PageTurnControls />` is now rendered by `NoteToolbar`, which
-> `NotesHalf` mounts in the Sessions view; that is F4's mount point today.
+> exist. `<PageTurnControls />` is now rendered (as an icon) by `NotesHalf`, in
+> the row beside the Handwriting / Transcription switch; that is F4's mount point today.
 
 ## 5. Testing conventions
 
