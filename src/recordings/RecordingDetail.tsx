@@ -5,6 +5,7 @@ import type { TranscriptionQueue } from '@/audio/transcriptionQueue';
 import { formatClock } from '@/audio/format';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
+import { RecordingPlayer } from '@/recordings/RecordingPlayer';
 import { FindableTranscript } from '@/notes/TranscriptFind';
 import { deleteRecording, getRecordingAudio, updateRecording } from '@/storage/recordings';
 import type { RecordingRecord, TranscriptSegment } from '@/storage/types';
@@ -307,12 +308,12 @@ export function RecordingDetail({
       {audioMissing ? (
         <p className="text-sm text-muted-foreground">Audio is missing</p>
       ) : audioUrl ? (
-        <div className="space-y-2">
-          <audio ref={audioRef} controls src={audioUrl} className="w-full" />
-          <Button variant="outline" size="sm" onClick={downloadAudio}>
-            Download audio
-          </Button>
-        </div>
+        <RecordingPlayer
+          src={audioUrl}
+          durationMs={totalMs}
+          audioRef={audioRef}
+          onDownload={downloadAudio}
+        />
       ) : null}
 
       {transcript === null && (
