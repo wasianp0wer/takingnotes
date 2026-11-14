@@ -52,7 +52,7 @@ export function AudioHalf({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2 p-2">
-      <div className="flex items-center justify-center gap-2">
+      <div className="flex shrink-0 items-center justify-center gap-2">
         <Button
           variant="ghost"
           size="icon-sm"
@@ -76,17 +76,17 @@ export function AudioHalf({
         </Button>
         <span className="text-xs text-timestamp">{formatClock(selected.durationMs)}</span>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto">
-        <RecordingDetail
-          key={selected.id}
-          recording={selected}
-          queue={audioQueue}
-          onDelete={onChanged}
-          onRenamed={onChanged}
-          seek={seek && seek.recordingId === selected.id ? seek : undefined}
-          onSeekApplied={onSeekApplied}
-        />
-      </div>
+      {/* No scrolling wrapper: RecordingDetail fills the rest as a column and
+          scrolls only its transcript, keeping the player pinned above it. */}
+      <RecordingDetail
+        key={selected.id}
+        recording={selected}
+        queue={audioQueue}
+        onDelete={onChanged}
+        onRenamed={onChanged}
+        seek={seek && seek.recordingId === selected.id ? seek : undefined}
+        onSeekApplied={onSeekApplied}
+      />
     </div>
   );
 }

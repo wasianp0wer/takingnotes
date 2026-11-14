@@ -29,8 +29,7 @@ function downloadName(title: string, startedAt: number, type: string): string {
 }
 
 /**
- * A transcript as a list of timestamped lines, each seeking the player, and
- * searchable with Cmd/Ctrl+F while focused.
+ * A transcript as a list of timestamped lines, each seeking the player.
  *
  * Shared by every state that has segments to show - `done`, `running` and
  * `paused` - so a transcription does not change how it reads depending on
@@ -44,23 +43,21 @@ function TranscriptSegments({
   onSeek: (startMs: number) => void;
 }) {
   return (
-    <FindableTranscript>
-      <ul className="space-y-1">
-        {segments.map((segment, index) => (
-          <li key={index} className="flex items-start gap-2 text-sm">
-            <button
-              type="button"
-              data-start-ms={segment.startMs}
-              onClick={() => onSeek(segment.startMs)}
-              className="shrink-0 tabular-nums text-timestamp underline-offset-4 hover:underline"
-            >
-              {formatClock(segment.startMs)}
-            </button>
-            <span className="font-transcript">{segment.text}</span>
-          </li>
-        ))}
-      </ul>
-    </FindableTranscript>
+    <ul className="space-y-1">
+      {segments.map((segment, index) => (
+        <li key={index} className="flex items-start gap-2 text-sm">
+          <button
+            type="button"
+            data-start-ms={segment.startMs}
+            onClick={() => onSeek(segment.startMs)}
+            className="shrink-0 tabular-nums text-timestamp underline-offset-4 hover:underline"
+          >
+            {formatClock(segment.startMs)}
+          </button>
+          <span className="font-transcript">{segment.text}</span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -68,6 +65,11 @@ function TranscriptSegments({
  * The selected recording: an audio player, its transcription status (with
  * live progress while it is the queue's active job) and, once done, a
  * seekable list of transcript segments.
+ *
+ * Laid out as a column that fills its parent: the header, the player, the
+ * status lines and the find bar stay put, and only the transcript region
+ * (`data-audio-scroll`) scrolls, so the controls stay in reach while a long
+ * transcript is read.
  */
 export function RecordingDetail({
   recording,
@@ -245,9 +247,39 @@ export function RecordingDetail({
   const totalMs = (isActive ? queueState.durationMs : null) ?? recording.durationMs;
   const percent = totalMs > 0 ? Math.min(100, Math.round((completedMs / totalMs) * 100)) : 0;
 
+  const showSegments =
+    transcript !== null &&
+    (transcript.status === 'done' ||
+      transcript.status === 'running' ||
+      transcript.status === 'paused') &&
+    transcript.segments.length > 0;
+  // Only a finished transcript without segments falls back to its joined text.
+  const showText =
+    transcript?.status === 'done' && transcript.segments.length === 0 && !!transcript.text;
+  const findable = showSegments || showText;
+
+  // ⚑ Below the status and its controls, not above: on a lecture this list
+  // runs to thousands of lines. Pause and Resume have to stay reachable while
+  // the transcript they act on is being read, so only this region scrolls.
+  //
+  // ⚑ A partial transcript renders the same list the finished one does, not a
+  // paragraph of joined text. Its segments carry their `startMs` exactly as a
+  // finished one's do, so presenting it differently would drop the timestamp
+  // links - and the seek they perform - for the whole time a long job is
+  // running, which is precisely when the owner is most likely to be reading.
+  const scroller = (
+    <div data-audio-scroll className="min-h-0 flex-1 space-y-2 overflow-auto">
+      {showSegments && <TranscriptSegments segments={transcript.segments} onSeek={seekTo} />}
+      {showText && <p className="font-transcript text-sm">{transcript.text}</p>}
+      {transcript?.status === 'done' && !findable && (
+        <p className="text-sm text-muted-foreground">No speech detected</p>
+      )}
+    </div>
+  );
+
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-start justify-between gap-2">
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
+      <div className="flex shrink-0 items-start justify-between gap-2">
         <div>
           {renaming ? (
             <input
@@ -300,24 +332,26 @@ export function RecordingDetail({
       </div>
 
       {deleteError && (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="shrink-0 text-sm text-destructive">
           Could not delete this recording: {deleteError}
         </p>
       )}
 
       {audioMissing ? (
-        <p className="text-sm text-muted-foreground">Audio is missing</p>
+        <p className="shrink-0 text-sm text-muted-foreground">Audio is missing</p>
       ) : audioUrl ? (
-        <RecordingPlayer
-          src={audioUrl}
-          durationMs={totalMs}
-          audioRef={audioRef}
-          onDownload={downloadAudio}
-        />
+        <div className="shrink-0">
+          <RecordingPlayer
+            src={audioUrl}
+            durationMs={totalMs}
+            audioRef={audioRef}
+            onDownload={downloadAudio}
+          />
+        </div>
       ) : null}
 
       {transcript === null && (
-        <div className="space-y-2">
+        <div className="shrink-0 space-y-2">
           <p className="text-sm text-muted-foreground">Not transcribed</p>
           <Button size="sm" onClick={() => void queue.retry(recording.id)}>
             Transcribe
@@ -326,7 +360,7 @@ export function RecordingDetail({
       )}
 
       {transcript?.status === 'pending' && (
-        <div className="space-y-2">
+        <div className="shrink-0 space-y-2">
           <p className="text-sm text-muted-foreground">Queued for transcription</p>
           {(isActive || isQueued) && (
             <Button variant="outline" size="sm" onClick={() => void queue.pause(recording.id)}>
@@ -342,7 +376,7 @@ export function RecordingDetail({
       )}
 
       {transcript?.status === 'paused' && (
-        <div className="space-y-2">
+        <div className="shrink-0 space-y-2">
           <p className="text-sm text-muted-foreground">
             Paused at {formatClock(completedMs)} of {formatClock(totalMs)} ({percent}%)
           </p>
@@ -353,7 +387,7 @@ export function RecordingDetail({
       )}
 
       {transcript?.status === 'running' && (
-        <div className="space-y-2">
+        <div className="shrink-0 space-y-2">
           <p className="text-sm text-muted-foreground">Transcribing…</p>
           {isActive && queueState.stage === 'loading' && (
             <div className="space-y-1">
@@ -398,24 +432,8 @@ export function RecordingDetail({
         </div>
       )}
 
-      {(transcript?.status === 'running' || transcript?.status === 'paused') &&
-        transcript.segments.length > 0 && (
-          // ⚑ Below the status and its controls, not above: on a lecture
-          // this list runs to thousands of lines, and anything after it is
-          // off screen. Pause and Resume have to stay reachable while the
-          // transcript they act on is being read.
-          //
-          // ⚑ The same list the finished transcript renders, not a paragraph
-          // of joined text. A partial transcript's segments carry their
-          // `startMs` exactly as a finished one's do, so presenting it
-          // differently would drop the timestamp links - and the seek they
-          // perform - for the whole time a long job is running, which is
-          // precisely when the owner is most likely to be reading along.
-          <TranscriptSegments segments={transcript.segments} onSeek={seekTo} />
-        )}
-
       {transcript?.status === 'failed' && (
-        <div className="space-y-2">
+        <div className="shrink-0 space-y-2">
           <p role="alert" className="text-sm text-destructive">
             {transcript.error}
           </p>
@@ -425,19 +443,16 @@ export function RecordingDetail({
         </div>
       )}
 
+      {/* Cmd/Ctrl+F opens the find bar above the scroller, so it stays
+          pinned while the matches it steps through scroll beneath it. */}
+      {findable ? (
+        <FindableTranscript className="min-h-0 flex-1">{scroller}</FindableTranscript>
+      ) : (
+        scroller
+      )}
+      {/* Outside the scroller, so a search never matches the model's name. */}
       {transcript?.status === 'done' && (
-        <div className="space-y-2">
-          {transcript.segments.length === 0 && !transcript.text ? (
-            <p className="text-sm text-muted-foreground">No speech detected</p>
-          ) : transcript.segments.length > 0 ? (
-            <TranscriptSegments segments={transcript.segments} onSeek={seekTo} />
-          ) : (
-            <FindableTranscript>
-              <p className="font-transcript text-sm">{transcript.text}</p>
-            </FindableTranscript>
-          )}
-          <p className="text-xs text-muted-foreground">{transcript.model}</p>
-        </div>
+        <p className="shrink-0 text-xs text-muted-foreground">{transcript.model}</p>
       )}
     </div>
   );

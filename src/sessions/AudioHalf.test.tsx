@@ -98,6 +98,14 @@ describe('AudioHalf', () => {
     expect(container.textContent).toBe('');
   });
 
+  it('leaves scrolling to the recording detail: no scrolling wrapper around it', () => {
+    render(props());
+    const detail = container.querySelector('[data-testid="detail"]')!;
+    for (let el = detail.parentElement; el && el !== container; el = el.parentElement) {
+      expect(el.className.split(/\s+/)).not.toContain('overflow-auto');
+    }
+  });
+
   it('a new recording for the live session becomes selected', () => {
     const p = props({ recordings: three.slice(0, 2), followNewest: true });
     render(p);
