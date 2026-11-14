@@ -52,7 +52,7 @@ describe('emptyEventForm', () => {
       title: '',
       kind: 'deadline',
       date: toDateInputValue(NOW),
-      time: '09:00',
+      time: '21:00',
       allDay: false,
       required: true,
       estimatedMinutes: '60',

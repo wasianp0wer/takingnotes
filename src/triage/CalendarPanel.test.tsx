@@ -41,6 +41,10 @@ const EVENT_OCT5 = event({ id: 'e3', title: 'Study group', kind: 'event', starts
 const DEADLINE_OCT6 = event({ id: 'e4', title: 'Term paper due', kind: 'deadline', startsAt: at(2026, 9, 6, 9) });
 const EVENT_SEP2 = event({ id: 'e5', title: 'Concert', kind: 'event', startsAt: at(2026, 8, 2, 19) });
 
+function addEventButton(): Element {
+  return [...document.body.querySelectorAll('button')].find((b) => b.textContent === 'Add event')!;
+}
+
 const EVENTS = [DEADLINE_SEP29, ALLDAY_SEP29, EVENT_OCT5, DEADLINE_OCT6, EVENT_SEP2];
 
 describe('parseAgendaDays (K23 custom horizon validation)', () => {
@@ -168,14 +172,44 @@ describe('CalendarPanel', () => {
     m.unmount();
   });
 
-  it('clicking a day cell opens the create dialog prefilled with that day', async () => {
+  it('clicking a day cell opens the day dialog, not the event dialog', async () => {
+    const m = mount(<CalendarPanel events={EVENTS} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
+
+    await click(m.container.querySelector('[data-day="2026-09-29"]')!);
+
+    expect(document.body.textContent).toContain('Tomorrow');
+    expect(document.body.textContent).toContain('Essay due');
+    expect(document.body.querySelector('[aria-label="Title"]')).toBeNull();
+
+    m.unmount();
+  });
+
+  it('Add event in the day dialog opens create for that day, defaulting to 21:00', async () => {
     const m = mount(<CalendarPanel events={EVENTS} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
 
     await click(m.container.querySelector('[data-day="2026-09-30"]')!);
+    await click(addEventButton());
 
     expect(document.body.textContent).toContain('New event');
     const dateInput = document.body.querySelector('[aria-label="Date"]') as HTMLInputElement;
     expect(dateInput.value).toBe('2026-09-30');
+    const timeInput = document.body.querySelector('[aria-label="Time"]') as HTMLInputElement;
+    expect(timeInput.value).toBe('21:00');
+    expect(document.body.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+
+    m.unmount();
+  });
+
+  it('clicking an event in the day dialog opens the edit dialog', async () => {
+    const m = mount(<CalendarPanel events={EVENTS} now={NOW} onSaveEvent={vi.fn(async () => {})} onDeleteEvent={vi.fn(async () => {})} />);
+
+    await click(m.container.querySelector('[data-day="2026-09-29"]')!);
+    const dialog = document.body.querySelector('[role="dialog"]')!;
+    const item = [...dialog.querySelectorAll('li button')].find((el) => el.textContent?.includes('Essay due'))!;
+    await click(item);
+
+    expect(document.body.textContent).toContain('Edit event');
+    expect(document.body.querySelectorAll('[role="dialog"]')).toHaveLength(1);
 
     m.unmount();
   });
@@ -212,6 +246,7 @@ describe('CalendarPanel', () => {
     const m = mount(<CalendarPanel events={EVENTS} now={NOW} onSaveEvent={onSaveEvent} onDeleteEvent={vi.fn(async () => {})} />);
 
     await click(m.container.querySelector('[data-day="2026-09-30"]')!);
+    await click(addEventButton());
     const titleInput = document.body.querySelector('[aria-label="Title"]') as HTMLInputElement;
     typeInto(titleInput, 'Buy supplies');
 
